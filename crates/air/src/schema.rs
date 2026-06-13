@@ -43,6 +43,7 @@ stwo_macros::define_air! {
         lt_imm: crate::opcodes::lt_imm,
         shifts_reg: crate::opcodes::shifts_reg,
         shifts_imm: crate::opcodes::shifts_imm,
+        branch_lt: crate::opcodes::branch_lt,
     }
     trace: {
         // base_alu_reg migrated to crate::opcodes::base_alu_reg (external:).
@@ -80,80 +81,7 @@ stwo_macros::define_air! {
         // ==========================================================================
         // 8. Branch Less Than (blt/bltu/bge/bgeu) - airs.md Section 8
         // ==========================================================================
-        branch_lt: {
-            committed: {
-                clock, pc, rs1, rs2,
-                rs1_msl_felt, rs2_msl_felt,
-                imm_felt, cmp_result, cmp_lt,
-                diff_marker_0, diff_marker_1, diff_marker_2, diff_marker_3,
-                diff_val, branch_target,
-                opcode_blt_flag, opcode_bltu_flag, opcode_bge_flag, opcode_bgeu_flag,
-            },
-            derived: {
-                expected_opcode_id: opcode_blt_flag * constant(crate::instructions::Opcode::Blt as u32)
-                    + opcode_bltu_flag * constant(crate::instructions::Opcode::Bltu as u32)
-                    + opcode_bge_flag * constant(crate::instructions::Opcode::Bge as u32)
-                    + opcode_bgeu_flag * constant(crate::instructions::Opcode::Bgeu as u32),
-                lt: opcode_blt_flag + opcode_bltu_flag,
-                ge: opcode_bge_flag + opcode_bgeu_flag,
-                signed: opcode_blt_flag + opcode_bge_flag,
-                rs1_msl_gap: rs1_next_3 - rs1_msl_felt,
-                rs2_msl_gap: rs2_next_3 - rs2_msl_felt,
-                rs1_msl_shifted: rs1_msl_felt + signed * pow2(7),
-                rs2_msl_shifted: rs2_msl_felt + signed * pow2(7),
-                prefix_sum_final: diff_marker_0 + diff_marker_1 + diff_marker_2 + diff_marker_3,
-                lt_sign: 2 * cmp_lt - 1,
-                clock_next: clock + 1,
-                rs1_clock_diff: clock - rs1_clock_prev,
-                rs2_clock_diff: clock - rs2_clock_prev,
-            },
-            constraints: {
-                cmp_result * (1 - cmp_result),
-                diff_marker_0 * (1 - diff_marker_0),
-                diff_marker_1 * (1 - diff_marker_1),
-                diff_marker_2 * (1 - diff_marker_2),
-                diff_marker_3 * (1 - diff_marker_3),
-                // Branch target, gated by enabler (airs.md 8.2)
-                enabler * (branch_target - (pc + imm_felt * cmp_result + 4 * (1 - cmp_result))),
-                rs1_msl_gap * (pow2(8) - rs1_msl_gap),
-                rs2_msl_gap * (pow2(8) - rs2_msl_gap),
-                // Comparison scan from the most significant limb down
-                (1 - diff_marker_3) * (lt_sign * (rs2_msl_felt - rs1_msl_felt)),
-                diff_marker_3 * (diff_val - lt_sign * (rs2_msl_felt - rs1_msl_felt)),
-                (1 - diff_marker_3 - diff_marker_2) * (lt_sign * (rs2_next_2 - rs1_next_2)),
-                diff_marker_2 * (diff_val - lt_sign * (rs2_next_2 - rs1_next_2)),
-                (1 - diff_marker_3 - diff_marker_2 - diff_marker_1)
-                        * (lt_sign * (rs2_next_1 - rs1_next_1)),
-                diff_marker_1 * (diff_val - lt_sign * (rs2_next_1 - rs1_next_1)),
-                (1 - prefix_sum_final) * (lt_sign * (rs2_next_0 - rs1_next_0)),
-                diff_marker_0 * (diff_val - lt_sign * (rs2_next_0 - rs1_next_0)),
-                prefix_sum_final * (1 - prefix_sum_final),
-                (1 - prefix_sum_final) * cmp_lt,
-                // cmp_lt selects less-than under lt opcodes, not-less-than
-                // under ge opcodes
-                cmp_lt - (cmp_result * lt + (1 - cmp_result) * ge),
-            },
-            lookups: {
-                // Program access (B-type): Program(pc, opcode, rs1_idx, rs2_idx, imm)
-                -enabler * program_access(pc, expected_opcode_id, rs1_addr, rs2_addr, imm_felt),
-                // Conditional branch: pc moves to the selected target.
-                -enabler * registers_state(pc, clock),
-                enabler * registers_state(branch_target, clock_next),
-                // Read rs1 (REG_AS = 0).
-                -enabler * memory_access(0, rs1_addr, rs1_clock_prev, rs1_prev_0, rs1_prev_1, rs1_prev_2, rs1_prev_3),
-                enabler * memory_access(0, rs1_addr, clock, rs1_next_0, rs1_next_1, rs1_next_2, rs1_next_3),
-                - enabler * range_check_20(rs1_clock_diff),
-                // Read rs2.
-                -enabler * memory_access(0, rs2_addr, rs2_clock_prev, rs2_prev_0, rs2_prev_1, rs2_prev_2, rs2_prev_3),
-                enabler * memory_access(0, rs2_addr, clock, rs2_next_0, rs2_next_1, rs2_next_2, rs2_next_3),
-                - enabler * range_check_20(rs2_clock_diff),
-                // Most significant limbs shifted into unsigned range under the
-                // signed-comparison convention.
-                - enabler * range_check_8_8(rs1_msl_shifted, rs2_msl_shifted),
-                // When the comparison scan fired, the limb difference is > 0.
-                - prefix_sum_final * range_check_20(diff_val - 1),
-            },
-        },
+        // branch_lt migrated to crate::opcodes::branch_lt (external:).
 
         // LUI (airs.md Section 9) is migrated to a felt function:
         // `crate::opcodes::lui`, folded in via the `external:` section.

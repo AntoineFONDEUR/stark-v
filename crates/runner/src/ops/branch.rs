@@ -181,6 +181,61 @@ pub fn bne(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
 // Branch Less Than (blt/bltu/bge/bgeu) - airs.md Section 8
 // =============================================================================
 
+/// Fill one branch_lt row from the rs1/rs2 reads, the most-significant-limb
+/// witnesses, the immediate, the comparison bits, difference markers, the
+/// selected branch target and the blt/bltu/bge/bgeu flags.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fill_branch_lt(
+    tracer: &mut Tracer,
+    pc: u32,
+    rs1: &crate::trace::Access,
+    rs2: &crate::trace::Access,
+    rs1_msl_felt: u32,
+    rs2_msl_felt: u32,
+    imm_felt: u32,
+    cmp_result: u32,
+    cmp_lt: u32,
+    diff_marker: [u32; 4],
+    diff_val: u32,
+    branch_target: u32,
+    flags: [u32; 4],
+) {
+    use stwo::core::fields::m31::BaseField;
+    let f = BaseField::from_u32_unchecked;
+    let clock = tracer.clock;
+    let limbs = |a: &crate::trace::Access| {
+        [
+            a.addr,
+            a.prev & 0xFF,
+            (a.prev >> 8) & 0xFF,
+            (a.prev >> 16) & 0xFF,
+            (a.prev >> 24) & 0xFF,
+            a.clock_prev,
+            a.next & 0xFF,
+            (a.next >> 8) & 0xFF,
+            (a.next >> 16) & 0xFF,
+            (a.next >> 24) & 0xFF,
+        ]
+    };
+    let mut args = Vec::with_capacity(37);
+    args.extend([clock, pc]);
+    args.extend(limbs(rs1));
+    args.extend(limbs(rs2));
+    args.extend([rs1_msl_felt, rs2_msl_felt, imm_felt, cmp_result, cmp_lt]);
+    args.extend(diff_marker);
+    args.extend([diff_val, branch_target]);
+    args.extend(flags);
+    air::opcodes::branch_lt::branch_lt_fill(
+        &mut tracer.branch_lt,
+        args.into_iter()
+            .map(f)
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("branch_lt fill takes 37 felts"),
+        [],
+    );
+}
+
 pub fn blt(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let rs1 = cpu.read_reg(inst.rs1, tracer);
     let rs2 = cpu.read_reg(inst.rs2, tracer);
@@ -203,12 +258,20 @@ pub fn blt(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let imm_felt = imm_to_felt(inst.imm);
 
     // opcode flags: blt=1, bltu=0, bge=0, bgeu=0
-    trace_op!(branch_lt: tracer, old_pc, rs1, rs2,
-        w.rs1_msl_felt, w.rs2_msl_felt,
-        imm_felt, cmp_result, cmp_lt,
-        w.diff_marker[0], w.diff_marker[1], w.diff_marker[2], w.diff_marker[3],
-        w.diff_val, branch_target,
-        1, 0, 0, 0
+    fill_branch_lt(
+        tracer,
+        old_pc,
+        &rs1,
+        &rs2,
+        w.rs1_msl_felt,
+        w.rs2_msl_felt,
+        imm_felt,
+        cmp_result,
+        cmp_lt,
+        w.diff_marker,
+        w.diff_val,
+        branch_target,
+        [1, 0, 0, 0],
     );
 }
 
@@ -230,12 +293,20 @@ pub fn bltu(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let imm_felt = imm_to_felt(inst.imm);
 
     // opcode flags: blt=0, bltu=1, bge=0, bgeu=0
-    trace_op!(branch_lt: tracer, old_pc, rs1, rs2,
-        w.rs1_msl_felt, w.rs2_msl_felt,
-        imm_felt, cmp_result, cmp_lt,
-        w.diff_marker[0], w.diff_marker[1], w.diff_marker[2], w.diff_marker[3],
-        w.diff_val, branch_target,
-        0, 1, 0, 0
+    fill_branch_lt(
+        tracer,
+        old_pc,
+        &rs1,
+        &rs2,
+        w.rs1_msl_felt,
+        w.rs2_msl_felt,
+        imm_felt,
+        cmp_result,
+        cmp_lt,
+        w.diff_marker,
+        w.diff_val,
+        branch_target,
+        [0, 1, 0, 0],
     );
 }
 
@@ -265,12 +336,20 @@ pub fn bge(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let imm_felt = imm_to_felt(inst.imm);
 
     // opcode flags: blt=0, bltu=0, bge=1, bgeu=0
-    trace_op!(branch_lt: tracer, old_pc, rs1, rs2,
-        w.rs1_msl_felt, w.rs2_msl_felt,
-        imm_felt, cmp_result, cmp_lt,
-        w.diff_marker[0], w.diff_marker[1], w.diff_marker[2], w.diff_marker[3],
-        w.diff_val, branch_target,
-        0, 0, 1, 0
+    fill_branch_lt(
+        tracer,
+        old_pc,
+        &rs1,
+        &rs2,
+        w.rs1_msl_felt,
+        w.rs2_msl_felt,
+        imm_felt,
+        cmp_result,
+        cmp_lt,
+        w.diff_marker,
+        w.diff_val,
+        branch_target,
+        [0, 0, 1, 0],
     );
 }
 
@@ -292,11 +371,19 @@ pub fn bgeu(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let imm_felt = imm_to_felt(inst.imm);
 
     // opcode flags: blt=0, bltu=0, bge=0, bgeu=1
-    trace_op!(branch_lt: tracer, old_pc, rs1, rs2,
-        w.rs1_msl_felt, w.rs2_msl_felt,
-        imm_felt, cmp_result, cmp_lt,
-        w.diff_marker[0], w.diff_marker[1], w.diff_marker[2], w.diff_marker[3],
-        w.diff_val, branch_target,
-        0, 0, 0, 1
+    fill_branch_lt(
+        tracer,
+        old_pc,
+        &rs1,
+        &rs2,
+        w.rs1_msl_felt,
+        w.rs2_msl_felt,
+        imm_felt,
+        cmp_result,
+        cmp_lt,
+        w.diff_marker,
+        w.diff_val,
+        branch_target,
+        [0, 0, 0, 1],
     );
 }

@@ -9,7 +9,7 @@ stwo_macros::components! {
         base_alu_imm: air::opcodes::base_alu_imm::component,
         base_alu_reg: air::opcodes::base_alu_reg::component,
         branch_eq: air::opcodes::branch_eq::component,
-        branch_lt,
+        branch_lt: air::opcodes::branch_lt::component,
         div,
         jal: air::opcodes::jal::component,
         jalr: air::opcodes::jalr::component,

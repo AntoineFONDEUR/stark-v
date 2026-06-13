@@ -6,7 +6,7 @@
 stwo_macros::components! {
     trace: {
         auipc: air::opcodes::auipc::component,
-        base_alu_imm,
+        base_alu_imm: air::opcodes::base_alu_imm::component,
         base_alu_reg,
         branch_eq,
         branch_lt,

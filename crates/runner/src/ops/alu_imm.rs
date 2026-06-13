@@ -23,6 +23,59 @@ pub(crate) fn decode_imm_limbs(imm: i32) -> (u32, u32, u32) {
     (imm_0, imm_1, imm_msb)
 }
 
+/// Fill one base_alu_imm row in the felt-function table from the rs1 read
+/// and rd write accesses, the immediate limbs, and the one-hot opcode flags.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fill_base_alu_imm(
+    tracer: &mut Tracer,
+    pc: u32,
+    rd: &crate::trace::Access,
+    rs1: &crate::trace::Access,
+    imm_0: u32,
+    imm_1: u32,
+    imm_msb: u32,
+    flags: [u32; 4],
+) {
+    use stwo::core::fields::m31::BaseField;
+    let f = BaseField::from_u32_unchecked;
+    let clock = tracer.clock;
+    air::opcodes::base_alu_imm::base_alu_imm_fill(
+        &mut tracer.base_alu_imm,
+        [
+            f(clock),
+            f(pc),
+            f(rd.addr),
+            f(rd.prev & 0xFF),
+            f((rd.prev >> 8) & 0xFF),
+            f((rd.prev >> 16) & 0xFF),
+            f((rd.prev >> 24) & 0xFF),
+            f(rd.clock_prev),
+            f(rd.next & 0xFF),
+            f((rd.next >> 8) & 0xFF),
+            f((rd.next >> 16) & 0xFF),
+            f((rd.next >> 24) & 0xFF),
+            f(rs1.addr),
+            f(rs1.prev & 0xFF),
+            f((rs1.prev >> 8) & 0xFF),
+            f((rs1.prev >> 16) & 0xFF),
+            f((rs1.prev >> 24) & 0xFF),
+            f(rs1.clock_prev),
+            f(rs1.next & 0xFF),
+            f((rs1.next >> 8) & 0xFF),
+            f((rs1.next >> 16) & 0xFF),
+            f((rs1.next >> 24) & 0xFF),
+            f(imm_0),
+            f(imm_1),
+            f(imm_msb),
+            f(flags[0]),
+            f(flags[1]),
+            f(flags[2]),
+            f(flags[3]),
+        ],
+        [],
+    );
+}
+
 // =============================================================================
 // Base ALU Imm (addi/xori/ori/andi) - airs.md Section 2
 // =============================================================================
@@ -36,9 +89,15 @@ pub fn addi(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
 
     let (imm_0, imm_1, imm_msb) = decode_imm_limbs(inst.imm);
     // opcode flags: add=1, xor=0, or=0, and=0
-    trace_op!(base_alu_imm: tracer, old_pc, rd, rs1,
-        imm_0, imm_1, imm_msb,
-        1, 0, 0, 0
+    fill_base_alu_imm(
+        tracer,
+        old_pc,
+        &rd,
+        &rs1,
+        imm_0,
+        imm_1,
+        imm_msb,
+        [1, 0, 0, 0],
     );
 }
 
@@ -51,9 +110,15 @@ pub fn xori(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
 
     let (imm_0, imm_1, imm_msb) = decode_imm_limbs(inst.imm);
     // opcode flags: add=0, xor=1, or=0, and=0
-    trace_op!(base_alu_imm: tracer, old_pc, rd, rs1,
-        imm_0, imm_1, imm_msb,
-        0, 1, 0, 0
+    fill_base_alu_imm(
+        tracer,
+        old_pc,
+        &rd,
+        &rs1,
+        imm_0,
+        imm_1,
+        imm_msb,
+        [0, 1, 0, 0],
     );
 }
 
@@ -66,9 +131,15 @@ pub fn ori(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
 
     let (imm_0, imm_1, imm_msb) = decode_imm_limbs(inst.imm);
     // opcode flags: add=0, xor=0, or=1, and=0
-    trace_op!(base_alu_imm: tracer, old_pc, rd, rs1,
-        imm_0, imm_1, imm_msb,
-        0, 0, 1, 0
+    fill_base_alu_imm(
+        tracer,
+        old_pc,
+        &rd,
+        &rs1,
+        imm_0,
+        imm_1,
+        imm_msb,
+        [0, 0, 1, 0],
     );
 }
 
@@ -81,9 +152,15 @@ pub fn andi(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
 
     let (imm_0, imm_1, imm_msb) = decode_imm_limbs(inst.imm);
     // opcode flags: add=0, xor=0, or=0, and=1
-    trace_op!(base_alu_imm: tracer, old_pc, rd, rs1,
-        imm_0, imm_1, imm_msb,
-        0, 0, 0, 1
+    fill_base_alu_imm(
+        tracer,
+        old_pc,
+        &rd,
+        &rs1,
+        imm_0,
+        imm_1,
+        imm_msb,
+        [0, 0, 0, 1],
     );
 }
 

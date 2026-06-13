@@ -5,6 +5,7 @@
 //! and wired into the prover through `components! { … name: module … }`.
 
 pub mod auipc;
+pub mod base_alu_imm;
 pub mod jal;
 pub mod jalr;
 pub mod lui;

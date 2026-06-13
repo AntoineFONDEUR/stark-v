@@ -34,8 +34,8 @@ use syn::punctuated::Punctuated;
 use syn::{Expr, Ident, Token, braced, bracketed, parenthesized, parse_macro_input};
 
 use crate::trace_tables::{
-    LookupsDef, OpcodeDef, column_struct_name, const_eval, generate_prover_columns, generate_table,
-    table_name,
+    LookupsDef, OpcodeDef, column_struct_name, const_eval, count_opcode_flags,
+    generate_prover_columns, generate_table, table_name,
 };
 
 fn to_pascal_case(s: &str) -> String {
@@ -76,20 +76,30 @@ enum FnStmt {
     },
     /// `emit r(args);` / `consume r(args);` — a row's contribution to an
     /// externally declared relation `r` (declared `relation r(arity);` at
-    /// the top of the macro). `emit` adds `+enabler / combine(args)`,
-    /// `consume` adds `-enabler / ...`. The relation balances across the
-    /// whole proof (and, when shared, across proofs), exactly like the
-    /// per-function io activation tuples.
+    /// the top of the macro). `emit` adds `+mult / combine(args)`, `consume`
+    /// adds `-mult / ...`, where `mult` defaults to `enabler` but may be
+    /// overridden by `emit(expr) r(args)` / `consume(expr) r(args)` for
+    /// flag-gated lookups (e.g. `consume(is_bitwise) bitwise(...)`). The
+    /// relation balances across the whole proof, like the per-function io
+    /// activation tuples.
     Relation {
         relation: Ident,
         args: Vec<Expr>,
         emit: bool,
+        /// Multiplicity expression; `None` means `enabler`.
+        mult: Option<Expr>,
     },
     /// `hint name = expr;` — a prover-chosen committed column, free in the
     /// AIR (the body constrains it with `assert`s), filled by evaluating
     /// `expr` concretely. Opcodes use this for witness columns that are not
     /// in-row derivations (carries, sign decompositions, inverse markers).
     Hint { name: Ident, expr: Expr },
+    /// `constrain expr;` — asserts `expr == 0` **without** the implicit
+    /// enabler gate that `assert` adds. For constraints already gated by an
+    /// opcode flag (e.g. `flag * carry * (1 - carry)`), where multiplying by
+    /// enabler too would breach the degree budget; the flag zeroes the
+    /// constraint on padding rows.
+    Constrain { expr: Expr },
 }
 
 struct AirFn {
@@ -346,10 +356,28 @@ fn parse_block(
             && input
                 .cursor()
                 .ident()
+                .is_some_and(|(i, _)| i == "constrain")
+        {
+            input.parse::<Ident>()?;
+            let expr: Expr = input.parse()?;
+            input.parse::<Token![;]>()?;
+            body.push(FnStmt::Constrain { expr });
+        } else if input.peek(Ident)
+            && input
+                .cursor()
+                .ident()
                 .is_some_and(|(i, _)| i == "emit" || i == "consume")
         {
             let keyword: Ident = input.parse()?;
             let emit = keyword == "emit";
+            // Optional multiplicity: `emit(expr) r(args)` / `consume(expr) r(args)`.
+            let mult = if input.peek(syn::token::Paren) {
+                let mult_content;
+                parenthesized!(mult_content in input);
+                Some(mult_content.parse::<Expr>()?)
+            } else {
+                None
+            };
             let relation: Ident = input.parse()?;
             let args_content;
             parenthesized!(args_content in input);
@@ -360,6 +388,7 @@ fn parse_block(
                 relation,
                 args: args.into_iter().collect(),
                 emit,
+                mult,
             });
         } else if allow_return && input.peek(Token![return]) {
             input.parse::<Token![return]>()?;
@@ -446,13 +475,18 @@ fn substitute_stmt(stmt: &FnStmt, var: &Ident, value: usize) -> FnStmt {
             relation,
             args,
             emit,
+            mult,
         } => FnStmt::Relation {
             relation: relation.clone(),
             args: args.iter().map(|a| substitute(a, var, value)).collect(),
             emit: *emit,
+            mult: mult.as_ref().map(|m| substitute(m, var, value)),
         },
         FnStmt::Hint { name, expr } => FnStmt::Hint {
             name: name.clone(),
+            expr: substitute(expr, var, value),
+        },
+        FnStmt::Constrain { expr } => FnStmt::Constrain {
             expr: substitute(expr, var, value),
         },
     }
@@ -541,11 +575,14 @@ struct Lowerer<'a> {
     /// Inline (derived) cells: (name, lowered expr), in creation order.
     derived: Vec<(Ident, Expr)>,
     constraints: Vec<Expr>,
+    /// Ungated constraints from `constrain` (added without the enabler gate).
+    raw_constraints: Vec<Expr>,
     fill: Vec<FillStep>,
     /// Activations made: (callee, flattened arg cells, flattened ret cells).
     calls: Vec<(Ident, Vec<Ident>, Vec<Ident>)>,
-    /// External relation contributions: (relation, flattened arg cells, emit).
-    relation_entries: Vec<(Ident, Vec<Ident>, bool)>,
+    /// External relation contributions: (relation, arg cells, emit, mult cell;
+    /// mult `None` means enabler).
+    relation_entries: Vec<(Ident, Vec<Ident>, bool, Option<Ident>)>,
     /// Common-subexpression cache for materialized cells.
     cse: HashMap<String, Ident>,
     /// Flattened signatures of table-backed functions lowered so far.
@@ -746,6 +783,21 @@ impl Lowerer<'_> {
                     && func.path.is_ident("constant")
                 {
                     return Ok((expr.clone(), 0));
+                }
+                if let Expr::Path(func) = call.func.as_ref()
+                    && func.path.is_ident("inv")
+                    && call.args.len() == 1
+                {
+                    // inv(c): multiplicative inverse of a constant, folded to
+                    // a field-constant literal at expansion (Fermat). Degree 0.
+                    let value = crate::trace_tables::const_eval(&call.args[0])?;
+                    if value == 0 {
+                        return Err(syn::Error::new_spanned(call, "cannot invert zero"));
+                    }
+                    let inverse =
+                        crate::trace_tables::m31_pow(value, crate::trace_tables::M31_PRIME - 2)
+                            as u32;
+                    return Ok((syn::parse_quote!(#inverse), 0));
                 }
                 if let Expr::Path(func) = call.func.as_ref()
                     && func.path.is_ident("sum")
@@ -1073,6 +1125,7 @@ impl Lowerer<'_> {
                     relation,
                     args,
                     emit,
+                    mult,
                 } => {
                     let Some(&arity) = self.relation_arities.get(&relation.to_string()) else {
                         return Err(syn::Error::new_spanned(
@@ -1082,9 +1135,31 @@ impl Lowerer<'_> {
                             ),
                         ));
                     };
+                    // Lower an expression to a cell, reusing a bare column/cell
+                    // directly (only compound expressions get a fresh cell).
+                    let to_cell =
+                        |lowerer: &mut Self, expr: &Expr, base: Ident| -> syn::Result<Ident> {
+                            let (lowered, degree) = lowerer.lower(expr, scope, budget)?;
+                            if let Expr::Path(path) = &lowered
+                                && let Some(ident) = path.path.get_ident()
+                            {
+                                return Ok(ident.clone());
+                            }
+                            Ok(lowerer.register_derived(&base, lowered, degree))
+                        };
+
+                    // Optional multiplicity (default: enabler).
+                    let mult_cell = match mult {
+                        None => None,
+                        Some(expr) => {
+                            let base =
+                                format_ident!("{}_mult{}", relation, self.relation_entries.len());
+                            Some(to_cell(self, expr, base)?)
+                        }
+                    };
+
                     // Mirror activation-argument lowering: arrays flatten,
-                    // scalars lower into derived cells so the tuple
-                    // references cells only.
+                    // scalars lower into cells so the tuple references cells.
                     let mut arg_cells = Vec::new();
                     for arg in args {
                         if let Ok(ident) = expect_ident(arg)
@@ -1095,18 +1170,8 @@ impl Lowerer<'_> {
                             }
                             continue;
                         }
-                        let (lowered, degree) = self.lower(arg, scope, budget)?;
-                        // A bare column/cell needs no materialization — the
-                        // tuple references it directly (like the own-io
-                        // tuple). Only compound expressions get a cell.
-                        if let Expr::Path(path) = &lowered
-                            && let Some(ident) = path.path.get_ident()
-                        {
-                            arg_cells.push(ident.clone());
-                            continue;
-                        }
                         let base = format_ident!("{}_e{}", relation, self.relation_entries.len());
-                        arg_cells.push(self.register_derived(&base, lowered, degree));
+                        arg_cells.push(to_cell(self, arg, base)?);
                     }
                     if arg_cells.len() != arity {
                         return Err(syn::Error::new_spanned(
@@ -1118,7 +1183,7 @@ impl Lowerer<'_> {
                         ));
                     }
                     self.relation_entries
-                        .push((relation.clone(), arg_cells, *emit));
+                        .push((relation.clone(), arg_cells, *emit, mult_cell));
                 }
                 FnStmt::Hint { name, expr } => {
                     // A committed column (free in the AIR), filled by
@@ -1131,6 +1196,13 @@ impl Lowerer<'_> {
                         expr: lowered,
                     });
                     scope.insert(name.to_string(), Value::Scalar { cell, degree: 1 });
+                }
+                FnStmt::Constrain { expr } => {
+                    // Ungated: the full degree budget is available (no enabler
+                    // factor). The constraint must vanish on padding by its
+                    // own structure (e.g. an opcode-flag factor).
+                    let (lowered, _) = self.lower(expr, scope, self.max_degree)?;
+                    self.raw_constraints.push(lowered);
                 }
             }
         }
@@ -1229,15 +1301,18 @@ fn clone_body(body: &[FnStmt]) -> Vec<FnStmt> {
                 relation,
                 args,
                 emit,
+                mult,
             } => FnStmt::Relation {
                 relation: relation.clone(),
                 args: args.clone(),
                 emit: *emit,
+                mult: mult.clone(),
             },
             FnStmt::Hint { name, expr } => FnStmt::Hint {
                 name: name.clone(),
                 expr: expr.clone(),
             },
+            FnStmt::Constrain { expr } => FnStmt::Constrain { expr: expr.clone() },
         })
         .collect()
 }
@@ -1256,10 +1331,12 @@ struct LoweredFn {
     derived: Vec<(Ident, Expr)>,
     /// Materialization equalities and asserts, over cells.
     constraints: Vec<Expr>,
+    /// Ungated `constrain` constraints (no enabler gate).
+    raw_constraints: Vec<Expr>,
     /// Activations made: (callee, arg cells, ret cells).
     calls: Vec<(Ident, Vec<Ident>, Vec<Ident>)>,
-    /// External relation contributions: (relation, arg cells, emit).
-    relation_entries: Vec<(Ident, Vec<Ident>, bool)>,
+    /// External relation contributions: (relation, arg cells, emit, mult cell).
+    relation_entries: Vec<(Ident, Vec<Ident>, bool, Option<Ident>)>,
     fill: Vec<FillStep>,
     ret_cells: Vec<Ident>,
 }
@@ -1282,6 +1359,7 @@ fn lower_fn(
         extra_columns: Vec::new(),
         derived: Vec::new(),
         constraints: Vec::new(),
+        raw_constraints: Vec::new(),
         fill: Vec::new(),
         calls: Vec::new(),
         relation_entries: Vec::new(),
@@ -1363,6 +1441,7 @@ fn lower_fn(
         table,
         derived: lowerer.derived,
         constraints: lowerer.constraints,
+        raw_constraints: lowerer.raw_constraints,
         calls: lowerer.calls,
         relation_entries: lowerer.relation_entries,
         fill: lowerer.fill,
@@ -1490,6 +1569,16 @@ fn generate_evaluation_impl(function: &LoweredFn) -> syn::Result<TokenStream2> {
         .chain(function.table.fields.iter().map(|f| f.to_string()))
         .collect();
 
+    // Flag tables (opcode_*_flag columns) have no `enabler` column — the
+    // shared column generator synthesizes `enabler()` as the flag sum, so the
+    // row-activity indicator is sound by construction. Non-flag tables use the
+    // committed `enabler` column.
+    let enabler = if count_opcode_flags(&function.table.fields) == 0 {
+        quote! { self.enabler.clone() }
+    } else {
+        quote! { self.enabler() }
+    };
+
     let mut cell_indices: HashMap<String, usize> = HashMap::new();
     let mut cell_pushes: Vec<TokenStream2> = Vec::new();
     for (cell, expr) in &function.derived {
@@ -1530,7 +1619,7 @@ fn generate_evaluation_impl(function: &LoweredFn) -> syn::Result<TokenStream2> {
         T::from(stwo::core::fields::m31::BaseField::from_u32_unchecked(1u32))
     };
     let mut constraint_exprs = vec![quote! {
-        self.enabler.clone() * (#one - self.enabler.clone())
+        #enabler * (#one - #enabler)
     }];
     for constraint in &function.constraints {
         // Enabler-gated: padding rows are all-zero, which constant terms in
@@ -1538,8 +1627,13 @@ fn generate_evaluation_impl(function: &LoweredFn) -> syn::Result<TokenStream2> {
         // max_degree - 1, so the gate stays within the bound.
         let expr = air_expr(constraint, &columns, &cell_indices)?;
         constraint_exprs.push(quote! {
-            self.enabler.clone() * (#expr)
+            #enabler * (#expr)
         });
+    }
+    for constraint in &function.raw_constraints {
+        // Ungated `constrain`: vanishes on padding by its own structure.
+        let expr = air_expr(constraint, &columns, &cell_indices)?;
+        constraint_exprs.push(expr);
     }
     let constraint_pushes: Vec<TokenStream2> = constraint_exprs
         .iter()
@@ -1580,7 +1674,7 @@ fn generate_evaluation_impl(function: &LoweredFn) -> syn::Result<TokenStream2> {
         .collect::<syn::Result<Vec<_>>>()?;
     let mut entry_exprs = vec![quote! {
         (
-            (-self.enabler.clone()),
+            (-(#enabler)),
             vec![#(#own_values),*],
         )
     }];
@@ -1592,7 +1686,7 @@ fn generate_evaluation_impl(function: &LoweredFn) -> syn::Result<TokenStream2> {
             .collect::<syn::Result<Vec<_>>>()?;
         entry_exprs.push(quote! {
             (
-                self.enabler.clone(),
+                #enabler,
                 vec![#(#values),*],
             )
         });
@@ -1600,15 +1694,19 @@ fn generate_evaluation_impl(function: &LoweredFn) -> syn::Result<TokenStream2> {
     // External relation entries follow the activation entries, in lowering
     // order — the same order `generate_component_module` lists their
     // relation names, so the positional entry→relation mapping holds.
-    for (_, cells, emit) in &function.relation_entries {
+    for (_, cells, emit, mult_cell) in &function.relation_entries {
         let values = cells
             .iter()
             .map(|cell| air_expr(&syn::parse_quote!(#cell), &columns, &cell_indices))
             .collect::<syn::Result<Vec<_>>>()?;
+        let mult = match mult_cell {
+            Some(cell) => air_expr(&syn::parse_quote!(#cell), &columns, &cell_indices)?,
+            None => enabler.clone(),
+        };
         let numerator = if *emit {
-            quote! { self.enabler.clone() }
+            mult
         } else {
-            quote! { -self.enabler.clone() }
+            quote! { -(#mult) }
         };
         entry_exprs.push(quote! {
             (
@@ -1924,12 +2022,20 @@ fn is_preprocessed_relation(name: &Ident) -> bool {
 /// an opcode is a trace table the runner fills, not an activated function.
 fn generate_embedded_opcode_component(function: &LoweredFn) -> TokenStream2 {
     let columns_type = column_struct_name(&function.name);
+    // SIMD length column: the first committed column (flag tables have no
+    // `enabler` column to measure).
+    let len_col = function
+        .table
+        .fields
+        .first()
+        .cloned()
+        .unwrap_or_else(|| format_ident!("enabler"));
     let n_entries = function.relation_entries.len();
     let indices: Vec<usize> = (0..n_entries).collect();
     let relations: Vec<&Ident> = function
         .relation_entries
         .iter()
-        .map(|(relation, _, _)| relation)
+        .map(|(relation, _, _, _)| relation)
         .collect();
 
     // Preprocessed entries (range checks / bitwise): their per-row
@@ -1938,8 +2044,8 @@ fn generate_embedded_opcode_component(function: &LoweredFn) -> TokenStream2 {
         .relation_entries
         .iter()
         .enumerate()
-        .filter(|(_, (relation, _, _))| is_preprocessed_relation(relation))
-        .map(|(index, (relation, _, _))| (index, relation))
+        .filter(|(_, (relation, _, _, _))| is_preprocessed_relation(relation))
+        .map(|(index, (relation, _, _, _))| (index, relation))
         .collect();
     let pp_slots: Vec<usize> = (0..preprocessed.len()).collect();
     let pp_entry_indices: Vec<usize> = preprocessed.iter().map(|(i, _)| *i).collect();
@@ -2028,7 +2134,7 @@ fn generate_embedded_opcode_component(function: &LoweredFn) -> TokenStream2 {
                         return (vec![], QM31::zero());
                     }
                     let cols = #columns_type::from_iter(trace.iter().map(|eval| &eval.values.data));
-                    let simd_size = cols.enabler.len();
+                    let simd_size = cols.#len_col.len();
                     let log_size = trace[0].domain.log_size();
                     let mut logup_gen = LogupTraceGenerator::new(log_size);
 
@@ -2077,7 +2183,7 @@ fn generate_embedded_opcode_component(function: &LoweredFn) -> TokenStream2 {
                     }
                     let _ = (&counters,);
                     let cols = #columns_type::from_iter(trace.iter().map(|eval| &eval.values.data));
-                    let simd_size = cols.enabler.len();
+                    let simd_size = cols.#len_col.len();
                     let mut multiplicities: Vec<Vec<stwo::prover::backend::simd::m31::PackedM31>> =
                         vec![Vec::with_capacity(simd_size); #n_preprocessed];
                     let mut elements: Vec<Vec<Vec<stwo::prover::backend::simd::m31::PackedM31>>> =
@@ -2296,8 +2402,15 @@ fn generate_embedded_fill(function: &LoweredFn, flags: &[Ident]) -> syn::Result<
         }
     }
 
-    // Row layout: enabler, the lowered fields, then the flags.
-    let mut row_values: Vec<TokenStream2> = vec![quote!(1u32)];
+    // Row layout: the leading `enabler` column (1 for filled rows) exists
+    // only on non-flag tables — flag tables synthesize `enabler()` from the
+    // opcode flags and have no enabler column. Then the lowered fields, then
+    // the embedded flags.
+    let mut row_values: Vec<TokenStream2> = if count_opcode_flags(&function.table.fields) == 0 {
+        vec![quote!(1u32)]
+    } else {
+        vec![]
+    };
     for field in &function.table.fields[..function.table.fields.len() - n_flags] {
         row_values.push(quote!(#field.0));
     }
@@ -2392,7 +2505,7 @@ fn generate_component_module(function: &LoweredFn) -> TokenStream2 {
             function
                 .relation_entries
                 .iter()
-                .map(|(relation, _, _)| relation),
+                .map(|(relation, _, _, _)| relation),
         )
         .collect();
     let doc = format!("{name} component, generated from its felt function.");

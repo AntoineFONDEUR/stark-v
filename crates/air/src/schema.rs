@@ -34,6 +34,7 @@ stwo_macros::define_air! {
         auipc: crate::opcodes::auipc,
         jal: crate::opcodes::jal,
         jalr: crate::opcodes::jalr,
+        base_alu_imm: crate::opcodes::base_alu_imm,
     }
     trace: {
         base_alu_reg: {
@@ -108,69 +109,7 @@ stwo_macros::define_air! {
         // ==========================================================================
         // 2. Base ALU Imm (addi/xori/ori/andi) - airs.md Section 2
         // ==========================================================================
-        base_alu_imm: {
-            committed: {
-                clock, pc, rd, rs1,
-                imm_0, imm_1, imm_msb,
-                opcode_add_flag, opcode_xor_flag, opcode_or_flag, opcode_and_flag,
-            },
-            derived: {
-                // Opcode id encoded in the program segment, selected by the active flag
-                expected_opcode_id: opcode_add_flag * constant(crate::instructions::Opcode::Addi as u32)
-                    + opcode_xor_flag * constant(crate::instructions::Opcode::Xori as u32)
-                    + opcode_or_flag * constant(crate::instructions::Opcode::Ori as u32)
-                    + opcode_and_flag * constant(crate::instructions::Opcode::Andi as u32),
-                // I-type immediate: imm_0 (8 bits) + imm_1 (3 bits) + sign bit (airs.md 2.2)
-                imm: imm_0 + pow2(8) * imm_1 + pow2(11) * imm_msb,
-                // Sign-extended immediate limbs; limb 0 is imm_0 and limb 3 equals limb 2
-                sext_imm_1: imm_1 + ((1 << 3) * ((1 << 5) - 1)) * imm_msb,
-                sext_imm_2: ((1 << 8) - 1) * imm_msb,
-                is_bitwise: opcode_xor_flag + opcode_or_flag + opcode_and_flag,
-                // Preprocessed bitwise table id: and=0, or=1, xor=2
-                bitwise_id: 2 * opcode_xor_flag + opcode_or_flag,
-                imm_1_shifted: pow2(8) * imm_1,
-                pc_next: pc + 4,
-                clock_next: clock + 1,
-                rs1_clock_diff: clock - rs1_clock_prev,
-                rd_clock_diff: clock - rd_clock_prev,
-                // Carry chain of rd = rs1 + sext_imm over 8-bit limbs; each carry is 0 or 1
-                carry_0: (rs1_next_0 + imm_0 - rd_next_0) * inv(pow2(8)),
-                carry_1: (rs1_next_1 + sext_imm_1 + carry_0 - rd_next_1) * inv(pow2(8)),
-                carry_2: (rs1_next_2 + sext_imm_2 + carry_1 - rd_next_2) * inv(pow2(8)),
-                carry_3: (rs1_next_3 + sext_imm_2 + carry_2 - rd_next_3) * inv(pow2(8)),
-            },
-            constraints: {
-                imm_msb * (1 - imm_msb),
-                opcode_add_flag * carry_0 * (1 - carry_0),
-                opcode_add_flag * carry_1 * (1 - carry_1),
-                opcode_add_flag * carry_2 * (1 - carry_2),
-                opcode_add_flag * carry_3 * (1 - carry_3),
-            },
-            lookups: {
-                // Program access (I-type): Program(pc, opcode, rd_idx, rs1_idx, imm)
-                -enabler * program_access(pc, expected_opcode_id, rd_addr, rs1_addr, imm),
-                // I-type immediate limb ranges: imm_0 is 8 bits, imm_1 is 3 bits.
-                - enabler * range_check_8_11(imm_0, imm_1_shifted),
-                -enabler * registers_state(pc, clock),
-                enabler * registers_state(pc_next, clock_next),
-                // Read rs1 (REG_AS = 0).
-                -enabler * memory_access(0, rs1_addr, rs1_clock_prev, rs1_prev_0, rs1_prev_1, rs1_prev_2, rs1_prev_3),
-                enabler * memory_access(0, rs1_addr, clock, rs1_next_0, rs1_next_1, rs1_next_2, rs1_next_3),
-                - enabler * range_check_20(rs1_clock_diff),
-                // Bitwise limbs (xor/or/and): Bitwise(rs1[i], sext_imm[i], rd[i], op id).
-                - is_bitwise * bitwise(rs1_next_0, imm_0, rd_next_0, bitwise_id),
-                - is_bitwise * bitwise(rs1_next_1, sext_imm_1, rd_next_1, bitwise_id),
-                - is_bitwise * bitwise(rs1_next_2, sext_imm_2, rd_next_2, bitwise_id),
-                - is_bitwise * bitwise(rs1_next_3, sext_imm_2, rd_next_3, bitwise_id),
-                // rd byte ranges.
-                - enabler * range_check_8_8(rd_next_0, rd_next_1),
-                - enabler * range_check_8_8(rd_next_2, rd_next_3),
-                // Write rd.
-                -enabler * memory_access(0, rd_addr, rd_clock_prev, rd_prev_0, rd_prev_1, rd_prev_2, rd_prev_3),
-                enabler * memory_access(0, rd_addr, clock, rd_next_0, rd_next_1, rd_next_2, rd_next_3),
-                - enabler * range_check_20(rd_clock_diff),
-            },
-        },
+        // base_alu_imm migrated to crate::opcodes::base_alu_imm (external:).
 
         // ==========================================================================
         // 3. Shifts Reg (sll/srl/sra) - airs.md Section 3

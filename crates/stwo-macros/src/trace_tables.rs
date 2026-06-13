@@ -338,7 +338,7 @@ fn is_opcode_flag(name: &str) -> bool {
 
 /// Count the number of opcode flags in the fields list.
 /// Used to determine whether to include an enabler column.
-fn count_opcode_flags(fields: &[Ident]) -> usize {
+pub(crate) fn count_opcode_flags(fields: &[Ident]) -> usize {
     fields
         .iter()
         .filter(|f| is_opcode_flag(&f.to_string()))
@@ -603,10 +603,10 @@ fn field_constant(value: &proc_macro2::TokenStream) -> proc_macro2::TokenStream 
 }
 
 /// The M31 prime, modulus of the base field.
-const M31_PRIME: u64 = (1 << 31) - 1;
+pub(crate) const M31_PRIME: u64 = (1 << 31) - 1;
 
 /// Modular exponentiation in M31, used to invert constants at expansion time.
-fn m31_pow(mut base: u64, mut exp: u64) -> u64 {
+pub(crate) fn m31_pow(mut base: u64, mut exp: u64) -> u64 {
     let mut result = 1u64;
     base %= M31_PRIME;
     while exp > 0 {

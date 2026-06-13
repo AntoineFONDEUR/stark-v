@@ -224,6 +224,62 @@ pub fn sra(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
 // Less Than Reg (slt/sltu) - airs.md Section 5
 // =============================================================================
 
+/// Fill one lt_reg row from the rs1/rs2 reads, rd write, the comparison bit,
+/// the most-significant-limb witnesses, difference markers and the slt/sltu
+/// flags.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fill_lt_reg(
+    tracer: &mut Tracer,
+    pc: u32,
+    rd: &crate::trace::Access,
+    rs1: &crate::trace::Access,
+    rs2: &crate::trace::Access,
+    cmp_result: u32,
+    rs1_msl_felt: u32,
+    rs2_msl_felt: u32,
+    flags: [u32; 2],
+    diff_marker: [u32; 4],
+    diff_val: u32,
+) {
+    use stwo::core::fields::m31::BaseField;
+    let f = BaseField::from_u32_unchecked;
+    let clock = tracer.clock;
+    let limbs = |a: &crate::trace::Access| {
+        [
+            a.addr,
+            a.prev & 0xFF,
+            (a.prev >> 8) & 0xFF,
+            (a.prev >> 16) & 0xFF,
+            (a.prev >> 24) & 0xFF,
+            a.clock_prev,
+            a.next & 0xFF,
+            (a.next >> 8) & 0xFF,
+            (a.next >> 16) & 0xFF,
+            (a.next >> 24) & 0xFF,
+        ]
+    };
+    let rd = limbs(rd);
+    let rs1 = limbs(rs1);
+    let rs2 = limbs(rs2);
+    let mut args = Vec::with_capacity(42);
+    args.extend([clock, pc]);
+    args.extend(rd);
+    args.extend(rs1);
+    args.extend(rs2);
+    args.extend([cmp_result, rs1_msl_felt, rs2_msl_felt, flags[0], flags[1]]);
+    args.extend(diff_marker);
+    args.push(diff_val);
+    air::opcodes::lt_reg::lt_reg_fill(
+        &mut tracer.lt_reg,
+        args.into_iter()
+            .map(f)
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("lt_reg fill takes 42 felts"),
+        [],
+    );
+}
+
 pub fn slt(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let old_pc = cpu.pc;
     let rs1 = cpu.read_reg(inst.rs1, tracer);
@@ -239,11 +295,18 @@ pub fn slt(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let w = compute_lt_reg_witness(rs1.next, rs2.next, true);
 
     // opcode flags: slt=1, sltu=0
-    trace_op!(lt_reg: tracer, old_pc, rd, rs1, rs2,
-        cmp_result, w.rs1_msl_felt, w.rs2_msl_felt,
-        1, 0,  // opcode flags
-        w.diff_marker[0], w.diff_marker[1], w.diff_marker[2], w.diff_marker[3],
-        w.diff_val
+    fill_lt_reg(
+        tracer,
+        old_pc,
+        &rd,
+        &rs1,
+        &rs2,
+        cmp_result,
+        w.rs1_msl_felt,
+        w.rs2_msl_felt,
+        [1, 0],
+        w.diff_marker,
+        w.diff_val,
     );
 }
 
@@ -258,10 +321,17 @@ pub fn sltu(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let w = compute_lt_reg_witness(rs1.next, rs2.next, false);
 
     // opcode flags: slt=0, sltu=1
-    trace_op!(lt_reg: tracer, old_pc, rd, rs1, rs2,
-        cmp_result, w.rs1_msl_felt, w.rs2_msl_felt,
-        0, 1,  // opcode flags
-        w.diff_marker[0], w.diff_marker[1], w.diff_marker[2], w.diff_marker[3],
-        w.diff_val
+    fill_lt_reg(
+        tracer,
+        old_pc,
+        &rd,
+        &rs1,
+        &rs2,
+        cmp_result,
+        w.rs1_msl_felt,
+        w.rs2_msl_felt,
+        [0, 1],
+        w.diff_marker,
+        w.diff_val,
     );
 }

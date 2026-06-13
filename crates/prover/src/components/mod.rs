@@ -8,7 +8,7 @@ stwo_macros::components! {
         auipc: air::opcodes::auipc::component,
         base_alu_imm: air::opcodes::base_alu_imm::component,
         base_alu_reg: air::opcodes::base_alu_reg::component,
-        branch_eq,
+        branch_eq: air::opcodes::branch_eq::component,
         branch_lt,
         div,
         jal: air::opcodes::jal::component,

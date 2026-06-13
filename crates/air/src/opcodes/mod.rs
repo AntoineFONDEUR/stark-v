@@ -7,6 +7,7 @@
 pub mod auipc;
 pub mod base_alu_imm;
 pub mod base_alu_reg;
+pub mod branch_eq;
 pub mod jal;
 pub mod jalr;
 pub mod lui;

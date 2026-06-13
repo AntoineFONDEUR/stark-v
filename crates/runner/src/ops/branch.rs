@@ -8,6 +8,76 @@ use super::utils::{compute_lt_reg_witness, imm_to_felt, m31_inverse};
 use crate::trace::Tracer;
 use crate::{Cpu, DecodedInst};
 
+/// Fill one branch_eq row from the rs1/rs2 reads, the immediate, the
+/// comparison result, the inverse-witness markers, and the beq/bne flags.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fill_branch_eq(
+    tracer: &mut Tracer,
+    pc: u32,
+    rs1: &crate::trace::Access,
+    rs2: &crate::trace::Access,
+    imm_felt: u32,
+    cmp_result: u32,
+    markers: [u32; 4],
+    flags: [u32; 2],
+) {
+    use stwo::core::fields::m31::BaseField;
+    let f = BaseField::from_u32_unchecked;
+    let clock = tracer.clock;
+    let limbs = |a: &crate::trace::Access| {
+        [
+            f(a.addr),
+            f(a.prev & 0xFF),
+            f((a.prev >> 8) & 0xFF),
+            f((a.prev >> 16) & 0xFF),
+            f((a.prev >> 24) & 0xFF),
+            f(a.clock_prev),
+            f(a.next & 0xFF),
+            f((a.next >> 8) & 0xFF),
+            f((a.next >> 16) & 0xFF),
+            f((a.next >> 24) & 0xFF),
+        ]
+    };
+    let rs1 = limbs(rs1);
+    let rs2 = limbs(rs2);
+    air::opcodes::branch_eq::branch_eq_fill(
+        &mut tracer.branch_eq,
+        [
+            f(clock),
+            f(pc),
+            rs1[0],
+            rs1[1],
+            rs1[2],
+            rs1[3],
+            rs1[4],
+            rs1[5],
+            rs1[6],
+            rs1[7],
+            rs1[8],
+            rs1[9],
+            rs2[0],
+            rs2[1],
+            rs2[2],
+            rs2[3],
+            rs2[4],
+            rs2[5],
+            rs2[6],
+            rs2[7],
+            rs2[8],
+            rs2[9],
+            f(imm_felt),
+            f(cmp_result),
+            f(markers[0]),
+            f(markers[1]),
+            f(markers[2]),
+            f(markers[3]),
+            f(flags[0]),
+            f(flags[1]),
+        ],
+        [],
+    );
+}
+
 // =============================================================================
 // Branch Equal (beq/bne) - airs.md Section 7
 // =============================================================================
@@ -57,10 +127,20 @@ pub fn beq(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let imm_felt = imm_to_felt(inst.imm);
 
     // opcode flags: beq=1, bne=0
-    trace_op!(branch_eq: tracer, old_pc, rs1, rs2,
-        imm_felt, cmp_result,
-        w.diff_inv_marker[0], w.diff_inv_marker[1], w.diff_inv_marker[2], w.diff_inv_marker[3],
-        1, 0
+    fill_branch_eq(
+        tracer,
+        old_pc,
+        &rs1,
+        &rs2,
+        imm_felt,
+        cmp_result,
+        [
+            w.diff_inv_marker[0],
+            w.diff_inv_marker[1],
+            w.diff_inv_marker[2],
+            w.diff_inv_marker[3],
+        ],
+        [1, 0],
     );
 }
 
@@ -80,10 +160,20 @@ pub fn bne(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let imm_felt = imm_to_felt(inst.imm);
 
     // opcode flags: beq=0, bne=1
-    trace_op!(branch_eq: tracer, old_pc, rs1, rs2,
-        imm_felt, cmp_result,
-        w.diff_inv_marker[0], w.diff_inv_marker[1], w.diff_inv_marker[2], w.diff_inv_marker[3],
-        0, 1
+    fill_branch_eq(
+        tracer,
+        old_pc,
+        &rs1,
+        &rs2,
+        imm_felt,
+        cmp_result,
+        [
+            w.diff_inv_marker[0],
+            w.diff_inv_marker[1],
+            w.diff_inv_marker[2],
+            w.diff_inv_marker[3],
+        ],
+        [0, 1],
     );
 }
 

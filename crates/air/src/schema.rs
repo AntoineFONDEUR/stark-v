@@ -36,6 +36,7 @@ stwo_macros::define_air! {
         jalr: crate::opcodes::jalr,
         base_alu_imm: crate::opcodes::base_alu_imm,
         base_alu_reg: crate::opcodes::base_alu_reg,
+        branch_eq: crate::opcodes::branch_eq,
     }
     trace: {
         // base_alu_reg migrated to crate::opcodes::base_alu_reg (external:).
@@ -514,56 +515,7 @@ stwo_macros::define_air! {
         // ==========================================================================
         // 7. Branch Equal (beq/bne) - airs.md Section 7
         // ==========================================================================
-        branch_eq: {
-            committed: {
-                clock, pc, rs1, rs2,
-                imm_felt, cmp_result,
-                diff_inv_marker_0, diff_inv_marker_1, diff_inv_marker_2, diff_inv_marker_3,
-                opcode_beq_flag, opcode_bne_flag,
-            },
-            derived: {
-                expected_opcode_id: opcode_beq_flag * constant(crate::instructions::Opcode::Beq as u32)
-                    + opcode_bne_flag * constant(crate::instructions::Opcode::Bne as u32),
-                // 1 when the operands must be equal under the active opcode
-                cmp_eq: cmp_result * opcode_beq_flag + (1 - cmp_result) * opcode_bne_flag,
-                // Inverse witness sum: cmp_eq plus marked limb differences must
-                // be 1 on enabled rows (proves inequality when cmp_eq = 0)
-                diff_inv_sum: cmp_eq
-                    + (rs1_next_0 - rs2_next_0) * diff_inv_marker_0
-                    + (rs1_next_1 - rs2_next_1) * diff_inv_marker_1
-                    + (rs1_next_2 - rs2_next_2) * diff_inv_marker_2
-                    + (rs1_next_3 - rs2_next_3) * diff_inv_marker_3,
-                // Conditional branch target (airs.md 7.2)
-                to_pc: pc + imm_felt * cmp_result + 4 * (1 - cmp_result),
-                clock_next: clock + 1,
-                rs1_clock_diff: clock - rs1_clock_prev,
-                rs2_clock_diff: clock - rs2_clock_prev,
-            },
-            constraints: {
-                cmp_result * (1 - cmp_result),
-                // Equality forced limb-wise when cmp_eq fires
-                cmp_eq * (rs1_next_0 - rs2_next_0),
-                cmp_eq * (rs1_next_1 - rs2_next_1),
-                cmp_eq * (rs1_next_2 - rs2_next_2),
-                cmp_eq * (rs1_next_3 - rs2_next_3),
-                enabler * (1 - diff_inv_sum),
-            },
-            lookups: {
-                // Program access (B-type): Program(pc, opcode, rs1_idx, rs2_idx, imm)
-                -enabler * program_access(pc, expected_opcode_id, rs1_addr, rs2_addr, imm_felt),
-                // Read rs1 (REG_AS = 0).
-                -enabler * memory_access(0, rs1_addr, rs1_clock_prev, rs1_prev_0, rs1_prev_1, rs1_prev_2, rs1_prev_3),
-                enabler * memory_access(0, rs1_addr, clock, rs1_next_0, rs1_next_1, rs1_next_2, rs1_next_3),
-                - enabler * range_check_20(rs1_clock_diff),
-                // Read rs2.
-                -enabler * memory_access(0, rs2_addr, rs2_clock_prev, rs2_prev_0, rs2_prev_1, rs2_prev_2, rs2_prev_3),
-                enabler * memory_access(0, rs2_addr, clock, rs2_next_0, rs2_next_1, rs2_next_2, rs2_next_3),
-                - enabler * range_check_20(rs2_clock_diff),
-                // Conditional branch: pc moves to the selected target.
-                -enabler * registers_state(pc, clock),
-                enabler * registers_state(to_pc, clock_next),
-            },
-        },
+        // branch_eq migrated to crate::opcodes::branch_eq (external:).
 
         // ==========================================================================
         // 8. Branch Less Than (blt/bltu/bge/bgeu) - airs.md Section 8

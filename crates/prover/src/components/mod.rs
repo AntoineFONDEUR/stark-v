@@ -5,13 +5,13 @@
 // at a hand-written or macro-generated module instead.
 stwo_macros::components! {
     trace: {
-        auipc,
+        auipc: air::opcodes::auipc::component,
         base_alu_imm,
         base_alu_reg,
         branch_eq,
         branch_lt,
         div,
-        jal,
+        jal: air::opcodes::jal::component,
         jalr,
         load_store,
         lt_imm,

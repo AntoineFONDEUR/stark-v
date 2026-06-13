@@ -4,4 +4,6 @@
 //! is folded into the `Tracer` via the `external:` section of `define_air!`
 //! and wired into the prover through `components! { … name: module … }`.
 
+pub mod auipc;
+pub mod jal;
 pub mod lui;

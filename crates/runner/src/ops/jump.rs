@@ -13,13 +13,35 @@ use crate::{Cpu, DecodedInst};
 // =============================================================================
 
 pub fn jal(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
+    use stwo::core::fields::m31::BaseField;
+    let f = BaseField::from_u32_unchecked;
+
     let old_pc = cpu.pc;
     let return_addr = cpu.pc.wrapping_add(4);
     let rd = cpu.write_reg(inst.rd, return_addr, tracer);
+    let clock = tracer.clock;
     cpu.pc = cpu.pc.wrapping_add(inst.imm as u32);
 
     let imm_felt = imm_to_felt(inst.imm);
-    trace_op!(jal: tracer, old_pc, rd, imm_felt);
+    air::opcodes::jal::jal_fill(
+        &mut tracer.jal,
+        [
+            f(clock),
+            f(old_pc),
+            f(rd.addr),
+            f(rd.prev & 0xFF),
+            f((rd.prev >> 8) & 0xFF),
+            f((rd.prev >> 16) & 0xFF),
+            f((rd.prev >> 24) & 0xFF),
+            f(rd.clock_prev),
+            f(rd.next & 0xFF),
+            f((rd.next >> 8) & 0xFF),
+            f((rd.next >> 16) & 0xFF),
+            f((rd.next >> 24) & 0xFF),
+            f(imm_felt),
+        ],
+        [],
+    );
 }
 
 // =============================================================================

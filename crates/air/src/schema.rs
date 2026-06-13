@@ -31,6 +31,8 @@ stwo_macros::define_air! {
     external: {
         poseidon2: crate::poseidon2,
         lui: crate::opcodes::lui,
+        auipc: crate::opcodes::auipc,
+        jal: crate::opcodes::jal,
     }
     trace: {
         base_alu_reg: {
@@ -773,36 +775,7 @@ stwo_macros::define_air! {
         // ==========================================================================
         // 10. AUIPC - airs.md Section 10
         // ==========================================================================
-        auipc: {
-            committed: {
-                clock, pc, rd,
-                imm_felt,
-            },
-            derived: {
-                rd_felt: rd_next_0 + pow2(8) * rd_next_1 + pow2(16) * rd_next_2 + pow2(24) * rd_next_3,
-                pc_next: pc + 4,
-                clock_next: clock + 1,
-                rd_clock_diff: clock - rd_clock_prev,
-            },
-            constraints: {
-                // rd = pc + imm (airs.md 10.2)
-                rd_felt - (pc + imm_felt),
-            },
-            lookups: {
-                // Program access (U-type): Program(pc, AUIPC, rd_idx, imm, 0)
-                -enabler * program_access(pc, constant(crate::instructions::Opcode::Auipc as u32), rd_addr, imm_felt, 0),
-                -enabler * registers_state(pc, clock),
-                enabler * registers_state(pc_next, clock_next),
-                // rd = pc + imm is an M31: middle limbs are bytes, outer pair is
-                // checked as an M31 split.
-                - enabler * range_check_8_8(rd_next_1, rd_next_2),
-                - enabler * range_check_m31(rd_next_0, rd_next_3),
-                // Write to rd (REG_AS = 0).
-                -enabler * memory_access(0, rd_addr, rd_clock_prev, rd_prev_0, rd_prev_1, rd_prev_2, rd_prev_3),
-                enabler * memory_access(0, rd_addr, clock, rd_next_0, rd_next_1, rd_next_2, rd_next_3),
-                - enabler * range_check_20(rd_clock_diff),
-            },
-        },
+        // AUIPC migrated to crate::opcodes::auipc (external:).
 
         // ==========================================================================
         // 11. JALR - airs.md Section 11
@@ -854,37 +827,7 @@ stwo_macros::define_air! {
         // ==========================================================================
         // 12. JAL - airs.md Section 12
         // ==========================================================================
-        jal: {
-            committed: {
-                clock, pc, rd,
-                imm_felt,
-            },
-            derived: {
-                rd_felt: rd_next_0 + pow2(8) * rd_next_1 + pow2(16) * rd_next_2 + pow2(24) * rd_next_3,
-                jump_target: pc + imm_felt,
-                clock_next: clock + 1,
-                rd_clock_diff: clock - rd_clock_prev,
-            },
-            lookups: {
-                // Program access (U-type): Program(pc, JAL, rd_idx, imm, 0)
-                -enabler * program_access(pc, constant(crate::instructions::Opcode::Jal as u32), rd_addr, imm_felt, 0),
-                // Unconditional jump: pc moves to pc + imm.
-                -enabler * registers_state(pc, clock),
-                enabler * registers_state(jump_target, clock_next),
-                // rd = pc + 4 is an M31.
-                - enabler * range_check_8_8(rd_next_1, rd_next_2),
-                - enabler * range_check_m31(rd_next_0, rd_next_3),
-                // Write to rd (REG_AS = 0).
-                -enabler * memory_access(0, rd_addr, rd_clock_prev, rd_prev_0, rd_prev_1, rd_prev_2, rd_prev_3),
-                enabler * memory_access(0, rd_addr, clock, rd_next_0, rd_next_1, rd_next_2, rd_next_3),
-                - enabler * range_check_20(rd_clock_diff),
-            },
-            constraints: {
-                // rd = pc + 4, gated by enabler (padding) and rd_addr (x0
-                // writes are discarded, airs.md 12.2)
-                enabler * rd_addr * (rd_felt - (pc + 4)),
-            },
-        },
+        // JAL migrated to crate::opcodes::jal (external:).
 
         // ==========================================================================
         // 13. Load/Store (lb/lbu/lh/lhu/lw/sb/sh/sw) - airs.md Section 13

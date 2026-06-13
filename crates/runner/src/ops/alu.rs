@@ -9,6 +9,82 @@ use super::utils::{compute_lt_reg_witness, compute_shift_witness};
 use crate::trace::Tracer;
 use crate::{Cpu, DecodedInst};
 
+/// Fill one base_alu_reg row in the felt-function table from the rs1/rs2 reads
+/// and rd write accesses and the one-hot opcode flags.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fill_base_alu_reg(
+    tracer: &mut Tracer,
+    pc: u32,
+    rd: &crate::trace::Access,
+    rs1: &crate::trace::Access,
+    rs2: &crate::trace::Access,
+    flags: [u32; 5],
+) {
+    use stwo::core::fields::m31::BaseField;
+    let f = BaseField::from_u32_unchecked;
+    let clock = tracer.clock;
+    let limbs = |a: &crate::trace::Access| {
+        [
+            f(a.addr),
+            f(a.prev & 0xFF),
+            f((a.prev >> 8) & 0xFF),
+            f((a.prev >> 16) & 0xFF),
+            f((a.prev >> 24) & 0xFF),
+            f(a.clock_prev),
+            f(a.next & 0xFF),
+            f((a.next >> 8) & 0xFF),
+            f((a.next >> 16) & 0xFF),
+            f((a.next >> 24) & 0xFF),
+        ]
+    };
+    let rd = limbs(rd);
+    let rs1 = limbs(rs1);
+    let rs2 = limbs(rs2);
+    air::opcodes::base_alu_reg::base_alu_reg_fill(
+        &mut tracer.base_alu_reg,
+        [
+            f(clock),
+            f(pc),
+            rd[0],
+            rd[1],
+            rd[2],
+            rd[3],
+            rd[4],
+            rd[5],
+            rd[6],
+            rd[7],
+            rd[8],
+            rd[9],
+            rs1[0],
+            rs1[1],
+            rs1[2],
+            rs1[3],
+            rs1[4],
+            rs1[5],
+            rs1[6],
+            rs1[7],
+            rs1[8],
+            rs1[9],
+            rs2[0],
+            rs2[1],
+            rs2[2],
+            rs2[3],
+            rs2[4],
+            rs2[5],
+            rs2[6],
+            rs2[7],
+            rs2[8],
+            rs2[9],
+            f(flags[0]),
+            f(flags[1]),
+            f(flags[2]),
+            f(flags[3]),
+            f(flags[4]),
+        ],
+        [],
+    );
+}
+
 // =============================================================================
 // Base ALU Reg (add/sub/xor/or/and) - airs.md Section 1
 // =============================================================================
@@ -21,7 +97,7 @@ pub fn add(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let rd = cpu.write_reg(inst.rd, result, tracer);
     cpu.advance_pc();
     // opcode flags: add=1, sub=0, xor=0, or=0, and=0
-    trace_op!(base_alu_reg: tracer, old_pc, rd, rs1, rs2, 1, 0, 0, 0, 0);
+    fill_base_alu_reg(tracer, old_pc, &rd, &rs1, &rs2, [1, 0, 0, 0, 0]);
 }
 
 pub fn sub(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
@@ -32,7 +108,7 @@ pub fn sub(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let rd = cpu.write_reg(inst.rd, result, tracer);
     cpu.advance_pc();
     // opcode flags: add=0, sub=1, xor=0, or=0, and=0
-    trace_op!(base_alu_reg: tracer, old_pc, rd, rs1, rs2, 0, 1, 0, 0, 0);
+    fill_base_alu_reg(tracer, old_pc, &rd, &rs1, &rs2, [0, 1, 0, 0, 0]);
 }
 
 pub fn xor(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
@@ -43,7 +119,7 @@ pub fn xor(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let rd = cpu.write_reg(inst.rd, result, tracer);
     cpu.advance_pc();
     // opcode flags: add=0, sub=0, xor=1, or=0, and=0
-    trace_op!(base_alu_reg: tracer, old_pc, rd, rs1, rs2, 0, 0, 1, 0, 0);
+    fill_base_alu_reg(tracer, old_pc, &rd, &rs1, &rs2, [0, 0, 1, 0, 0]);
 }
 
 pub fn or(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
@@ -54,7 +130,7 @@ pub fn or(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let rd = cpu.write_reg(inst.rd, result, tracer);
     cpu.advance_pc();
     // opcode flags: add=0, sub=0, xor=0, or=1, and=0
-    trace_op!(base_alu_reg: tracer, old_pc, rd, rs1, rs2, 0, 0, 0, 1, 0);
+    fill_base_alu_reg(tracer, old_pc, &rd, &rs1, &rs2, [0, 0, 0, 1, 0]);
 }
 
 pub fn and(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
@@ -65,7 +141,7 @@ pub fn and(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let rd = cpu.write_reg(inst.rd, result, tracer);
     cpu.advance_pc();
     // opcode flags: add=0, sub=0, xor=0, or=0, and=1
-    trace_op!(base_alu_reg: tracer, old_pc, rd, rs1, rs2, 0, 0, 0, 0, 1);
+    fill_base_alu_reg(tracer, old_pc, &rd, &rs1, &rs2, [0, 0, 0, 0, 1]);
 }
 
 // =============================================================================

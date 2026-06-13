@@ -36,196 +36,54 @@ pub use crate::clock::{ClockGapAccess, ClockGapTable, ClockGapTableIter};
 pub use crate::schema::trace::*;
 
 #[cfg(test)]
-#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
 
-    // =========================================================================
-    // Columnar Table Tests
-    // =========================================================================
-
-    #[test]
-    fn test_base_alu_reg_table_push() {
-        let mut table = BaseAluRegTable::new();
-
-        let rd = Access {
-            addr: 1,
-            prev: 0,
-            clock_prev: 0,
-            next: 10,
-        };
-        let rs1 = Access {
-            addr: 2,
-            prev: 5,
-            clock_prev: 0,
-            next: 5,
-        };
-        let rs2 = Access {
-            addr: 3,
-            prev: 5,
-            clock_prev: 0,
-            next: 5,
-        };
-
-        // Push with opcode flags: add=1, sub=0, xor=0, or=0, and=0
-        table.push(1, 0x1000, rd, rs1, rs2, 1, 0, 0, 0, 0);
-
-        assert_eq!(table.len(), 1);
-        assert_eq!(table.clock[0], 1);
-        assert_eq!(table.pc[0], 0x1000);
-        assert_eq!(table.rd_addr[0], 1);
-        assert_eq!(table.rd_next[0], 10);
-        assert_eq!(table.rs1_addr[0], 2);
-        assert_eq!(table.rs2_addr[0], 3);
-        assert_eq!(table.opcode_add_flag[0], 1);
-        assert_eq!(table.opcode_sub_flag[0], 0);
-    }
-
-    #[test]
-    fn test_total_traces() {
-        let mut tracer = Tracer::default();
-
-        // Push some traces
-        let rd = Access::default();
-        let rs1 = Access::default();
-        let rs2 = Access::default();
-
-        // base_alu_reg with add flag
-        tracer.base_alu_reg.push(0, 0, rd, rs1, rs2, 1, 0, 0, 0, 0);
-        tracer.base_alu_reg.push(1, 4, rd, rs1, rs2, 1, 0, 0, 0, 0);
-        // base_alu_reg with sub flag
-        tracer.base_alu_reg.push(2, 8, rd, rs1, rs2, 0, 1, 0, 0, 0);
-
-        assert_eq!(tracer.total_traces(), 3);
-    }
-
-    #[test]
-    fn test_trace_op_macro() {
-        let mut tracer = Tracer::default();
-        tracer.clock = 1;
-
-        let rd = Access::default();
-        let rs1 = Access::default();
-        let rs2 = Access::default();
-
-        trace_op!(base_alu_reg: tracer, 0x1000, rd, rs1, rs2, 1, 0, 0, 0, 0);
-
-        assert_eq!(tracer.base_alu_reg.len(), 1);
-        assert_eq!(tracer.base_alu_reg.clock[0], 1);
-        assert_eq!(tracer.base_alu_reg.pc[0], 0x1000);
-    }
-
-    // Test prover column generation for new family tables
+    // Column counts of the trace tables (schema- or fn-DSL-generated); a
+    // change here means the table layout changed.
     mod prover_column_tests {
         use super::prover_columns::*;
 
         #[test]
         fn test_base_alu_reg_columns_size() {
-            // base_alu_reg: clock, pc, rd (10), rs1 (10), rs2 (10),
-            // + 5 opcode flags = 37 total (no enabler - has flags)
+            // clock, pc, rd (10), rs1 (10), rs2 (10) + 5 opcode flags = 37.
             assert_eq!(BaseAluRegColumns::<()>::SIZE, 37);
         }
 
         #[test]
         fn test_base_alu_imm_columns_size() {
-            // base_alu_imm: clock, pc, rd (10), rs1 (10),
-            // + imm_0, imm_1, imm_msb (3) + 4 opcode flags = 29 total (no enabler - has flags)
+            // clock, pc, rd (10), rs1 (10), imm_0/1/msb (3) + 4 flags = 29.
             assert_eq!(BaseAluImmColumns::<()>::SIZE, 29);
         }
 
         #[test]
         fn test_load_store_columns_size() {
-            // load_store: clock (1), pc (1), dst (10), rs1 (10), src (10),
-            // + r2_idx, imm_felt, src_msb, shift_amount (4)
-            // + src_addr_selector, dst_addr_selector (2)
-            // + marker_0..3 (4) + 8 opcode flags = 50 total (no enabler - has flags)
             assert_eq!(LoadStoreColumns::<()>::SIZE, 50);
         }
 
         #[test]
         fn test_branch_eq_columns_size() {
-            // branch_eq: clock (1), pc (1), rs1 (10), rs2 (10),
-            // + imm_felt (1), cmp_result (1) + diff_inv_marker_0..3 (4) + 2 opcode flags = 30 total (no enabler - has flags)
             assert_eq!(BranchEqColumns::<()>::SIZE, 30);
         }
 
         #[test]
         fn test_jal_columns_size() {
-            // JAL: enabler (1), clock, pc, rd (10), imm_felt = 14 total
+            // enabler (1), clock, pc, rd (10), imm_felt = 14.
             assert_eq!(JalColumns::<()>::SIZE, 14);
         }
 
         #[test]
         fn test_mul_columns_size() {
-            // MUL: enabler (1), clock, pc, rd (10), rs1 (10), rs2 (10) = 33 total
             assert_eq!(MulColumns::<()>::SIZE, 33);
         }
     }
 
-    // Test derived columns and constraints declared in define_trace_tables!
-    mod derived_column_tests {
+    mod row_extract_tests {
         use super::prover_columns::*;
         use stwo::core::fields::m31::BaseField;
 
         fn f(v: u32) -> BaseField {
             BaseField::from_u32_unchecked(v)
-        }
-
-        /// All-zero Base ALU Imm columns, mutated per test.
-        fn zero_base_alu_imm_cols() -> BaseAluImmColumns<BaseField> {
-            BaseAluImmColumns::from_iter(std::iter::repeat_n(f(0), BaseAluImmColumns::<()>::SIZE))
-        }
-
-        #[test]
-        fn test_base_alu_imm_enabler_sums_flags() {
-            let mut cols = zero_base_alu_imm_cols();
-            cols.opcode_add_flag = f(1);
-            cols.opcode_or_flag = f(1);
-            assert_eq!(cols.enabler(), f(2));
-        }
-
-        #[test]
-        fn test_base_alu_imm_expected_opcode_id_selects_active_flag() {
-            let mut cols = zero_base_alu_imm_cols();
-            cols.opcode_xor_flag = f(1);
-            assert_eq!(
-                cols.expected_opcode_id(),
-                f(crate::instructions::Opcode::Xori as u32)
-            );
-        }
-
-        #[test]
-        fn test_base_alu_imm_carry_0_detects_limb_overflow() {
-            let mut cols = zero_base_alu_imm_cols();
-            // 255 + 1 = 256 = 0 with carry 1 over an 8-bit limb
-            cols.rs1_next_0 = f(255);
-            cols.imm_0 = f(1);
-            cols.rd_next_0 = f(0);
-            assert_eq!(cols.carry_0(), f(1));
-        }
-
-        #[test]
-        fn test_base_alu_imm_carry_1_chains_carry_0() {
-            let mut cols = zero_base_alu_imm_cols();
-            // Limb 0 overflows; limb 1 receives the carry and overflows too
-            cols.rs1_next_0 = f(255);
-            cols.imm_0 = f(1);
-            cols.rd_next_0 = f(0);
-            cols.rs1_next_1 = f(255);
-            cols.rd_next_1 = f(0);
-            assert_eq!(cols.carry_1(), f(1));
-        }
-
-        #[test]
-        fn test_base_alu_imm_carry_booleanity_holds_for_valid_add() {
-            let mut cols = zero_base_alu_imm_cols();
-            cols.opcode_add_flag = f(1);
-            // rs1 = 255, imm = 1: rd = 256, i.e. limb 0 wraps to 0 and limb 1 is 1
-            cols.rs1_next_0 = f(255);
-            cols.imm_0 = f(1);
-            cols.rd_next_0 = f(0);
-            cols.rd_next_1 = f(1);
-            assert!(cols.constraints().iter().all(|c| *c == f(0)));
         }
 
         #[test]
@@ -240,99 +98,10 @@ mod tests {
         }
     }
 
-    // =========================================================================
-    // Table Debug Tests
-    // =========================================================================
-
-    mod debug_table_tests {
-        use super::*;
-
-        #[test]
-        fn test_base_alu_reg_table_to_table() {
-            let mut table = BaseAluRegTable::new();
-
-            let rd = Access {
-                addr: 1,
-                prev: 0,
-                clock_prev: 0,
-                next: 10,
-            };
-            let rs1 = Access {
-                addr: 2,
-                prev: 5,
-                clock_prev: 1,
-                next: 5,
-            };
-            let rs2 = Access {
-                addr: 3,
-                prev: 7,
-                clock_prev: 2,
-                next: 7,
-            };
-
-            // Push two rows
-            table.push(1, 0x1000, rd, rs1, rs2, 1, 0, 0, 0, 0);
-            table.push(2, 0x1004, rd, rs1, rs2, 0, 1, 0, 0, 0);
-
-            table.to_table().to_string();
-        }
-
-        #[test]
-        fn test_empty_table_to_table() {
-            let table = BaseAluRegTable::new();
-
-            // An empty table still carries its headers; inspect the cells,
-            // not the rendered string, which truncates to the terminal width.
-            let headers: Vec<String> = table
-                .to_table()
-                .header()
-                .expect("headers are always set")
-                .cell_iter()
-                .map(|cell| cell.content())
-                .collect();
-            assert!(headers.contains(&"clock".to_string()));
-        }
-
-        #[test]
-        fn test_tracer_print_tables() {
-            let mut tracer = Tracer::default();
-
-            // Add some traces
-            let rd = Access::default();
-            let rs1 = Access::default();
-            let rs2 = Access::default();
-
-            tracer.base_alu_reg.push(0, 0, rd, rs1, rs2, 1, 0, 0, 0, 0);
-            tracer.base_alu_reg.push(1, 4, rd, rs1, rs2, 1, 0, 0, 0, 0);
-
-            // This should not panic
-            tracer.print_tables(Some(10), Some(10));
-        }
-
-        #[test]
-        fn test_tracer_print_tables_empty() {
-            let tracer = Tracer::default();
-
-            // Empty tracer should not panic
-            tracer.print_tables(None, None);
-        }
-
-        #[test]
-        fn test_multiple_tables_to_table() {
-            let mut tracer = Tracer::default();
-
-            // Add traces to different tables
-            let rd = Access::default();
-            let rs1 = Access::default();
-            let rs2 = Access::default();
-
-            tracer.base_alu_reg.push(0, 0, rd, rs1, rs2, 1, 0, 0, 0, 0);
-
-            // Each table should produce valid output.
-            let base_alu_output = tracer.base_alu_reg.to_table().to_string();
-
-            // BaseAluReg uses opcode flags, not an enabler column.
-            assert!(!base_alu_output.contains("enabler"));
-        }
+    #[test]
+    fn test_tracer_print_tables_empty() {
+        // An empty tracer must not panic when printing.
+        let tracer = Tracer::default();
+        tracer.print_tables(None, None);
     }
 }

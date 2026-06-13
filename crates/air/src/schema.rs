@@ -35,76 +35,10 @@ stwo_macros::define_air! {
         jal: crate::opcodes::jal,
         jalr: crate::opcodes::jalr,
         base_alu_imm: crate::opcodes::base_alu_imm,
+        base_alu_reg: crate::opcodes::base_alu_reg,
     }
     trace: {
-        base_alu_reg: {
-            committed: {
-                clock, pc, rd, rs1, rs2,
-                opcode_add_flag, opcode_sub_flag, opcode_xor_flag, opcode_or_flag, opcode_and_flag,
-            },
-            derived: {
-                expected_opcode_id: opcode_add_flag * constant(crate::instructions::Opcode::Add as u32)
-                    + opcode_sub_flag * constant(crate::instructions::Opcode::Sub as u32)
-                    + opcode_xor_flag * constant(crate::instructions::Opcode::Xor as u32)
-                    + opcode_or_flag * constant(crate::instructions::Opcode::Or as u32)
-                    + opcode_and_flag * constant(crate::instructions::Opcode::And as u32),
-                is_bitwise: opcode_xor_flag + opcode_or_flag + opcode_and_flag,
-                // Preprocessed bitwise table id: and=0, or=1, xor=2
-                bitwise_id: 2 * opcode_xor_flag + opcode_or_flag,
-                pc_next: pc + 4,
-                clock_next: clock + 1,
-                rs1_clock_diff: clock - rs1_clock_prev,
-                rs2_clock_diff: clock - rs2_clock_prev,
-                rd_clock_diff: clock - rd_clock_prev,
-                // Carry chains of rd = rs1 + rs2 and rs1 = rd + rs2 over 8-bit
-                // limbs; each carry is 0 or 1 under the active opcode
-                carry_add_0: (rs1_next_0 + rs2_next_0 - rd_next_0) * inv(pow2(8)),
-                carry_add_1: (rs1_next_1 + rs2_next_1 + carry_add_0 - rd_next_1) * inv(pow2(8)),
-                carry_add_2: (rs1_next_2 + rs2_next_2 + carry_add_1 - rd_next_2) * inv(pow2(8)),
-                carry_add_3: (rs1_next_3 + rs2_next_3 + carry_add_2 - rd_next_3) * inv(pow2(8)),
-                carry_sub_0: (rd_next_0 + rs2_next_0 - rs1_next_0) * inv(pow2(8)),
-                carry_sub_1: (rd_next_1 + rs2_next_1 - rs1_next_1 + carry_sub_0) * inv(pow2(8)),
-                carry_sub_2: (rd_next_2 + rs2_next_2 - rs1_next_2 + carry_sub_1) * inv(pow2(8)),
-                carry_sub_3: (rd_next_3 + rs2_next_3 - rs1_next_3 + carry_sub_2) * inv(pow2(8)),
-            },
-            constraints: {
-                opcode_add_flag * carry_add_0 * (1 - carry_add_0),
-                opcode_add_flag * carry_add_1 * (1 - carry_add_1),
-                opcode_add_flag * carry_add_2 * (1 - carry_add_2),
-                opcode_add_flag * carry_add_3 * (1 - carry_add_3),
-                opcode_sub_flag * carry_sub_0 * (1 - carry_sub_0),
-                opcode_sub_flag * carry_sub_1 * (1 - carry_sub_1),
-                opcode_sub_flag * carry_sub_2 * (1 - carry_sub_2),
-                opcode_sub_flag * carry_sub_3 * (1 - carry_sub_3),
-            },
-            lookups: {
-                // Program access (R-type): Program(pc, opcode, rd_idx, rs1_idx, rs2_idx)
-                -enabler * program_access(pc, expected_opcode_id, rd_addr, rs1_addr, rs2_addr),
-                -enabler * registers_state(pc, clock),
-                enabler * registers_state(pc_next, clock_next),
-                // Read rs1 (REG_AS = 0).
-                -enabler * memory_access(0, rs1_addr, rs1_clock_prev, rs1_prev_0, rs1_prev_1, rs1_prev_2, rs1_prev_3),
-                enabler * memory_access(0, rs1_addr, clock, rs1_next_0, rs1_next_1, rs1_next_2, rs1_next_3),
-                - enabler * range_check_20(rs1_clock_diff),
-                // Read rs2.
-                -enabler * memory_access(0, rs2_addr, rs2_clock_prev, rs2_prev_0, rs2_prev_1, rs2_prev_2, rs2_prev_3),
-                enabler * memory_access(0, rs2_addr, clock, rs2_next_0, rs2_next_1, rs2_next_2, rs2_next_3),
-                - enabler * range_check_20(rs2_clock_diff),
-                // Bitwise limbs (xor/or/and): Bitwise(rs1[i], rs2[i], rd[i], op id).
-                - is_bitwise * bitwise(rs1_next_0, rs2_next_0, rd_next_0, bitwise_id),
-                - is_bitwise * bitwise(rs1_next_1, rs2_next_1, rd_next_1, bitwise_id),
-                - is_bitwise * bitwise(rs1_next_2, rs2_next_2, rd_next_2, bitwise_id),
-                - is_bitwise * bitwise(rs1_next_3, rs2_next_3, rd_next_3, bitwise_id),
-                // rd byte ranges (spec 1.3): add/sub carry equations alone admit
-                // non-canonical limbs.
-                - enabler * range_check_8_8(rd_next_0, rd_next_1),
-                - enabler * range_check_8_8(rd_next_2, rd_next_3),
-                // Write rd.
-                -enabler * memory_access(0, rd_addr, rd_clock_prev, rd_prev_0, rd_prev_1, rd_prev_2, rd_prev_3),
-                enabler * memory_access(0, rd_addr, clock, rd_next_0, rd_next_1, rd_next_2, rd_next_3),
-                - enabler * range_check_20(rd_clock_diff),
-            },
-        },
+        // base_alu_reg migrated to crate::opcodes::base_alu_reg (external:).
 
         // ==========================================================================
         // 2. Base ALU Imm (addi/xori/ori/andi) - airs.md Section 2

@@ -1621,6 +1621,17 @@ fn generate_evaluation_impl(function: &LoweredFn) -> syn::Result<TokenStream2> {
     let mut constraint_exprs = vec![quote! {
         #enabler * (#one - #enabler)
     }];
+    // Per-flag booleanity (structural, ungated) for flag tables — together
+    // with the enabler() = flag-sum booleanity this makes the flags one-hot,
+    // matching the schema's column-generated constraints.
+    for field in &function.table.fields {
+        let name = field.to_string();
+        if name.starts_with("opcode_") && name.ends_with("_flag") {
+            constraint_exprs.push(quote! {
+                self.#field.clone() * (#one - self.#field.clone())
+            });
+        }
+    }
     for constraint in &function.constraints {
         // Enabler-gated: padding rows are all-zero, which constant terms in
         // the cell chains would otherwise violate. Cell budgets are

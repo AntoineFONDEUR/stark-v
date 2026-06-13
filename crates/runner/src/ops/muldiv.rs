@@ -6,14 +6,35 @@
 //! - div family: div, divu, rem, remu (airs.md Section 16)
 
 use super::utils::{M31_P, m31_inverse};
-use crate::trace::Tracer;
+use crate::trace::{Access, Tracer};
 use crate::{Cpu, DecodedInst};
+use stwo::core::fields::m31::BaseField;
+
+/// The 10 felt columns of a register access bundle (addr, prev limbs,
+/// clock_prev, next limbs), in the order the fn-DSL opcode functions take
+/// them.
+pub(crate) fn access_limbs(a: &Access) -> [BaseField; 10] {
+    let f = BaseField::from_u32_unchecked;
+    [
+        f(a.addr),
+        f(a.prev & 0xFF),
+        f((a.prev >> 8) & 0xFF),
+        f((a.prev >> 16) & 0xFF),
+        f((a.prev >> 24) & 0xFF),
+        f(a.clock_prev),
+        f(a.next & 0xFF),
+        f((a.next >> 8) & 0xFF),
+        f((a.next >> 16) & 0xFF),
+        f((a.next >> 24) & 0xFF),
+    ]
+}
 
 // =============================================================================
 // MUL - airs.md Section 14
 // =============================================================================
 
 pub fn mul(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
+    let f = BaseField::from_u32_unchecked;
     let old_pc = cpu.pc;
     let rs1 = cpu.read_reg(inst.rs1, tracer);
     let rs2 = cpu.read_reg(inst.rs2, tracer);
@@ -21,8 +42,20 @@ pub fn mul(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let rs2_val = rs2.next as i32 as i64;
     let result = rs1_val.wrapping_mul(rs2_val) as u32;
     let rd = cpu.write_reg(inst.rd, result, tracer);
+    let clock = tracer.clock;
     cpu.advance_pc();
-    trace_op!(mul: tracer, old_pc, rd, rs1, rs2);
+
+    let (rd, rs1, rs2) = (access_limbs(&rd), access_limbs(&rs1), access_limbs(&rs2));
+    let mut args = Vec::with_capacity(32);
+    args.extend([f(clock), f(old_pc)]);
+    args.extend(rd);
+    args.extend(rs1);
+    args.extend(rs2);
+    air::opcodes::mul::mul_fill(
+        &mut tracer.mul,
+        args.try_into().expect("mul fill takes 32 felts"),
+        [],
+    );
 }
 
 // =============================================================================

@@ -37,6 +37,7 @@ stwo_macros::define_air! {
         base_alu_imm: crate::opcodes::base_alu_imm,
         base_alu_reg: crate::opcodes::base_alu_reg,
         branch_eq: crate::opcodes::branch_eq,
+        mul: crate::opcodes::mul,
     }
     trace: {
         // base_alu_reg migrated to crate::opcodes::base_alu_reg (external:).
@@ -737,56 +738,7 @@ stwo_macros::define_air! {
         // ==========================================================================
         // 14. MUL - airs.md Section 14
         // ==========================================================================
-        mul: {
-            committed: {
-                clock, pc, rd, rs1, rs2,
-            },
-            derived: {
-                pc_next: pc + 4,
-                clock_next: clock + 1,
-                rs1_clock_diff: clock - rs1_clock_prev,
-                rs2_clock_diff: clock - rs2_clock_prev,
-                rd_clock_diff: clock - rd_clock_prev,
-                // Schoolbook carry chain of rd = (rs1 * rs2) mod 2^32 over 8-bit
-                // limbs (airs.md 14.2); each carry is range-checked, not boolean
-                carry_0: (rs1_next_0 * rs2_next_0 - rd_next_0) * inv(pow2(8)),
-                carry_1: (carry_0 + rs1_next_1 * rs2_next_0 + rs1_next_0 * rs2_next_1 - rd_next_1)
-                        * inv(pow2(8)),
-                carry_2: (carry_1 + rs1_next_2 * rs2_next_0 + rs1_next_1 * rs2_next_1
-                        + rs1_next_0 * rs2_next_2 - rd_next_2) * inv(pow2(8)),
-                carry_3: (carry_2 + rs1_next_3 * rs2_next_0 + rs1_next_2 * rs2_next_1
-                        + rs1_next_1 * rs2_next_2 + rs1_next_0 * rs2_next_3 - rd_next_3)
-                        * inv(pow2(8)),
-            },
-            lookups: {
-                // Quadratic carry denominators: every fraction must stay in a
-                // singleton batch to hold the constraint degree bound.
-                batch: 1,
-                // Program access (R-type): Program(pc, MUL, rd_idx, rs1_idx, rs2_idx)
-                -enabler * program_access(pc, constant(crate::instructions::Opcode::Mul as u32), rd_addr, rs1_addr, rs2_addr),
-                -enabler * registers_state(pc, clock),
-                enabler * registers_state(pc_next, clock_next),
-                // Read rs1 (REG_AS = 0).
-                -enabler * memory_access(0, rs1_addr, rs1_clock_prev, rs1_prev_0, rs1_prev_1, rs1_prev_2, rs1_prev_3),
-                enabler * memory_access(0, rs1_addr, clock, rs1_next_0, rs1_next_1, rs1_next_2, rs1_next_3),
-                - enabler * range_check_20(rs1_clock_diff),
-                // Read rs2.
-                -enabler * memory_access(0, rs2_addr, rs2_clock_prev, rs2_prev_0, rs2_prev_1, rs2_prev_2, rs2_prev_3),
-                enabler * memory_access(0, rs2_addr, clock, rs2_next_0, rs2_next_1, rs2_next_2, rs2_next_3),
-                - enabler * range_check_20(rs2_clock_diff),
-                // rd limbs are bytes and schoolbook carries fit 11 bits (the
-                // limb-1 carry honestly reaches 509 for 0xFFFFFFFF operands, so
-                // 8 bits is not enough).
-                - enabler * range_check_8_11(rd_next_0, carry_0),
-                - enabler * range_check_8_11(rd_next_1, carry_1),
-                - enabler * range_check_8_11(rd_next_2, carry_2),
-                - enabler * range_check_8_11(rd_next_3, carry_3),
-                // Write rd.
-                -enabler * memory_access(0, rd_addr, rd_clock_prev, rd_prev_0, rd_prev_1, rd_prev_2, rd_prev_3),
-                enabler * memory_access(0, rd_addr, clock, rd_next_0, rd_next_1, rd_next_2, rd_next_3),
-                - enabler * range_check_20(rd_clock_diff),
-            },
-        },
+        // mul migrated to crate::opcodes::mul (external:).
 
         // ==========================================================================
         // 15. MULH (mulh/mulhsu/mulhu) - airs.md Section 15

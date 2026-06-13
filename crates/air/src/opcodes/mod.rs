@@ -11,3 +11,4 @@ pub mod branch_eq;
 pub mod jal;
 pub mod jalr;
 pub mod lui;
+pub mod mul;

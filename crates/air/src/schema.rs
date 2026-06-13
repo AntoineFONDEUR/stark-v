@@ -40,6 +40,7 @@ stwo_macros::define_air! {
         mul: crate::opcodes::mul,
         mulh: crate::opcodes::mulh,
         lt_reg: crate::opcodes::lt_reg,
+        lt_imm: crate::opcodes::lt_imm,
     }
     trace: {
         // base_alu_reg migrated to crate::opcodes::base_alu_reg (external:).
@@ -369,76 +370,7 @@ stwo_macros::define_air! {
         // ==========================================================================
         // 6. Less Than Imm (slti/sltiu) - airs.md Section 6
         // ==========================================================================
-        lt_imm: {
-            committed: {
-                clock, pc, rd, rs1,
-                cmp_result, rs1_msl_felt,
-                imm_0, imm_1, imm_msb,
-                opcode_slti_flag, opcode_sltiu_flag,
-                diff_marker_0, diff_marker_1, diff_marker_2, diff_marker_3,
-                diff_val,
-            },
-            derived: {
-                expected_opcode_id: opcode_slti_flag * constant(crate::instructions::Opcode::Slti as u32)
-                    + opcode_sltiu_flag * constant(crate::instructions::Opcode::Sltiu as u32),
-                // I-type immediate (airs.md 6.2)
-                imm: imm_0 + pow2(8) * imm_1 + pow2(11) * imm_msb,
-                // Sign-extended immediate limbs; limb 0 is imm_0, limb 3 = limb 2
-                sext_imm_1: imm_1 + (pow2(8) - pow2(3)) * imm_msb,
-                sext_imm_2: (pow2(8) - 1) * imm_msb,
-                // Most significant limb of the comparison operand under the
-                // active signedness
-                sext_imm_msl_felt: opcode_sltiu_flag * sext_imm_2 - opcode_slti_flag * imm_msb,
-                rs1_msl_gap: rs1_next_3 - rs1_msl_felt,
-                rs1_msl_shifted: rs1_msl_felt + opcode_slti_flag * pow2(7),
-                imm_1_doubled: 2 * imm_1,
-                prefix_sum_final: diff_marker_0 + diff_marker_1 + diff_marker_2 + diff_marker_3,
-                cmp_sign: 2 * cmp_result - 1,
-                pc_next: pc + 4,
-                clock_next: clock + 1,
-                rs1_clock_diff: clock - rs1_clock_prev,
-                rd_clock_diff: clock - rd_clock_prev,
-            },
-            constraints: {
-                imm_msb * (1 - imm_msb),
-                rs1_msl_gap * (pow2(8) - rs1_msl_gap),
-                diff_marker_0 * (1 - diff_marker_0),
-                diff_marker_1 * (1 - diff_marker_1),
-                diff_marker_2 * (1 - diff_marker_2),
-                diff_marker_3 * (1 - diff_marker_3),
-                // Comparison scan from the most significant limb down (airs.md 6.3)
-                (1 - diff_marker_3) * (cmp_sign * (sext_imm_msl_felt - rs1_msl_felt)),
-                diff_marker_3 * (diff_val - cmp_sign * (sext_imm_msl_felt - rs1_msl_felt)),
-                (1 - diff_marker_3 - diff_marker_2) * (cmp_sign * (sext_imm_2 - rs1_next_2)),
-                diff_marker_2 * (diff_val - cmp_sign * (sext_imm_2 - rs1_next_2)),
-                (1 - diff_marker_3 - diff_marker_2 - diff_marker_1)
-                        * (cmp_sign * (sext_imm_1 - rs1_next_1)),
-                diff_marker_1 * (diff_val - cmp_sign * (sext_imm_1 - rs1_next_1)),
-                (1 - prefix_sum_final) * (cmp_sign * (imm_0 - rs1_next_0)),
-                diff_marker_0 * (diff_val - cmp_sign * (imm_0 - rs1_next_0)),
-                prefix_sum_final * (1 - prefix_sum_final),
-                (1 - prefix_sum_final) * cmp_result,
-                cmp_result * (1 - cmp_result),
-            },
-            lookups: {
-                // Program access (I-type): Program(pc, opcode, rd_idx, rs1_idx, imm)
-                -enabler * program_access(pc, expected_opcode_id, rd_addr, rs1_addr, imm),
-                // Immediate limb ranges and the sign-shifted most significant limb.
-                - enabler * range_check_8_8_4(rs1_msl_shifted, imm_0, imm_1_doubled),
-                -enabler * registers_state(pc, clock),
-                enabler * registers_state(pc_next, clock_next),
-                // Read rs1 (REG_AS = 0).
-                -enabler * memory_access(0, rs1_addr, rs1_clock_prev, rs1_prev_0, rs1_prev_1, rs1_prev_2, rs1_prev_3),
-                enabler * memory_access(0, rs1_addr, clock, rs1_next_0, rs1_next_1, rs1_next_2, rs1_next_3),
-                - enabler * range_check_20(rs1_clock_diff),
-                // When the comparison scan fired, the limb difference is > 0.
-                - prefix_sum_final * range_check_20(diff_val - 1),
-                // Write rd := cmp_result (a single bit in limb 0).
-                -enabler * memory_access(0, rd_addr, rd_clock_prev, rd_prev_0, rd_prev_1, rd_prev_2, rd_prev_3),
-                enabler * memory_access(0, rd_addr, clock, cmp_result, 0, 0, 0),
-                - enabler * range_check_20(rd_clock_diff),
-            },
-        },
+        // lt_imm migrated to crate::opcodes::lt_imm (external:).
 
         // ==========================================================================
         // 7. Branch Equal (beq/bne) - airs.md Section 7

@@ -10,6 +10,7 @@ pub mod base_alu_reg;
 pub mod branch_eq;
 pub mod jal;
 pub mod jalr;
+pub mod lt_imm;
 pub mod lt_reg;
 pub mod lui;
 pub mod mul;

@@ -14,7 +14,7 @@ stwo_macros::components! {
         jal: air::opcodes::jal::component,
         jalr: air::opcodes::jalr::component,
         load_store,
-        lt_imm,
+        lt_imm: air::opcodes::lt_imm::component,
         lt_reg: air::opcodes::lt_reg::component,
         lui: air::opcodes::lui::component,
         mul: air::opcodes::mul::component,

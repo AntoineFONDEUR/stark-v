@@ -18,7 +18,7 @@ stwo_macros::components! {
         lt_reg,
         lui: air::opcodes::lui::component,
         mul: air::opcodes::mul::component,
-        mulh,
+        mulh: air::opcodes::mulh::component,
         shifts_imm,
         shifts_reg,
         program,

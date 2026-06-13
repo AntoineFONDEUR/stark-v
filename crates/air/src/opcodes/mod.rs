@@ -12,3 +12,4 @@ pub mod jal;
 pub mod jalr;
 pub mod lui;
 pub mod mul;
+pub mod mulh;

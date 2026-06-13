@@ -29,6 +29,37 @@ pub(crate) fn access_limbs(a: &Access) -> [BaseField; 10] {
     ]
 }
 
+/// Fill one mulh row from the rs1/rs2 reads, rd write, the high-half limbs,
+/// the operand sign bits, and the mulh/mulhsu/mulhu flags.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fill_mulh(
+    tracer: &mut Tracer,
+    pc: u32,
+    rd: &Access,
+    rs1: &Access,
+    rs2: &Access,
+    rd_high: [u32; 4],
+    rs1_sign: u32,
+    rs2_sign: u32,
+    flags: [u32; 3],
+) {
+    let f = BaseField::from_u32_unchecked;
+    let clock = tracer.clock;
+    let mut args = Vec::with_capacity(41);
+    args.extend([f(clock), f(pc)]);
+    args.extend(access_limbs(rd));
+    args.extend(access_limbs(rs1));
+    args.extend(access_limbs(rs2));
+    args.extend(rd_high.map(f));
+    args.extend([f(rs1_sign), f(rs2_sign)]);
+    args.extend(flags.map(f));
+    air::opcodes::mulh::mulh_fill(
+        &mut tracer.mulh,
+        args.try_into().expect("mulh fill takes 41 felts"),
+        [],
+    );
+}
+
 // =============================================================================
 // MUL - airs.md Section 14
 // =============================================================================
@@ -118,10 +149,16 @@ pub fn mulh(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     cpu.advance_pc();
 
     // opcode flags: mulh=1, mulhsu=0, mulhu=0
-    trace_op!(mulh: tracer, old_pc, rd, rs1, rs2,
-        w.rd_high[0], w.rd_high[1], w.rd_high[2], w.rd_high[3],
-        w.rs1_sign, w.rs2_sign,
-        1, 0, 0
+    fill_mulh(
+        tracer,
+        old_pc,
+        &rd,
+        &rs1,
+        &rs2,
+        [w.rd_high[0], w.rd_high[1], w.rd_high[2], w.rd_high[3]],
+        w.rs1_sign,
+        w.rs2_sign,
+        [1, 0, 0],
     );
 }
 
@@ -134,10 +171,16 @@ pub fn mulhsu(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     cpu.advance_pc();
 
     // opcode flags: mulh=0, mulhsu=1, mulhu=0
-    trace_op!(mulh: tracer, old_pc, rd, rs1, rs2,
-        w.rd_high[0], w.rd_high[1], w.rd_high[2], w.rd_high[3],
-        w.rs1_sign, w.rs2_sign,
-        0, 1, 0
+    fill_mulh(
+        tracer,
+        old_pc,
+        &rd,
+        &rs1,
+        &rs2,
+        [w.rd_high[0], w.rd_high[1], w.rd_high[2], w.rd_high[3]],
+        w.rs1_sign,
+        w.rs2_sign,
+        [0, 1, 0],
     );
 }
 
@@ -150,10 +193,16 @@ pub fn mulhu(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     cpu.advance_pc();
 
     // opcode flags: mulh=0, mulhsu=0, mulhu=1
-    trace_op!(mulh: tracer, old_pc, rd, rs1, rs2,
-        w.rd_high[0], w.rd_high[1], w.rd_high[2], w.rd_high[3],
-        w.rs1_sign, w.rs2_sign,
-        0, 0, 1
+    fill_mulh(
+        tracer,
+        old_pc,
+        &rd,
+        &rs1,
+        &rs2,
+        [w.rd_high[0], w.rd_high[1], w.rd_high[2], w.rd_high[3]],
+        w.rs1_sign,
+        w.rs2_sign,
+        [0, 0, 1],
     );
 }
 

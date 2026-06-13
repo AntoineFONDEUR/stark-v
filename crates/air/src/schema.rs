@@ -38,6 +38,7 @@ stwo_macros::define_air! {
         base_alu_reg: crate::opcodes::base_alu_reg,
         branch_eq: crate::opcodes::branch_eq,
         mul: crate::opcodes::mul,
+        mulh: crate::opcodes::mulh,
     }
     trace: {
         // base_alu_reg migrated to crate::opcodes::base_alu_reg (external:).
@@ -743,78 +744,7 @@ stwo_macros::define_air! {
         // ==========================================================================
         // 15. MULH (mulh/mulhsu/mulhu) - airs.md Section 15
         // ==========================================================================
-        mulh: {
-            committed: {
-                clock, pc, rd, rs1, rs2,
-                rd_high_0, rd_high_1, rd_high_2, rd_high_3,
-                rs1_sign, rs2_sign,
-                opcode_mulh_flag, opcode_mulhsu_flag, opcode_mulhu_flag,
-            },
-            derived: {
-                expected_opcode_id: opcode_mulh_flag * constant(crate::instructions::Opcode::Mulh as u32)
-                    + opcode_mulhsu_flag * constant(crate::instructions::Opcode::Mulhsu as u32)
-                    + opcode_mulhu_flag * constant(crate::instructions::Opcode::Mulhu as u32),
-                pc_next: pc + 4,
-                clock_next: clock + 1,
-                rs1_clock_diff: clock - rs1_clock_prev,
-                rs2_clock_diff: clock - rs2_clock_prev,
-                rd_clock_diff: clock - rd_clock_prev,
-                // Sign-extended 64-bit operands: top limbs gain the sign bit,
-                // limbs 4..7 are the sign fill (airs.md 15.2)
-                rs1_top: rs1_next_3 + rs1_sign * pow2(7),
-                rs2_top: rs2_next_3 + rs2_sign * pow2(7),
-                rs1_fill: rs1_sign * (pow2(8) - 1),
-                rs2_fill: rs2_sign * (pow2(8) - 1),
-                carry_0: (rs1_next_0 * rs2_next_0 - rd_high_0) * inv(pow2(8)),
-                carry_1: (carry_0 + rs1_next_0 * rs2_next_1 + rs1_next_1 * rs2_next_0 - rd_high_1) * inv(pow2(8)),
-                carry_2: (carry_1 + rs1_next_0 * rs2_next_2 + rs1_next_1 * rs2_next_1 + rs1_next_2 * rs2_next_0 - rd_high_2) * inv(pow2(8)),
-                carry_3: (carry_2 + rs1_next_0 * rs2_top + rs1_next_1 * rs2_next_2 + rs1_next_2 * rs2_next_1 + rs1_top * rs2_next_0 - rd_high_3) * inv(pow2(8)),
-                carry_4: (carry_3 + rs1_next_0 * rs2_fill + rs1_next_1 * rs2_top + rs1_next_2 * rs2_next_2 + rs1_top * rs2_next_1 + rs1_fill * rs2_next_0 - rd_next_0) * inv(pow2(8)),
-                carry_5: (carry_4 + rs1_next_0 * rs2_fill + rs1_next_1 * rs2_fill + rs1_next_2 * rs2_top + rs1_top * rs2_next_2 + rs1_fill * rs2_next_1 + rs1_fill * rs2_next_0 - rd_next_1) * inv(pow2(8)),
-                carry_6: (carry_5 + rs1_next_0 * rs2_fill + rs1_next_1 * rs2_fill + rs1_next_2 * rs2_fill + rs1_top * rs2_top + rs1_fill * rs2_next_2 + rs1_fill * rs2_next_1 + rs1_fill * rs2_next_0 - rd_next_2) * inv(pow2(8)),
-                carry_7: (carry_6 + rs1_next_0 * rs2_fill + rs1_next_1 * rs2_fill + rs1_next_2 * rs2_fill + rs1_top * rs2_fill + rs1_fill * rs2_top + rs1_fill * rs2_next_2 + rs1_fill * rs2_next_1 + rs1_fill * rs2_next_0 - rd_next_3) * inv(pow2(8)),
-            },
-            constraints: {
-                rs1_sign * (1 - rs1_sign),
-                rs2_sign * (1 - rs2_sign),
-                // Unsigned operands force their sign bits to zero
-                (opcode_mulhsu_flag + opcode_mulhu_flag) * rs2_sign,
-                opcode_mulhu_flag * rs1_sign,
-            },
-            lookups: {
-                // Quadratic carry denominators: every fraction must stay in a
-                // singleton batch to hold the constraint degree bound.
-                batch: 1,
-                // Program access (R-type): Program(pc, opcode, rd_idx, rs1_idx, rs2_idx)
-                -enabler * program_access(pc, expected_opcode_id, rd_addr, rs1_addr, rs2_addr),
-                -enabler * registers_state(pc, clock),
-                enabler * registers_state(pc_next, clock_next),
-                // Read rs1 (REG_AS = 0).
-                -enabler * memory_access(0, rs1_addr, rs1_clock_prev, rs1_prev_0, rs1_prev_1, rs1_prev_2, rs1_prev_3),
-                enabler * memory_access(0, rs1_addr, clock, rs1_next_0, rs1_next_1, rs1_next_2, rs1_next_3),
-                - enabler * range_check_20(rs1_clock_diff),
-                // Read rs2.
-                -enabler * memory_access(0, rs2_addr, rs2_clock_prev, rs2_prev_0, rs2_prev_1, rs2_prev_2, rs2_prev_3),
-                enabler * memory_access(0, rs2_addr, clock, rs2_next_0, rs2_next_1, rs2_next_2, rs2_next_3),
-                - enabler * range_check_20(rs2_clock_diff),
-                // 64-bit product carries and both result halves are bytes.
-                // Result limbs (both halves) are bytes and the 64-bit schoolbook
-                // carries fit 11 bits (up to 8 partial products per limb exceed
-                // 8 bits for maximal operands).
-                - enabler * range_check_8_11(rd_next_0, carry_0),
-                - enabler * range_check_8_11(rd_next_1, carry_1),
-                - enabler * range_check_8_11(rd_next_2, carry_2),
-                - enabler * range_check_8_11(rd_next_3, carry_3),
-                - enabler * range_check_8_11(rd_high_0, carry_4),
-                - enabler * range_check_8_11(rd_high_1, carry_5),
-                - enabler * range_check_8_11(rd_high_2, carry_6),
-                - enabler * range_check_8_11(rd_high_3, carry_7),
-                // Write rd.
-                -enabler * memory_access(0, rd_addr, rd_clock_prev, rd_prev_0, rd_prev_1, rd_prev_2, rd_prev_3),
-                enabler * memory_access(0, rd_addr, clock, rd_next_0, rd_next_1, rd_next_2, rd_next_3),
-                - enabler * range_check_20(rd_clock_diff),
-            },
-        },
+        // mulh migrated to crate::opcodes::mulh (external:).
 
         // ==========================================================================
         // 16. DIV (div/divu/rem/remu) - airs.md Section 16

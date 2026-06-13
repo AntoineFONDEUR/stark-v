@@ -105,6 +105,10 @@ def main():
     looks = []
     for entry in split_top(lookups):
         e = subst_enabler(entry).strip()
+        # `batch: N` tunes LogUp fraction batching; the generated opcode
+        # component already emits one fraction per entry, so it is a no-op here.
+        if re.match(r"^batch\s*:", e):
+            continue
         # Schema convention: a leading `-` means consume (negative
         # multiplicity); no sign means emit (positive multiplicity).
         sign = "+"

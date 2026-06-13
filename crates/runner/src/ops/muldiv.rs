@@ -327,6 +327,42 @@ struct DivWitness {
     lt_diff: u32,
 }
 
+/// Fill one div row from the rs1/rs2 reads, rd write, the division witness
+/// (quotient/remainder limbs, signs, comparison markers) and the
+/// div/divu/rem/remu flags.
+fn fill_div(
+    tracer: &mut Tracer,
+    pc: u32,
+    rd: &Access,
+    rs1: &Access,
+    rs2: &Access,
+    w: &DivWitness,
+    flags: [u32; 4],
+) {
+    let f = BaseField::from_u32_unchecked;
+    let clock = tracer.clock;
+    let mut args = Vec::with_capacity(65);
+    args.extend([f(clock), f(pc)]);
+    args.extend(access_limbs(rd));
+    args.extend(access_limbs(rs1));
+    args.extend(access_limbs(rs2));
+    args.extend([f(w.zero_divisor), f(w.r_zero)]);
+    args.extend(w.q.map(f));
+    args.extend(w.r.map(f));
+    args.extend([f(w.b_sign), f(w.c_sign), f(w.q_sign), f(w.sign_xor)]);
+    args.extend([f(w.c_sum_inv), f(w.r_sum_inv)]);
+    args.extend(w.r_abs.map(f));
+    args.extend(w.r_inv.map(f));
+    args.extend(w.lt_marker.map(f));
+    args.push(f(w.lt_diff));
+    args.extend(flags.map(f));
+    air::opcodes::div::div_fill(
+        &mut tracer.div,
+        args.try_into().expect("div fill takes 65 felts"),
+        [],
+    );
+}
+
 fn negate_limbs(limbs: &[u32; 4]) -> [u32; 4] {
     let mut carry = 1u32;
     let mut out = [0u32; 4];
@@ -368,18 +404,7 @@ pub fn div(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let w = compute_div_witness(rs1.next, rs2.next, true);
 
     // opcode flags: div=1, divu=0, rem=0, remu=0
-    trace_op!(div: tracer, old_pc, rd, rs1, rs2,
-        w.zero_divisor, w.r_zero,
-        w.q[0], w.q[1], w.q[2], w.q[3],
-        w.r[0], w.r[1], w.r[2], w.r[3],
-        w.b_sign, w.c_sign, w.q_sign, w.sign_xor,
-        w.c_sum_inv, w.r_sum_inv,
-        w.r_abs[0], w.r_abs[1], w.r_abs[2], w.r_abs[3],
-        w.r_inv[0], w.r_inv[1], w.r_inv[2], w.r_inv[3],
-        w.lt_marker[0], w.lt_marker[1], w.lt_marker[2], w.lt_marker[3],
-        w.lt_diff,
-        1, 0, 0, 0
-    );
+    fill_div(tracer, old_pc, &rd, &rs1, &rs2, &w, [1, 0, 0, 0]);
 }
 
 pub fn divu(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
@@ -397,18 +422,7 @@ pub fn divu(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let w = compute_div_witness(rs1.next, rs2.next, false);
 
     // opcode flags: div=0, divu=1, rem=0, remu=0
-    trace_op!(div: tracer, old_pc, rd, rs1, rs2,
-        w.zero_divisor, w.r_zero,
-        w.q[0], w.q[1], w.q[2], w.q[3],
-        w.r[0], w.r[1], w.r[2], w.r[3],
-        w.b_sign, w.c_sign, w.q_sign, w.sign_xor,
-        w.c_sum_inv, w.r_sum_inv,
-        w.r_abs[0], w.r_abs[1], w.r_abs[2], w.r_abs[3],
-        w.r_inv[0], w.r_inv[1], w.r_inv[2], w.r_inv[3],
-        w.lt_marker[0], w.lt_marker[1], w.lt_marker[2], w.lt_marker[3],
-        w.lt_diff,
-        0, 1, 0, 0
-    );
+    fill_div(tracer, old_pc, &rd, &rs1, &rs2, &w, [0, 1, 0, 0]);
 }
 
 pub fn rem(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
@@ -430,18 +444,7 @@ pub fn rem(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let w = compute_div_witness(rs1.next, rs2.next, true);
 
     // opcode flags: div=0, divu=0, rem=1, remu=0
-    trace_op!(div: tracer, old_pc, rd, rs1, rs2,
-        w.zero_divisor, w.r_zero,
-        w.q[0], w.q[1], w.q[2], w.q[3],
-        w.r[0], w.r[1], w.r[2], w.r[3],
-        w.b_sign, w.c_sign, w.q_sign, w.sign_xor,
-        w.c_sum_inv, w.r_sum_inv,
-        w.r_abs[0], w.r_abs[1], w.r_abs[2], w.r_abs[3],
-        w.r_inv[0], w.r_inv[1], w.r_inv[2], w.r_inv[3],
-        w.lt_marker[0], w.lt_marker[1], w.lt_marker[2], w.lt_marker[3],
-        w.lt_diff,
-        0, 0, 1, 0
-    );
+    fill_div(tracer, old_pc, &rd, &rs1, &rs2, &w, [0, 0, 1, 0]);
 }
 
 pub fn remu(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
@@ -459,16 +462,5 @@ pub fn remu(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let w = compute_div_witness(rs1.next, rs2.next, false);
 
     // opcode flags: div=0, divu=0, rem=0, remu=1
-    trace_op!(div: tracer, old_pc, rd, rs1, rs2,
-        w.zero_divisor, w.r_zero,
-        w.q[0], w.q[1], w.q[2], w.q[3],
-        w.r[0], w.r[1], w.r[2], w.r[3],
-        w.b_sign, w.c_sign, w.q_sign, w.sign_xor,
-        w.c_sum_inv, w.r_sum_inv,
-        w.r_abs[0], w.r_abs[1], w.r_abs[2], w.r_abs[3],
-        w.r_inv[0], w.r_inv[1], w.r_inv[2], w.r_inv[3],
-        w.lt_marker[0], w.lt_marker[1], w.lt_marker[2], w.lt_marker[3],
-        w.lt_diff,
-        0, 0, 0, 1
-    );
+    fill_div(tracer, old_pc, &rd, &rs1, &rs2, &w, [0, 0, 0, 1]);
 }

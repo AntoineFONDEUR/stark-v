@@ -12,6 +12,7 @@ pub mod branch_lt;
 pub mod div;
 pub mod jal;
 pub mod jalr;
+pub mod load_store;
 pub mod lt_imm;
 pub mod lt_reg;
 pub mod lui;

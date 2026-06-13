@@ -13,20 +13,40 @@ use crate::{Cpu, DecodedInst};
 // =============================================================================
 
 pub fn lui(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
+    use stwo::core::fields::m31::BaseField;
+    let f = BaseField::from_u32_unchecked;
+
     // LUI: rd = imm << 12 (imm is already shifted in decode)
     let rd = cpu.write_reg(inst.rd, inst.imm as u32, tracer);
     let old_pc = cpu.pc;
+    let clock = tracer.clock;
     cpu.advance_pc();
 
-    // The immediate for LUI is a 20-bit value in the upper bits
-    // imm as stored has already been shifted, so we need to extract the upper 20 bits
-    let imm_val = (inst.imm as u32) >> 12; // Get the actual 20-bit immediate
+    // The immediate for LUI is a 20-bit value in the upper bits; the stored
+    // imm is already shifted, so extract the upper 20 bits.
+    let imm_val = (inst.imm as u32) >> 12;
     let imm_0 = imm_val & 0xF; // bits [0:3]
     let imm_1 = (imm_val >> 4) & 0xFF; // bits [4:11]
     let imm_2 = (imm_val >> 12) & 0xFF; // bits [12:19] (only 4 bits)
 
-    trace_op!(lui: tracer, old_pc, rd,
-        imm_0, imm_1, imm_2
+    // Fill the felt-function lui table with the access values the AIR reads:
+    // (clock, pc, rd_addr, rd_prev limbs, rd_clock_prev, imm limbs).
+    air::opcodes::lui::lui_fill(
+        &mut tracer.lui,
+        [
+            f(clock),
+            f(old_pc),
+            f(rd.addr),
+            f(rd.prev & 0xFF),
+            f((rd.prev >> 8) & 0xFF),
+            f((rd.prev >> 16) & 0xFF),
+            f((rd.prev >> 24) & 0xFF),
+            f(rd.clock_prev),
+            f(imm_0),
+            f(imm_1),
+            f(imm_2),
+        ],
+        [],
     );
 }
 

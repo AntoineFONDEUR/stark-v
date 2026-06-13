@@ -264,7 +264,22 @@ fn render_trace_components(entries: &[ComponentEntry]) -> TokenStream2 {
             }
         }
     });
-    quote! { #(#modules)* }
+    // Override entries (`name: module`) don't generate a module; alias the
+    // pointed-at module as `#name` so `crate::components::#name::{air,witness}`
+    // resolves uniformly (used by the e2e test harness and trace orchestration).
+    let aliases = entries
+        .iter()
+        .filter(|entry| !entry.generated)
+        .map(|entry| {
+            let name = &entry.name;
+            let module = &entry.module;
+            quote! { pub use #module as #name; }
+        });
+
+    quote! {
+        #(#modules)*
+        #(#aliases)*
+    }
 }
 
 fn render_components(opcodes: Vec<ComponentEntry>, lookups: Vec<Ident>) -> TokenStream2 {

@@ -1708,14 +1708,11 @@ pub fn define_air_fns(input: TokenStream) -> TokenStream {
     }
 
     if let Some(flags) = embedded {
-        if let Some((name, _)) = external_relations.first() {
-            return syn::Error::new_spanned(
-                name,
-                "external relations are not supported in `embedded` mode (the host wires relations)",
-            )
-            .to_compile_error()
-            .into();
-        }
+        // In embedded mode the declared relations are NOT given their own
+        // generated types — `emit`/`consume` map onto the host
+        // `crate::relations::Relations` (an opcode emitting `program_access`,
+        // `memory_access`, range checks, …). The declarations only fix arity
+        // for the parser.
         return generate_embedded(&mut lowered, &flags, embedded_component);
     }
 
@@ -1879,7 +1876,15 @@ fn generate_embedded(
     let evaluation = generate_evaluation_impl(function).unwrap_or_else(|e| e.to_compile_error());
     let fill = generate_embedded_fill(function, flags).unwrap_or_else(|e| e.to_compile_error());
     let component = if embedded_component {
-        generate_embedded_poseidon2_component(function, flags)
+        if function.relation_entries.is_empty() {
+            // No emit/consume statements: the Poseidon2 adapter, which emits
+            // from the io activation tuple under its narrow/wide/io flags.
+            generate_embedded_poseidon2_component(function, flags)
+        } else {
+            // An opcode: emit its declared relations (emit/consume) against
+            // the host `crate::relations::Relations`.
+            generate_embedded_opcode_component(function)
+        }
     } else {
         quote! {}
     };
@@ -1901,6 +1906,218 @@ fn generate_embedded(
         #component
     }
     .into()
+}
+
+/// Is a host relation preprocessed (a lookup table whose multiplicities the
+/// opcode must register)? In the rv32im relation set these are the range
+/// checks and the bitwise table.
+fn is_preprocessed_relation(name: &Ident) -> bool {
+    let n = name.to_string();
+    n.starts_with("range_check") || n == "bitwise"
+}
+
+/// The opcode component: emit the function's declared relations against the
+/// host `crate::relations::Relations`, generate the LogUp interaction trace,
+/// and register preprocessed multiplicities — the same contract `components!`
+/// generates for a schema opcode, but driven by the fn-DSL `emit`/`consume`
+/// statements. The function's own io activation tuple (entry 0) is unused:
+/// an opcode is a trace table the runner fills, not an activated function.
+fn generate_embedded_opcode_component(function: &LoweredFn) -> TokenStream2 {
+    let columns_type = column_struct_name(&function.name);
+    let n_entries = function.relation_entries.len();
+    let indices: Vec<usize> = (0..n_entries).collect();
+    let relations: Vec<&Ident> = function
+        .relation_entries
+        .iter()
+        .map(|(relation, _, _)| relation)
+        .collect();
+
+    // Preprocessed entries (range checks / bitwise): their per-row
+    // multiplicities feed the preprocessed table's counter.
+    let preprocessed: Vec<(usize, &Ident)> = function
+        .relation_entries
+        .iter()
+        .enumerate()
+        .filter(|(_, (relation, _, _))| is_preprocessed_relation(relation))
+        .map(|(index, (relation, _, _))| (index, relation))
+        .collect();
+    let pp_slots: Vec<usize> = (0..preprocessed.len()).collect();
+    let pp_entry_indices: Vec<usize> = preprocessed.iter().map(|(i, _)| *i).collect();
+    let pp_relations: Vec<&Ident> = preprocessed.iter().map(|(_, r)| *r).collect();
+    let n_preprocessed = preprocessed.len();
+
+    quote! {
+        /// Prover component wiring for the embedded opcode.
+        pub mod component {
+            pub mod air {
+                use stwo_constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval};
+
+                use crate::relations::Relations;
+                use super::super::prover_columns::#columns_type;
+
+                pub type Component = FrameworkComponent<Eval>;
+
+                #[derive(Clone)]
+                pub struct Eval {
+                    pub log_size: u32,
+                    pub relations: Relations,
+                }
+
+                impl FrameworkEval for Eval {
+                    fn log_size(&self) -> u32 {
+                        self.log_size
+                    }
+
+                    fn max_constraint_log_degree_bound(&self) -> u32 {
+                        self.log_size + 1
+                    }
+
+                    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+                        let cols = #columns_type::from_eval(&mut eval);
+                        let (constraints, entries) = cols.evaluation();
+                        for constraint in constraints {
+                            eval.add_constraint(constraint);
+                        }
+                        let mut entries = entries.into_iter();
+                        // Entry 0 is the function's own io activation tuple,
+                        // unused: the opcode emits the host relations instead.
+                        let _ = entries.next();
+                        #(
+                            {
+                                let (multiplicity, values) =
+                                    entries.next().expect("relation entry");
+                                eval.add_to_relation(
+                                    stwo_constraint_framework::RelationEntry::new(
+                                        &self.relations.#relations,
+                                        multiplicity.into(),
+                                        &values,
+                                    ),
+                                );
+                            }
+                        )*
+                        eval.finalize_logup();
+                        eval
+                    }
+                }
+            }
+
+            pub mod witness {
+                use num_traits::Zero;
+                use stwo::core::ColumnVec;
+                use stwo::core::fields::m31::BaseField;
+                use stwo::core::fields::qm31::QM31;
+                use stwo::prover::backend::simd::SimdBackend;
+                use stwo::prover::backend::simd::qm31::PackedQM31;
+                use stwo::prover::poly::BitReversedOrder;
+                use stwo::prover::poly::circle::CircleEvaluation;
+                use stwo_constraint_framework::{LogupTraceGenerator, Relation};
+
+                use crate::relations::{Counters, Relations};
+                use super::super::prover_columns::#columns_type;
+
+                /// One singleton fraction column per emitted relation, in the
+                /// order the AIR adds them.
+                pub fn gen_interaction_trace(
+                    trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
+                    relations: &Relations,
+                ) -> (
+                    ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
+                    QM31,
+                ) {
+                    if trace.is_empty() {
+                        return (vec![], QM31::zero());
+                    }
+                    let cols = #columns_type::from_iter(trace.iter().map(|eval| &eval.values.data));
+                    let simd_size = cols.enabler.len();
+                    let log_size = trace[0].domain.log_size();
+                    let mut logup_gen = LogupTraceGenerator::new(log_size);
+
+                    let mut numerators: Vec<Vec<PackedQM31>> =
+                        vec![Vec::with_capacity(simd_size); #n_entries];
+                    let mut denominators: Vec<Vec<PackedQM31>> =
+                        vec![Vec::with_capacity(simd_size); #n_entries];
+                    for i in 0..simd_size {
+                        let (_, entries) = cols.at(i).evaluation();
+                        // Skip entry 0 (the io activation tuple).
+                        let entries: Vec<_> = entries.into_iter().skip(1).collect();
+                        #(
+                            {
+                                let (multiplicity, values) = &entries[#indices];
+                                numerators[#indices].push(PackedQM31::from(*multiplicity));
+                                denominators[#indices].push(
+                                    Relation::combine(&relations.#relations, values),
+                                );
+                            }
+                        )*
+                    }
+                    #(
+                        {
+                            let mut col = logup_gen.new_col();
+                            for (vec_row, (n, d)) in numerators[#indices]
+                                .iter()
+                                .zip(denominators[#indices].iter())
+                                .enumerate()
+                            {
+                                col.write_frac(vec_row, *n, *d);
+                            }
+                            col.finalize_col();
+                        }
+                    )*
+                    logup_gen.finalize_last()
+                }
+
+                /// Register preprocessed multiplicities for the opcode's
+                /// range-check / bitwise lookups.
+                pub fn register_multiplicities(
+                    trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
+                    counters: &mut Counters,
+                ) {
+                    if trace.is_empty() {
+                        return;
+                    }
+                    let _ = (&counters,);
+                    let cols = #columns_type::from_iter(trace.iter().map(|eval| &eval.values.data));
+                    let simd_size = cols.enabler.len();
+                    let mut multiplicities: Vec<Vec<stwo::prover::backend::simd::m31::PackedM31>> =
+                        vec![Vec::with_capacity(simd_size); #n_preprocessed];
+                    let mut elements: Vec<Vec<Vec<stwo::prover::backend::simd::m31::PackedM31>>> =
+                        Vec::with_capacity(#n_preprocessed);
+                    for _ in 0..#n_preprocessed {
+                        elements.push(Vec::new());
+                    }
+                    for i in 0..simd_size {
+                        let (_, entries) = cols.at(i).evaluation();
+                        let entries: Vec<_> = entries.into_iter().skip(1).collect();
+                        #(
+                            {
+                                let (multiplicity, values) = &entries[#pp_entry_indices];
+                                multiplicities[#pp_slots].push(*multiplicity);
+                                if elements[#pp_slots].is_empty() {
+                                    for _ in 0..values.len() {
+                                        elements[#pp_slots].push(Vec::with_capacity(simd_size));
+                                    }
+                                }
+                                for (column, value) in
+                                    elements[#pp_slots].iter_mut().zip(values.iter())
+                                {
+                                    column.push(*value);
+                                }
+                            }
+                        )*
+                    }
+                    #(
+                        counters.#pp_relations.register_many(
+                            &multiplicities[#pp_slots],
+                            &elements[#pp_slots]
+                                .iter()
+                                .map(|column| column.as_slice())
+                                .collect::<Vec<_>>(),
+                        );
+                    )*
+                }
+            }
+        }
+    }
 }
 
 /// LogUp adapter for embedded Poseidon2: narrow, wide, and atomic io modes.
@@ -2094,6 +2311,9 @@ fn generate_embedded_fill(function: &LoweredFn, flags: &[Ident]) -> syn::Result<
     );
     Ok(quote! {
         #[doc = #doc]
+        // Cells used only in relation tuples / constraints are recomputed in
+        // the AIR's `evaluation()`, so their fill bindings can be unused here.
+        #[allow(unused_variables)]
         pub fn #fn_name(
             table: &mut #table_type,
             args: [stwo::core::fields::m31::BaseField; #n_args],

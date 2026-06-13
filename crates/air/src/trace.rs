@@ -134,12 +134,6 @@ mod tests {
         }
 
         #[test]
-        fn test_lui_columns_size() {
-            // LUI: enabler (1), clock, pc, rd (10), imm_0, imm_1, imm_2 = 16 total
-            assert_eq!(LuiColumns::<()>::SIZE, 16);
-        }
-
-        #[test]
         fn test_load_store_columns_size() {
             // load_store: clock (1), pc (1), dst (10), rs1 (10), src (10),
             // + r2_idx, imm_felt, src_msb, shift_amount (4)
@@ -177,52 +171,9 @@ mod tests {
             BaseField::from_u32_unchecked(v)
         }
 
-        /// All-zero LUI columns, mutated per test.
-        fn zero_lui_cols() -> LuiColumns<BaseField> {
-            LuiColumns::from_iter(std::iter::repeat_n(f(0), LuiColumns::<()>::SIZE))
-        }
-
         /// All-zero Base ALU Imm columns, mutated per test.
         fn zero_base_alu_imm_cols() -> BaseAluImmColumns<BaseField> {
             BaseAluImmColumns::from_iter(std::iter::repeat_n(f(0), BaseAluImmColumns::<()>::SIZE))
-        }
-
-        #[test]
-        fn test_lui_imm_combines_limbs() {
-            let mut cols = zero_lui_cols();
-            cols.imm_0 = f(3);
-            cols.imm_1 = f(5);
-            cols.imm_2 = f(7);
-            assert_eq!(cols.imm(), f(3 + 5 * (1 << 4) + 7 * (1 << 12)));
-        }
-
-        #[test]
-        fn test_lui_pc_next_adds_four() {
-            let mut cols = zero_lui_cols();
-            cols.pc = f(0x1000);
-            assert_eq!(cols.pc_next(), f(0x1004));
-        }
-
-        #[test]
-        fn test_lui_rd_clock_diff() {
-            let mut cols = zero_lui_cols();
-            cols.clock = f(10);
-            cols.rd_clock_prev = f(4);
-            assert_eq!(cols.rd_clock_diff(), f(6));
-        }
-
-        #[test]
-        fn test_lui_enabler_booleanity_holds_for_one() {
-            let mut cols = zero_lui_cols();
-            cols.enabler = f(1);
-            assert_eq!(cols.constraints()[0], f(0));
-        }
-
-        #[test]
-        fn test_lui_enabler_booleanity_fails_for_two() {
-            let mut cols = zero_lui_cols();
-            cols.enabler = f(2);
-            assert_ne!(cols.constraints()[0], f(0));
         }
 
         #[test]
@@ -279,11 +230,12 @@ mod tests {
 
         #[test]
         fn test_at_extracts_row_values() {
-            // Column c holds [c, c + 100]; pc is the third column (index 2)
-            let data: Vec<Vec<BaseField>> = (0..LuiColumns::<()>::SIZE as u32)
+            // Column c holds [c, c + 100]; pc is the third column (index 2,
+            // after enabler and clock).
+            let data: Vec<Vec<BaseField>> = (0..JalColumns::<()>::SIZE as u32)
                 .map(|c| vec![f(c), f(c + 100)])
                 .collect();
-            let cols = LuiColumns::from_iter(data.iter());
+            let cols = JalColumns::from_iter(data.iter());
             assert_eq!(cols.at(1).pc, f(102));
         }
     }
@@ -326,18 +278,18 @@ mod tests {
         }
 
         #[test]
-        fn test_lui_table_to_table_with_enabler() {
-            // LUI has an enabler column (no opcode flags)
-            let mut table = LuiTable::new();
+        fn test_jal_table_to_table_with_enabler() {
+            // JAL has an enabler column (no opcode flags).
+            let mut table = JalTable::new();
 
             let rd = Access {
                 addr: 10,
                 prev: 0,
                 clock_prev: 0,
-                next: 0x12345000,
+                next: 0x1004,
             };
 
-            table.push(1, 0x1000, rd, 0x12, 0x34, 0x50);
+            table.push(1, 0x1000, rd, 100);
 
             // Inspect header cells, not the rendered string: the dynamic
             // arrangement truncates wide headers to the terminal width.
@@ -401,16 +353,13 @@ mod tests {
             let rs2 = Access::default();
 
             tracer.base_alu_reg.push(0, 0, rd, rs1, rs2, 1, 0, 0, 0, 0);
-            tracer.lui.push(1, 4, rd, 0, 0, 0);
             tracer.jal.push(2, 8, rd, 100);
 
             // Each table should produce valid output
             let base_alu_output = tracer.base_alu_reg.to_table().to_string();
-            let lui_output = tracer.lui.to_table().to_string();
             let jal_output = tracer.jal.to_table().to_string();
 
-            // LUI and JAL have enabler columns, BaseAluReg doesn't
-            assert!(lui_output.contains("enabler"));
+            // JAL has an enabler column, BaseAluReg doesn't.
             assert!(jal_output.contains("enabler"));
             assert!(!base_alu_output.contains("enabler"));
         }

@@ -12,7 +12,7 @@ stwo_macros::components! {
         branch_lt,
         div,
         jal: air::opcodes::jal::component,
-        jalr,
+        jalr: air::opcodes::jalr::component,
         load_store,
         lt_imm,
         lt_reg,

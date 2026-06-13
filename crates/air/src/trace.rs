@@ -278,32 +278,6 @@ mod tests {
         }
 
         #[test]
-        fn test_jal_table_to_table_with_enabler() {
-            // JAL has an enabler column (no opcode flags).
-            let mut table = JalTable::new();
-
-            let rd = Access {
-                addr: 10,
-                prev: 0,
-                clock_prev: 0,
-                next: 0x1004,
-            };
-
-            table.push(1, 0x1000, rd, 100);
-
-            // Inspect header cells, not the rendered string: the dynamic
-            // arrangement truncates wide headers to the terminal width.
-            let headers: Vec<String> = table
-                .to_table()
-                .header()
-                .expect("headers are always set")
-                .cell_iter()
-                .map(|cell| cell.content())
-                .collect();
-            assert!(headers.contains(&"enabler".to_string()));
-        }
-
-        #[test]
         fn test_empty_table_to_table() {
             let table = BaseAluRegTable::new();
 
@@ -353,14 +327,11 @@ mod tests {
             let rs2 = Access::default();
 
             tracer.base_alu_reg.push(0, 0, rd, rs1, rs2, 1, 0, 0, 0, 0);
-            tracer.jal.push(2, 8, rd, 100);
 
-            // Each table should produce valid output
+            // Each table should produce valid output.
             let base_alu_output = tracer.base_alu_reg.to_table().to_string();
-            let jal_output = tracer.jal.to_table().to_string();
 
-            // JAL has an enabler column, BaseAluReg doesn't.
-            assert!(jal_output.contains("enabler"));
+            // BaseAluReg uses opcode flags, not an enabler column.
             assert!(!base_alu_output.contains("enabler"));
         }
     }

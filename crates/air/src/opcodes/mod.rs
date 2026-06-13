@@ -6,4 +6,5 @@
 
 pub mod auipc;
 pub mod jal;
+pub mod jalr;
 pub mod lui;

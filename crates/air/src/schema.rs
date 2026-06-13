@@ -33,6 +33,7 @@ stwo_macros::define_air! {
         lui: crate::opcodes::lui,
         auipc: crate::opcodes::auipc,
         jal: crate::opcodes::jal,
+        jalr: crate::opcodes::jalr,
     }
     trace: {
         base_alu_reg: {
@@ -780,49 +781,7 @@ stwo_macros::define_air! {
         // ==========================================================================
         // 11. JALR - airs.md Section 11
         // ==========================================================================
-        jalr: {
-            committed: {
-                clock, pc, rd, rs1,
-                to_pc_over_two, to_pc_lsb,
-                imm_felt,
-            },
-            derived: {
-                rs1_felt: rs1_next_0 + pow2(8) * rs1_next_1 + pow2(16) * rs1_next_2 + pow2(24) * rs1_next_3,
-                rd_felt: rd_next_0 + pow2(8) * rd_next_1 + pow2(16) * rd_next_2 + pow2(24) * rd_next_3,
-                // Jump target, even-aligned (airs.md 11.2)
-                jump_target: 2 * to_pc_over_two,
-                clock_next: clock + 1,
-                rs1_clock_diff: clock - rs1_clock_prev,
-                rd_clock_diff: clock - rd_clock_prev,
-            },
-            constraints: {
-                to_pc_lsb * (1 - to_pc_lsb),
-                // 2 * to_pc_over_two + to_pc_lsb = rs1 + imm
-                2 * to_pc_over_two + to_pc_lsb - (rs1_felt + imm_felt),
-                // rd = pc + 4, gated by rd_addr (x0 writes discarded)
-                enabler * rd_addr * (rd_felt - (pc + 4)),
-            },
-            lookups: {
-                // Program access (I-type): Program(pc, JALR, rd_idx, rs1_idx, imm)
-                -enabler * program_access(pc, constant(crate::instructions::Opcode::Jalr as u32), rd_addr, rs1_addr, imm_felt),
-                // Read rs1 (REG_AS = 0).
-                -enabler * memory_access(0, rs1_addr, rs1_clock_prev, rs1_prev_0, rs1_prev_1, rs1_prev_2, rs1_prev_3),
-                enabler * memory_access(0, rs1_addr, clock, rs1_next_0, rs1_next_1, rs1_next_2, rs1_next_3),
-                - enabler * range_check_20(rs1_clock_diff),
-                // rs1 is an M31 (the jump target must be a valid pc).
-                - enabler * range_check_m31(rs1_next_0, rs1_next_3),
-                // Jump: pc moves to the even-aligned target.
-                -enabler * registers_state(pc, clock),
-                enabler * registers_state(jump_target, clock_next),
-                // rd = pc + 4 is an M31.
-                - enabler * range_check_8_8(rd_next_1, rd_next_2),
-                - enabler * range_check_m31(rd_next_0, rd_next_3),
-                // Write rd.
-                -enabler * memory_access(0, rd_addr, rd_clock_prev, rd_prev_0, rd_prev_1, rd_prev_2, rd_prev_3),
-                enabler * memory_access(0, rd_addr, clock, rd_next_0, rd_next_1, rd_next_2, rd_next_3),
-                - enabler * range_check_20(rd_clock_diff),
-            },
-        },
+        // JALR migrated to crate::opcodes::jalr (external:).
 
         // ==========================================================================
         // 12. JAL - airs.md Section 12

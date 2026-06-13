@@ -168,6 +168,62 @@ pub fn andi(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
 // Shifts Imm (slli/srli/srai) - airs.md Section 4
 // =============================================================================
 
+/// Fill one shifts_imm row from the rs1 read, rd write, the sign bit, the
+/// truncated shift immediate, the sll/srl/sra flags, the left/right bit
+/// multipliers and the one-hot bit/limb markers and carries.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fill_shifts_imm(
+    tracer: &mut Tracer,
+    pc: u32,
+    rd: &crate::trace::Access,
+    rs1: &crate::trace::Access,
+    rs1_sign: u32,
+    imm_truncated: u32,
+    flags: [u32; 3],
+    bit_multiplier_left: u32,
+    bit_multiplier_right: u32,
+    bit_shift_marker: [u32; 8],
+    limb_shift_marker: [u32; 4],
+    bit_shift_carry: [u32; 4],
+) {
+    use stwo::core::fields::m31::BaseField;
+    let f = BaseField::from_u32_unchecked;
+    let clock = tracer.clock;
+    let limbs = |a: &crate::trace::Access| {
+        [
+            a.addr,
+            a.prev & 0xFF,
+            (a.prev >> 8) & 0xFF,
+            (a.prev >> 16) & 0xFF,
+            (a.prev >> 24) & 0xFF,
+            a.clock_prev,
+            a.next & 0xFF,
+            (a.next >> 8) & 0xFF,
+            (a.next >> 16) & 0xFF,
+            (a.next >> 24) & 0xFF,
+        ]
+    };
+    let mut args = Vec::with_capacity(45);
+    args.extend([clock, pc]);
+    args.extend(limbs(rd));
+    args.extend(limbs(rs1));
+    args.extend([rs1_sign, imm_truncated]);
+    args.extend(flags);
+    args.extend([bit_multiplier_left, bit_multiplier_right]);
+    args.extend(bit_shift_marker);
+    args.extend(limb_shift_marker);
+    args.extend(bit_shift_carry);
+    air::opcodes::shifts_imm::shifts_imm_fill(
+        &mut tracer.shifts_imm,
+        args.into_iter()
+            .map(f)
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("shifts_imm fill takes 45 felts"),
+        [],
+    );
+}
+
 pub fn slli(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let old_pc = cpu.pc;
     let rs1 = cpu.read_reg(inst.rs1, tracer);
@@ -180,14 +236,19 @@ pub fn slli(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let bit_multiplier = 1u32 << (shamt % 8);
 
     // opcode flags: sll=1, srl=0, sra=0
-    trace_op!(shifts_imm: tracer, old_pc, rd, rs1,
-        w.rs1_sign, shamt,
-        1, 0, 0,  // opcode flags
-        bit_multiplier, 0,  // bit_multiplier_left, bit_multiplier_right
-        w.bit_shift_marker[0], w.bit_shift_marker[1], w.bit_shift_marker[2], w.bit_shift_marker[3],
-        w.bit_shift_marker[4], w.bit_shift_marker[5], w.bit_shift_marker[6], w.bit_shift_marker[7],
-        w.limb_shift_marker[0], w.limb_shift_marker[1], w.limb_shift_marker[2], w.limb_shift_marker[3],
-        w.bit_shift_carry[0], w.bit_shift_carry[1], w.bit_shift_carry[2], w.bit_shift_carry[3]
+    fill_shifts_imm(
+        tracer,
+        old_pc,
+        &rd,
+        &rs1,
+        w.rs1_sign,
+        shamt,
+        [1, 0, 0],
+        bit_multiplier,
+        0,
+        w.bit_shift_marker,
+        w.limb_shift_marker,
+        w.bit_shift_carry,
     );
 }
 
@@ -203,14 +264,19 @@ pub fn srli(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let bit_multiplier = 1u32 << (shamt % 8);
 
     // opcode flags: sll=0, srl=1, sra=0
-    trace_op!(shifts_imm: tracer, old_pc, rd, rs1,
-        w.rs1_sign, shamt,
-        0, 1, 0,  // opcode flags
-        0, bit_multiplier,  // bit_multiplier_left, bit_multiplier_right
-        w.bit_shift_marker[0], w.bit_shift_marker[1], w.bit_shift_marker[2], w.bit_shift_marker[3],
-        w.bit_shift_marker[4], w.bit_shift_marker[5], w.bit_shift_marker[6], w.bit_shift_marker[7],
-        w.limb_shift_marker[0], w.limb_shift_marker[1], w.limb_shift_marker[2], w.limb_shift_marker[3],
-        w.bit_shift_carry[0], w.bit_shift_carry[1], w.bit_shift_carry[2], w.bit_shift_carry[3]
+    fill_shifts_imm(
+        tracer,
+        old_pc,
+        &rd,
+        &rs1,
+        w.rs1_sign,
+        shamt,
+        [0, 1, 0],
+        0,
+        bit_multiplier,
+        w.bit_shift_marker,
+        w.limb_shift_marker,
+        w.bit_shift_carry,
     );
 }
 
@@ -226,14 +292,19 @@ pub fn srai(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let bit_multiplier = 1u32 << (shamt % 8);
 
     // opcode flags: sll=0, srl=0, sra=1
-    trace_op!(shifts_imm: tracer, old_pc, rd, rs1,
-        w.rs1_sign, shamt,
-        0, 0, 1,  // opcode flags
-        0, bit_multiplier,  // bit_multiplier_left, bit_multiplier_right
-        w.bit_shift_marker[0], w.bit_shift_marker[1], w.bit_shift_marker[2], w.bit_shift_marker[3],
-        w.bit_shift_marker[4], w.bit_shift_marker[5], w.bit_shift_marker[6], w.bit_shift_marker[7],
-        w.limb_shift_marker[0], w.limb_shift_marker[1], w.limb_shift_marker[2], w.limb_shift_marker[3],
-        w.bit_shift_carry[0], w.bit_shift_carry[1], w.bit_shift_carry[2], w.bit_shift_carry[3]
+    fill_shifts_imm(
+        tracer,
+        old_pc,
+        &rd,
+        &rs1,
+        w.rs1_sign,
+        shamt,
+        [0, 0, 1],
+        0,
+        bit_multiplier,
+        w.bit_shift_marker,
+        w.limb_shift_marker,
+        w.bit_shift_carry,
     );
 }
 

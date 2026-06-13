@@ -15,3 +15,5 @@ pub mod lt_reg;
 pub mod lui;
 pub mod mul;
 pub mod mulh;
+pub mod shifts_imm;
+pub mod shifts_reg;

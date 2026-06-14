@@ -535,6 +535,42 @@ pub fn verify_node_compressed(
     crate::prover::verify_recursion_with_channel::<Poseidon2M31MerkleChannel>(node, &arenas, config)
 }
 
+/// Fold a power-of-two set of Poseidon2-channel recursion proofs into a single
+/// constant-size root by repeated 2-to-1 compression (docs/recursion.md, the
+/// full aggregation tree).
+///
+/// Each level pairs its proofs and compresses every pair with
+/// [`prove_node_compressed`], carrying the resulting node proof up to the next
+/// level; the grandchildren's stripped bodies are dropped because each child
+/// node proof already attests its own subtree in-AIR. The returned
+/// [`CompressedNode`] is the tree root: the root recursion proof plus its two
+/// immediate (decommitment-free) child node proofs — a footprint independent
+/// of how many leaves sit beneath it.
+pub fn prove_tree_compressed(
+    leaves: Vec<RecursionProof<Poseidon2M31MerkleHasher>>,
+    config: PcsConfig,
+) -> Result<CompressedNode, VerificationError> {
+    if !leaves.len().is_power_of_two() || leaves.len() < 2 {
+        return Err(VerificationError::InvalidStructure(
+            "a recursion tree needs a power-of-two leaf count of at least 2".to_string(),
+        ));
+    }
+    let mut level = leaves;
+    // Reduce to the final pair, taking each node proof up to the next level.
+    while level.len() > 2 {
+        let mut next = Vec::with_capacity(level.len() / 2);
+        let mut pairs = level.into_iter();
+        while let (Some(left), Some(right)) = (pairs.next(), pairs.next()) {
+            next.push(prove_node_compressed(left, right, config)?.node);
+        }
+        level = next;
+    }
+    let mut pair = level.into_iter();
+    let left = pair.next().expect("at least two proofs");
+    let right = pair.next().expect("at least two proofs");
+    prove_node_compressed(left, right, config)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -655,5 +691,43 @@ mod tests {
         );
         verify_node_compressed(compressed, PcsConfig::default())
             .expect("compressed node verification failed");
+    }
+
+    /// Four leaves fold through two level-1 nodes into one root, and the root
+    /// — attesting the whole tree transitively in-AIR — verifies.
+    #[test]
+    fn test_compressed_tree_root_verifies() {
+        let leaves = (1..=4u32).map(small_proof_poseidon).collect::<Vec<_>>();
+        let root =
+            prove_tree_compressed(leaves, PcsConfig::default()).expect("tree proving failed");
+        verify_node_compressed(root, PcsConfig::default()).expect("tree root verification failed");
+    }
+
+    /// The root artifact is a single 2-to-1 node — exactly two immediate child
+    /// node proofs — no matter how many leaves sit beneath it.
+    #[test]
+    fn test_compressed_tree_root_carries_two_children() {
+        let leaves = (1..=4u32).map(small_proof_poseidon).collect::<Vec<_>>();
+        let root =
+            prove_tree_compressed(leaves, PcsConfig::default()).expect("tree proving failed");
+        assert_eq!(root.children.len(), 2);
+    }
+
+    /// Constant size to the top: an 8-leaf (depth-3) tree and a 4-leaf
+    /// (depth-2) tree produce roots of identical trace shape, so the root
+    /// proof size does not grow with tree depth.
+    #[test]
+    fn test_compressed_tree_root_shape_is_depth_invariant() {
+        let depth2 = prove_tree_compressed(
+            (1..=4u32).map(small_proof_poseidon).collect(),
+            PcsConfig::default(),
+        )
+        .expect("depth-2 tree proving failed");
+        let depth3 = prove_tree_compressed(
+            (1..=8u32).map(small_proof_poseidon).collect(),
+            PcsConfig::default(),
+        )
+        .expect("depth-3 tree proving failed");
+        assert_eq!(depth2.node.log_sizes, depth3.node.log_sizes);
     }
 }

@@ -4,7 +4,7 @@
 
 use prover::e2e::prove_segments_with_channel;
 use prover::poseidon2_channel::Poseidon2M31MerkleChannel;
-use prover::{PcsConfig, preprocess_with_channel};
+use prover::{PcsConfig, preprocess_with_channel, prove_rv32im_with_channel};
 use recursion::final_proof::{FinalProof, prove_final, verify_final};
 use runner::{run, run_segments_with_input};
 
@@ -115,6 +115,38 @@ fn test_final_proof_of_10m_cycle_run() {
     assert_eq!(boundary.entry_pc, reference.initial_pc);
     assert_eq!(boundary.exit_pc, reference.final_pc);
     assert_eq!(boundary.exit_regs, reference.final_regs);
+}
+
+/// The simplest end-to-end case: a single small RISC-V execution proven as
+/// one Poseidon2-channel segment, wrapped by `prove_final` into one recursion
+/// proof, and checked by `verify_final` — the leaf-level
+/// "stark-v proof -> AIR-verifier proof" step on its own.
+#[test]
+fn test_final_proof_of_single_small_segment() {
+    prover::e2e::ensure_guest_built();
+    let elf_path = prover::e2e::guest_bin_dir().join("mul_output");
+    let elf_bytes = std::fs::read(&elf_path).expect("Failed to read mul_output ELF");
+
+    let reference = run(&elf_bytes, 10_000_000).expect("Failed to run mul_output");
+    let (entry_pc, exit_pc, exit_regs) = (
+        reference.initial_pc,
+        reference.final_pc,
+        reference.final_regs,
+    );
+
+    let config = PcsConfig::default();
+    let preprocessing = preprocess_with_channel::<Poseidon2M31MerkleChannel>(config);
+    let proof =
+        prove_rv32im_with_channel::<Poseidon2M31MerkleChannel>(reference, config, &preprocessing);
+
+    let final_proof = prove_final(vec![proof], config, &preprocessing);
+    let boundary =
+        verify_final(final_proof, config, &preprocessing).expect("final proof verification failed");
+
+    assert_eq!(
+        (boundary.entry_pc, boundary.exit_pc, boundary.exit_regs),
+        (entry_pc, exit_pc, exit_regs),
+    );
 }
 
 #[test]

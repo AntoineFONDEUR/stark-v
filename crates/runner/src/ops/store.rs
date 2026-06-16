@@ -1,6 +1,5 @@
 //! Store operations - part of load_store family (airs.md Section 13)
 
-use super::load::fill_load_store;
 use super::utils::imm_to_felt;
 use crate::trace::Tracer;
 use crate::{Cpu, DecodedInst, Memory};
@@ -59,20 +58,12 @@ pub fn sb(cpu: &mut Cpu, memory: &mut Memory, inst: &DecodedInst, tracer: &mut T
     // src_addr_selector = r2_idx, dst_addr_selector = mem_addr - shift_amount
     let src_addr_selector = inst.rs2 as u32;
     let dst_addr_selector = addr - w.shift_amount;
-    fill_load_store(
-        tracer,
-        old_pc,
-        &mem,
-        &rs1,
-        &rs2,
-        inst.rs2 as u32,
-        imm_felt,
-        src_msb as u32,
+    trace_op!(load_store: tracer, old_pc, mem, rs1, rs2,
+        inst.rs2 as u32, imm_felt, src_msb as u32,
         w.shift_amount,
-        src_addr_selector,
-        dst_addr_selector,
-        w.marker,
-        [0, 0, 0, 0, 0, 1, 0, 0],
+        src_addr_selector, dst_addr_selector,
+        w.marker[0], w.marker[1], w.marker[2], w.marker[3],
+        0, 0, 0, 0, 0, 1, 0, 0
     );
 }
 
@@ -94,20 +85,12 @@ pub fn sh(cpu: &mut Cpu, memory: &mut Memory, inst: &DecodedInst, tracer: &mut T
     // src_addr_selector = r2_idx, dst_addr_selector = mem_addr - shift_amount
     let src_addr_selector = inst.rs2 as u32;
     let dst_addr_selector = addr - w.shift_amount;
-    fill_load_store(
-        tracer,
-        old_pc,
-        &mem,
-        &rs1,
-        &rs2,
-        inst.rs2 as u32,
-        imm_felt,
-        src_msb as u32,
+    trace_op!(load_store: tracer, old_pc, mem, rs1, rs2,
+        inst.rs2 as u32, imm_felt, src_msb as u32,
         w.shift_amount,
-        src_addr_selector,
-        dst_addr_selector,
-        w.marker,
-        [0, 0, 0, 0, 0, 0, 1, 0],
+        src_addr_selector, dst_addr_selector,
+        w.marker[0], w.marker[1], w.marker[2], w.marker[3],
+        0, 0, 0, 0, 0, 0, 1, 0
     );
 }
 
@@ -129,19 +112,11 @@ pub fn sw(cpu: &mut Cpu, memory: &mut Memory, inst: &DecodedInst, tracer: &mut T
     // src_addr_selector = r2_idx, dst_addr_selector = mem_addr - shift_amount
     let src_addr_selector = inst.rs2 as u32;
     let dst_addr_selector = addr - w.shift_amount;
-    fill_load_store(
-        tracer,
-        old_pc,
-        &mem,
-        &rs1,
-        &rs2,
-        inst.rs2 as u32,
-        imm_felt,
-        src_msb,
+    trace_op!(load_store: tracer, old_pc, mem, rs1, rs2,
+        inst.rs2 as u32, imm_felt, src_msb,
         w.shift_amount,
-        src_addr_selector,
-        dst_addr_selector,
-        w.marker,
-        [0, 0, 0, 0, 0, 0, 0, 1],
+        src_addr_selector, dst_addr_selector,
+        w.marker[0], w.marker[1], w.marker[2], w.marker[3],
+        0, 0, 0, 0, 0, 0, 0, 1
     );
 }

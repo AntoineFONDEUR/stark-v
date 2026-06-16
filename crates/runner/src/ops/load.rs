@@ -1,71 +1,8 @@
 //! Load operations - part of load_store family (airs.md Section 13)
 
 use super::utils::imm_to_felt;
-use crate::trace::{Access, Tracer};
+use crate::trace::Tracer;
 use crate::{Cpu, DecodedInst, Memory};
-
-/// Fill one load_store row from the base-address read, the source and
-/// destination accesses (register vs RW memory selected by load/store), the
-/// instruction operands, the sub-word shift/marker witness and the eight
-/// one-hot opcode flags.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn fill_load_store(
-    tracer: &mut Tracer,
-    pc: u32,
-    dst: &Access,
-    rs1: &Access,
-    src: &Access,
-    r2_idx: u32,
-    imm_felt: u32,
-    src_msb: u32,
-    shift_amount: u32,
-    src_addr_selector: u32,
-    dst_addr_selector: u32,
-    marker: [u32; 4],
-    flags: [u32; 8],
-) {
-    use stwo::core::fields::m31::BaseField;
-    let f = BaseField::from_u32_unchecked;
-    let clock = tracer.clock;
-    let limbs = |a: &Access| {
-        [
-            a.addr,
-            a.prev & 0xFF,
-            (a.prev >> 8) & 0xFF,
-            (a.prev >> 16) & 0xFF,
-            (a.prev >> 24) & 0xFF,
-            a.clock_prev,
-            a.next & 0xFF,
-            (a.next >> 8) & 0xFF,
-            (a.next >> 16) & 0xFF,
-            (a.next >> 24) & 0xFF,
-        ]
-    };
-    let mut args = Vec::with_capacity(50);
-    args.extend([clock, pc]);
-    args.extend(limbs(dst));
-    args.extend(limbs(rs1));
-    args.extend(limbs(src));
-    args.extend([
-        r2_idx,
-        imm_felt,
-        src_msb,
-        shift_amount,
-        src_addr_selector,
-        dst_addr_selector,
-    ]);
-    args.extend(marker);
-    args.extend(flags);
-    air::opcodes::load_store::load_store_fill(
-        &mut tracer.load_store,
-        args.into_iter()
-            .map(f)
-            .collect::<Vec<_>>()
-            .try_into()
-            .expect("load_store fill takes 50 felts"),
-        [],
-    );
-}
 
 /// Extract a byte from a u32 word at the given byte offset (0-3).
 #[inline]
@@ -136,20 +73,12 @@ pub fn lb(cpu: &mut Cpu, memory: &Memory, inst: &DecodedInst, tracer: &mut Trace
     // src_addr_selector = mem_addr - shift_amount, dst_addr_selector = r2_idx
     let src_addr_selector = addr - w.shift_amount;
     let dst_addr_selector = inst.rd as u32;
-    fill_load_store(
-        tracer,
-        old_pc,
-        &rd,
-        &rs1,
-        &mem,
-        inst.rd as u32,
-        imm_felt,
-        src_msb,
+    trace_op!(load_store: tracer, old_pc, rd, rs1, mem,
+        inst.rd as u32, imm_felt, src_msb,
         w.shift_amount,
-        src_addr_selector,
-        dst_addr_selector,
-        w.marker,
-        [1, 0, 0, 0, 0, 0, 0, 0],
+        src_addr_selector, dst_addr_selector,
+        w.marker[0], w.marker[1], w.marker[2], w.marker[3],
+        1, 0, 0, 0, 0, 0, 0, 0
     );
 }
 
@@ -172,20 +101,12 @@ pub fn lh(cpu: &mut Cpu, memory: &Memory, inst: &DecodedInst, tracer: &mut Trace
     // src_addr_selector = mem_addr - shift_amount, dst_addr_selector = r2_idx
     let src_addr_selector = addr - w.shift_amount;
     let dst_addr_selector = inst.rd as u32;
-    fill_load_store(
-        tracer,
-        old_pc,
-        &rd,
-        &rs1,
-        &mem,
-        inst.rd as u32,
-        imm_felt,
-        src_msb,
+    trace_op!(load_store: tracer, old_pc, rd, rs1, mem,
+        inst.rd as u32, imm_felt, src_msb,
         w.shift_amount,
-        src_addr_selector,
-        dst_addr_selector,
-        w.marker,
-        [0, 1, 0, 0, 0, 0, 0, 0],
+        src_addr_selector, dst_addr_selector,
+        w.marker[0], w.marker[1], w.marker[2], w.marker[3],
+        0, 1, 0, 0, 0, 0, 0, 0
     );
 }
 
@@ -207,20 +128,12 @@ pub fn lw(cpu: &mut Cpu, memory: &Memory, inst: &DecodedInst, tracer: &mut Trace
     // src_addr_selector = mem_addr - shift_amount, dst_addr_selector = r2_idx
     let src_addr_selector = addr - w.shift_amount;
     let dst_addr_selector = inst.rd as u32;
-    fill_load_store(
-        tracer,
-        old_pc,
-        &rd,
-        &rs1,
-        &mem,
-        inst.rd as u32,
-        imm_felt,
-        src_msb,
+    trace_op!(load_store: tracer, old_pc, rd, rs1, mem,
+        inst.rd as u32, imm_felt, src_msb,
         w.shift_amount,
-        src_addr_selector,
-        dst_addr_selector,
-        w.marker,
-        [0, 0, 0, 0, 1, 0, 0, 0],
+        src_addr_selector, dst_addr_selector,
+        w.marker[0], w.marker[1], w.marker[2], w.marker[3],
+        0, 0, 0, 0, 1, 0, 0, 0
     );
 }
 
@@ -242,20 +155,12 @@ pub fn lbu(cpu: &mut Cpu, memory: &Memory, inst: &DecodedInst, tracer: &mut Trac
     // src_addr_selector = mem_addr - shift_amount, dst_addr_selector = r2_idx
     let src_addr_selector = addr - w.shift_amount;
     let dst_addr_selector = inst.rd as u32;
-    fill_load_store(
-        tracer,
-        old_pc,
-        &rd,
-        &rs1,
-        &mem,
-        inst.rd as u32,
-        imm_felt,
-        src_msb,
+    trace_op!(load_store: tracer, old_pc, rd, rs1, mem,
+        inst.rd as u32, imm_felt, src_msb, // needed to reconstruct top byte in AIR
         w.shift_amount,
-        src_addr_selector,
-        dst_addr_selector,
-        w.marker,
-        [0, 0, 1, 0, 0, 0, 0, 0],
+        src_addr_selector, dst_addr_selector,
+        w.marker[0], w.marker[1], w.marker[2], w.marker[3],
+        0, 0, 1, 0, 0, 0, 0, 0
     );
 }
 
@@ -277,19 +182,11 @@ pub fn lhu(cpu: &mut Cpu, memory: &Memory, inst: &DecodedInst, tracer: &mut Trac
     // src_addr_selector = mem_addr - shift_amount, dst_addr_selector = r2_idx
     let src_addr_selector = addr - w.shift_amount;
     let dst_addr_selector = inst.rd as u32;
-    fill_load_store(
-        tracer,
-        old_pc,
-        &rd,
-        &rs1,
-        &mem,
-        inst.rd as u32,
-        imm_felt,
-        src_msb,
+    trace_op!(load_store: tracer, old_pc, rd, rs1, mem,
+        inst.rd as u32, imm_felt, src_msb, // needed to reconstruct top byte in AIR
         w.shift_amount,
-        src_addr_selector,
-        dst_addr_selector,
-        w.marker,
-        [0, 0, 0, 1, 0, 0, 0, 0],
+        src_addr_selector, dst_addr_selector,
+        w.marker[0], w.marker[1], w.marker[2], w.marker[3],
+        0, 0, 0, 1, 0, 0, 0, 0
     );
 }

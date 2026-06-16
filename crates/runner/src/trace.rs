@@ -1,7 +1,10 @@
-//! Re-export trace tables from the shared air crate.
-//!
-//! Every RISC-V opcode now records its row through the fn-DSL `*_fill` entry
-//! points (`air::opcodes::<op>::<op>_fill`), so the schema-generated
-//! `trace_op!` macro is no longer forwarded here.
+//! Re-export trace tables and the `trace_op!` macro from the shared air crate.
 
 pub use air::trace::*;
+
+/// Forward `trace_op!` invocations to the macro generated in [`air::trace`].
+macro_rules! trace_op {
+    ($($tt:tt)*) => {
+        air::trace_op!($($tt)*)
+    };
+}

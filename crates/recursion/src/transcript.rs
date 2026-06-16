@@ -377,10 +377,8 @@ mod tests {
     #[test]
     fn test_lui_logup_batches_become_constraints() {
         let exprs = constraint_exprs(&lui_eval());
-        // 1 enabler booleanity + 7 singleton LogUp fractions: the fn-DSL opcode
-        // component emits one fraction column per relation entry rather than
-        // batching pairs.
-        assert_eq!(exprs.constraints.len(), 8);
+        // 1 enabler booleanity + ceil(7 LogUp entries / 2) = 4 batch constraints
+        assert_eq!(exprs.constraints.len(), 5);
     }
 
     #[test]

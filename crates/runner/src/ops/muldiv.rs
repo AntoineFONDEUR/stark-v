@@ -6,66 +6,14 @@
 //! - div family: div, divu, rem, remu (airs.md Section 16)
 
 use super::utils::{M31_P, m31_inverse};
-use crate::trace::{Access, Tracer};
+use crate::trace::Tracer;
 use crate::{Cpu, DecodedInst};
-use stwo::core::fields::m31::BaseField;
-
-/// The 10 felt columns of a register access bundle (addr, prev limbs,
-/// clock_prev, next limbs), in the order the fn-DSL opcode functions take
-/// them.
-pub(crate) fn access_limbs(a: &Access) -> [BaseField; 10] {
-    let f = BaseField::from_u32_unchecked;
-    [
-        f(a.addr),
-        f(a.prev & 0xFF),
-        f((a.prev >> 8) & 0xFF),
-        f((a.prev >> 16) & 0xFF),
-        f((a.prev >> 24) & 0xFF),
-        f(a.clock_prev),
-        f(a.next & 0xFF),
-        f((a.next >> 8) & 0xFF),
-        f((a.next >> 16) & 0xFF),
-        f((a.next >> 24) & 0xFF),
-    ]
-}
-
-/// Fill one mulh row from the rs1/rs2 reads, rd write, the high-half limbs,
-/// the operand sign bits, and the mulh/mulhsu/mulhu flags.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn fill_mulh(
-    tracer: &mut Tracer,
-    pc: u32,
-    rd: &Access,
-    rs1: &Access,
-    rs2: &Access,
-    rd_high: [u32; 4],
-    rs1_sign: u32,
-    rs2_sign: u32,
-    flags: [u32; 3],
-) {
-    let f = BaseField::from_u32_unchecked;
-    let clock = tracer.clock;
-    let mut args = Vec::with_capacity(41);
-    args.extend([f(clock), f(pc)]);
-    args.extend(access_limbs(rd));
-    args.extend(access_limbs(rs1));
-    args.extend(access_limbs(rs2));
-    args.extend(rd_high.map(f));
-    args.extend([f(rs1_sign), f(rs2_sign)]);
-    args.extend(flags.map(f));
-    air::opcodes::mulh::mulh_fill(
-        &mut tracer.mulh,
-        args.try_into().expect("mulh fill takes 41 felts"),
-        [],
-    );
-}
 
 // =============================================================================
 // MUL - airs.md Section 14
 // =============================================================================
 
 pub fn mul(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
-    let f = BaseField::from_u32_unchecked;
     let old_pc = cpu.pc;
     let rs1 = cpu.read_reg(inst.rs1, tracer);
     let rs2 = cpu.read_reg(inst.rs2, tracer);
@@ -73,20 +21,8 @@ pub fn mul(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let rs2_val = rs2.next as i32 as i64;
     let result = rs1_val.wrapping_mul(rs2_val) as u32;
     let rd = cpu.write_reg(inst.rd, result, tracer);
-    let clock = tracer.clock;
     cpu.advance_pc();
-
-    let (rd, rs1, rs2) = (access_limbs(&rd), access_limbs(&rs1), access_limbs(&rs2));
-    let mut args = Vec::with_capacity(32);
-    args.extend([f(clock), f(old_pc)]);
-    args.extend(rd);
-    args.extend(rs1);
-    args.extend(rs2);
-    air::opcodes::mul::mul_fill(
-        &mut tracer.mul,
-        args.try_into().expect("mul fill takes 32 felts"),
-        [],
-    );
+    trace_op!(mul: tracer, old_pc, rd, rs1, rs2);
 }
 
 // =============================================================================
@@ -149,16 +85,10 @@ pub fn mulh(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     cpu.advance_pc();
 
     // opcode flags: mulh=1, mulhsu=0, mulhu=0
-    fill_mulh(
-        tracer,
-        old_pc,
-        &rd,
-        &rs1,
-        &rs2,
-        [w.rd_high[0], w.rd_high[1], w.rd_high[2], w.rd_high[3]],
-        w.rs1_sign,
-        w.rs2_sign,
-        [1, 0, 0],
+    trace_op!(mulh: tracer, old_pc, rd, rs1, rs2,
+        w.rd_high[0], w.rd_high[1], w.rd_high[2], w.rd_high[3],
+        w.rs1_sign, w.rs2_sign,
+        1, 0, 0
     );
 }
 
@@ -171,16 +101,10 @@ pub fn mulhsu(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     cpu.advance_pc();
 
     // opcode flags: mulh=0, mulhsu=1, mulhu=0
-    fill_mulh(
-        tracer,
-        old_pc,
-        &rd,
-        &rs1,
-        &rs2,
-        [w.rd_high[0], w.rd_high[1], w.rd_high[2], w.rd_high[3]],
-        w.rs1_sign,
-        w.rs2_sign,
-        [0, 1, 0],
+    trace_op!(mulh: tracer, old_pc, rd, rs1, rs2,
+        w.rd_high[0], w.rd_high[1], w.rd_high[2], w.rd_high[3],
+        w.rs1_sign, w.rs2_sign,
+        0, 1, 0
     );
 }
 
@@ -193,16 +117,10 @@ pub fn mulhu(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     cpu.advance_pc();
 
     // opcode flags: mulh=0, mulhsu=0, mulhu=1
-    fill_mulh(
-        tracer,
-        old_pc,
-        &rd,
-        &rs1,
-        &rs2,
-        [w.rd_high[0], w.rd_high[1], w.rd_high[2], w.rd_high[3]],
-        w.rs1_sign,
-        w.rs2_sign,
-        [0, 0, 1],
+    trace_op!(mulh: tracer, old_pc, rd, rs1, rs2,
+        w.rd_high[0], w.rd_high[1], w.rd_high[2], w.rd_high[3],
+        w.rs1_sign, w.rs2_sign,
+        0, 0, 1
     );
 }
 
@@ -327,42 +245,6 @@ struct DivWitness {
     lt_diff: u32,
 }
 
-/// Fill one div row from the rs1/rs2 reads, rd write, the division witness
-/// (quotient/remainder limbs, signs, comparison markers) and the
-/// div/divu/rem/remu flags.
-fn fill_div(
-    tracer: &mut Tracer,
-    pc: u32,
-    rd: &Access,
-    rs1: &Access,
-    rs2: &Access,
-    w: &DivWitness,
-    flags: [u32; 4],
-) {
-    let f = BaseField::from_u32_unchecked;
-    let clock = tracer.clock;
-    let mut args = Vec::with_capacity(65);
-    args.extend([f(clock), f(pc)]);
-    args.extend(access_limbs(rd));
-    args.extend(access_limbs(rs1));
-    args.extend(access_limbs(rs2));
-    args.extend([f(w.zero_divisor), f(w.r_zero)]);
-    args.extend(w.q.map(f));
-    args.extend(w.r.map(f));
-    args.extend([f(w.b_sign), f(w.c_sign), f(w.q_sign), f(w.sign_xor)]);
-    args.extend([f(w.c_sum_inv), f(w.r_sum_inv)]);
-    args.extend(w.r_abs.map(f));
-    args.extend(w.r_inv.map(f));
-    args.extend(w.lt_marker.map(f));
-    args.push(f(w.lt_diff));
-    args.extend(flags.map(f));
-    air::opcodes::div::div_fill(
-        &mut tracer.div,
-        args.try_into().expect("div fill takes 65 felts"),
-        [],
-    );
-}
-
 fn negate_limbs(limbs: &[u32; 4]) -> [u32; 4] {
     let mut carry = 1u32;
     let mut out = [0u32; 4];
@@ -404,7 +286,18 @@ pub fn div(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let w = compute_div_witness(rs1.next, rs2.next, true);
 
     // opcode flags: div=1, divu=0, rem=0, remu=0
-    fill_div(tracer, old_pc, &rd, &rs1, &rs2, &w, [1, 0, 0, 0]);
+    trace_op!(div: tracer, old_pc, rd, rs1, rs2,
+        w.zero_divisor, w.r_zero,
+        w.q[0], w.q[1], w.q[2], w.q[3],
+        w.r[0], w.r[1], w.r[2], w.r[3],
+        w.b_sign, w.c_sign, w.q_sign, w.sign_xor,
+        w.c_sum_inv, w.r_sum_inv,
+        w.r_abs[0], w.r_abs[1], w.r_abs[2], w.r_abs[3],
+        w.r_inv[0], w.r_inv[1], w.r_inv[2], w.r_inv[3],
+        w.lt_marker[0], w.lt_marker[1], w.lt_marker[2], w.lt_marker[3],
+        w.lt_diff,
+        1, 0, 0, 0
+    );
 }
 
 pub fn divu(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
@@ -422,7 +315,18 @@ pub fn divu(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let w = compute_div_witness(rs1.next, rs2.next, false);
 
     // opcode flags: div=0, divu=1, rem=0, remu=0
-    fill_div(tracer, old_pc, &rd, &rs1, &rs2, &w, [0, 1, 0, 0]);
+    trace_op!(div: tracer, old_pc, rd, rs1, rs2,
+        w.zero_divisor, w.r_zero,
+        w.q[0], w.q[1], w.q[2], w.q[3],
+        w.r[0], w.r[1], w.r[2], w.r[3],
+        w.b_sign, w.c_sign, w.q_sign, w.sign_xor,
+        w.c_sum_inv, w.r_sum_inv,
+        w.r_abs[0], w.r_abs[1], w.r_abs[2], w.r_abs[3],
+        w.r_inv[0], w.r_inv[1], w.r_inv[2], w.r_inv[3],
+        w.lt_marker[0], w.lt_marker[1], w.lt_marker[2], w.lt_marker[3],
+        w.lt_diff,
+        0, 1, 0, 0
+    );
 }
 
 pub fn rem(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
@@ -444,7 +348,18 @@ pub fn rem(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let w = compute_div_witness(rs1.next, rs2.next, true);
 
     // opcode flags: div=0, divu=0, rem=1, remu=0
-    fill_div(tracer, old_pc, &rd, &rs1, &rs2, &w, [0, 0, 1, 0]);
+    trace_op!(div: tracer, old_pc, rd, rs1, rs2,
+        w.zero_divisor, w.r_zero,
+        w.q[0], w.q[1], w.q[2], w.q[3],
+        w.r[0], w.r[1], w.r[2], w.r[3],
+        w.b_sign, w.c_sign, w.q_sign, w.sign_xor,
+        w.c_sum_inv, w.r_sum_inv,
+        w.r_abs[0], w.r_abs[1], w.r_abs[2], w.r_abs[3],
+        w.r_inv[0], w.r_inv[1], w.r_inv[2], w.r_inv[3],
+        w.lt_marker[0], w.lt_marker[1], w.lt_marker[2], w.lt_marker[3],
+        w.lt_diff,
+        0, 0, 1, 0
+    );
 }
 
 pub fn remu(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
@@ -462,5 +377,16 @@ pub fn remu(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let w = compute_div_witness(rs1.next, rs2.next, false);
 
     // opcode flags: div=0, divu=0, rem=0, remu=1
-    fill_div(tracer, old_pc, &rd, &rs1, &rs2, &w, [0, 0, 0, 1]);
+    trace_op!(div: tracer, old_pc, rd, rs1, rs2,
+        w.zero_divisor, w.r_zero,
+        w.q[0], w.q[1], w.q[2], w.q[3],
+        w.r[0], w.r[1], w.r[2], w.r[3],
+        w.b_sign, w.c_sign, w.q_sign, w.sign_xor,
+        w.c_sum_inv, w.r_sum_inv,
+        w.r_abs[0], w.r_abs[1], w.r_abs[2], w.r_abs[3],
+        w.r_inv[0], w.r_inv[1], w.r_inv[2], w.r_inv[3],
+        w.lt_marker[0], w.lt_marker[1], w.lt_marker[2], w.lt_marker[3],
+        w.lt_diff,
+        0, 0, 0, 1
+    );
 }

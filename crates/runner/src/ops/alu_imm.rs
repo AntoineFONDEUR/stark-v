@@ -23,59 +23,6 @@ pub(crate) fn decode_imm_limbs(imm: i32) -> (u32, u32, u32) {
     (imm_0, imm_1, imm_msb)
 }
 
-/// Fill one base_alu_imm row in the felt-function table from the rs1 read
-/// and rd write accesses, the immediate limbs, and the one-hot opcode flags.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn fill_base_alu_imm(
-    tracer: &mut Tracer,
-    pc: u32,
-    rd: &crate::trace::Access,
-    rs1: &crate::trace::Access,
-    imm_0: u32,
-    imm_1: u32,
-    imm_msb: u32,
-    flags: [u32; 4],
-) {
-    use stwo::core::fields::m31::BaseField;
-    let f = BaseField::from_u32_unchecked;
-    let clock = tracer.clock;
-    air::opcodes::base_alu_imm::base_alu_imm_fill(
-        &mut tracer.base_alu_imm,
-        [
-            f(clock),
-            f(pc),
-            f(rd.addr),
-            f(rd.prev & 0xFF),
-            f((rd.prev >> 8) & 0xFF),
-            f((rd.prev >> 16) & 0xFF),
-            f((rd.prev >> 24) & 0xFF),
-            f(rd.clock_prev),
-            f(rd.next & 0xFF),
-            f((rd.next >> 8) & 0xFF),
-            f((rd.next >> 16) & 0xFF),
-            f((rd.next >> 24) & 0xFF),
-            f(rs1.addr),
-            f(rs1.prev & 0xFF),
-            f((rs1.prev >> 8) & 0xFF),
-            f((rs1.prev >> 16) & 0xFF),
-            f((rs1.prev >> 24) & 0xFF),
-            f(rs1.clock_prev),
-            f(rs1.next & 0xFF),
-            f((rs1.next >> 8) & 0xFF),
-            f((rs1.next >> 16) & 0xFF),
-            f((rs1.next >> 24) & 0xFF),
-            f(imm_0),
-            f(imm_1),
-            f(imm_msb),
-            f(flags[0]),
-            f(flags[1]),
-            f(flags[2]),
-            f(flags[3]),
-        ],
-        [],
-    );
-}
-
 // =============================================================================
 // Base ALU Imm (addi/xori/ori/andi) - airs.md Section 2
 // =============================================================================
@@ -89,15 +36,9 @@ pub fn addi(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
 
     let (imm_0, imm_1, imm_msb) = decode_imm_limbs(inst.imm);
     // opcode flags: add=1, xor=0, or=0, and=0
-    fill_base_alu_imm(
-        tracer,
-        old_pc,
-        &rd,
-        &rs1,
-        imm_0,
-        imm_1,
-        imm_msb,
-        [1, 0, 0, 0],
+    trace_op!(base_alu_imm: tracer, old_pc, rd, rs1,
+        imm_0, imm_1, imm_msb,
+        1, 0, 0, 0
     );
 }
 
@@ -110,15 +51,9 @@ pub fn xori(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
 
     let (imm_0, imm_1, imm_msb) = decode_imm_limbs(inst.imm);
     // opcode flags: add=0, xor=1, or=0, and=0
-    fill_base_alu_imm(
-        tracer,
-        old_pc,
-        &rd,
-        &rs1,
-        imm_0,
-        imm_1,
-        imm_msb,
-        [0, 1, 0, 0],
+    trace_op!(base_alu_imm: tracer, old_pc, rd, rs1,
+        imm_0, imm_1, imm_msb,
+        0, 1, 0, 0
     );
 }
 
@@ -131,15 +66,9 @@ pub fn ori(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
 
     let (imm_0, imm_1, imm_msb) = decode_imm_limbs(inst.imm);
     // opcode flags: add=0, xor=0, or=1, and=0
-    fill_base_alu_imm(
-        tracer,
-        old_pc,
-        &rd,
-        &rs1,
-        imm_0,
-        imm_1,
-        imm_msb,
-        [0, 0, 1, 0],
+    trace_op!(base_alu_imm: tracer, old_pc, rd, rs1,
+        imm_0, imm_1, imm_msb,
+        0, 0, 1, 0
     );
 }
 
@@ -152,77 +81,15 @@ pub fn andi(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
 
     let (imm_0, imm_1, imm_msb) = decode_imm_limbs(inst.imm);
     // opcode flags: add=0, xor=0, or=0, and=1
-    fill_base_alu_imm(
-        tracer,
-        old_pc,
-        &rd,
-        &rs1,
-        imm_0,
-        imm_1,
-        imm_msb,
-        [0, 0, 0, 1],
+    trace_op!(base_alu_imm: tracer, old_pc, rd, rs1,
+        imm_0, imm_1, imm_msb,
+        0, 0, 0, 1
     );
 }
 
 // =============================================================================
 // Shifts Imm (slli/srli/srai) - airs.md Section 4
 // =============================================================================
-
-/// Fill one shifts_imm row from the rs1 read, rd write, the sign bit, the
-/// truncated shift immediate, the sll/srl/sra flags, the left/right bit
-/// multipliers and the one-hot bit/limb markers and carries.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn fill_shifts_imm(
-    tracer: &mut Tracer,
-    pc: u32,
-    rd: &crate::trace::Access,
-    rs1: &crate::trace::Access,
-    rs1_sign: u32,
-    imm_truncated: u32,
-    flags: [u32; 3],
-    bit_multiplier_left: u32,
-    bit_multiplier_right: u32,
-    bit_shift_marker: [u32; 8],
-    limb_shift_marker: [u32; 4],
-    bit_shift_carry: [u32; 4],
-) {
-    use stwo::core::fields::m31::BaseField;
-    let f = BaseField::from_u32_unchecked;
-    let clock = tracer.clock;
-    let limbs = |a: &crate::trace::Access| {
-        [
-            a.addr,
-            a.prev & 0xFF,
-            (a.prev >> 8) & 0xFF,
-            (a.prev >> 16) & 0xFF,
-            (a.prev >> 24) & 0xFF,
-            a.clock_prev,
-            a.next & 0xFF,
-            (a.next >> 8) & 0xFF,
-            (a.next >> 16) & 0xFF,
-            (a.next >> 24) & 0xFF,
-        ]
-    };
-    let mut args = Vec::with_capacity(45);
-    args.extend([clock, pc]);
-    args.extend(limbs(rd));
-    args.extend(limbs(rs1));
-    args.extend([rs1_sign, imm_truncated]);
-    args.extend(flags);
-    args.extend([bit_multiplier_left, bit_multiplier_right]);
-    args.extend(bit_shift_marker);
-    args.extend(limb_shift_marker);
-    args.extend(bit_shift_carry);
-    air::opcodes::shifts_imm::shifts_imm_fill(
-        &mut tracer.shifts_imm,
-        args.into_iter()
-            .map(f)
-            .collect::<Vec<_>>()
-            .try_into()
-            .expect("shifts_imm fill takes 45 felts"),
-        [],
-    );
-}
 
 pub fn slli(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let old_pc = cpu.pc;
@@ -236,19 +103,14 @@ pub fn slli(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let bit_multiplier = 1u32 << (shamt % 8);
 
     // opcode flags: sll=1, srl=0, sra=0
-    fill_shifts_imm(
-        tracer,
-        old_pc,
-        &rd,
-        &rs1,
-        w.rs1_sign,
-        shamt,
-        [1, 0, 0],
-        bit_multiplier,
-        0,
-        w.bit_shift_marker,
-        w.limb_shift_marker,
-        w.bit_shift_carry,
+    trace_op!(shifts_imm: tracer, old_pc, rd, rs1,
+        w.rs1_sign, shamt,
+        1, 0, 0,  // opcode flags
+        bit_multiplier, 0,  // bit_multiplier_left, bit_multiplier_right
+        w.bit_shift_marker[0], w.bit_shift_marker[1], w.bit_shift_marker[2], w.bit_shift_marker[3],
+        w.bit_shift_marker[4], w.bit_shift_marker[5], w.bit_shift_marker[6], w.bit_shift_marker[7],
+        w.limb_shift_marker[0], w.limb_shift_marker[1], w.limb_shift_marker[2], w.limb_shift_marker[3],
+        w.bit_shift_carry[0], w.bit_shift_carry[1], w.bit_shift_carry[2], w.bit_shift_carry[3]
     );
 }
 
@@ -264,19 +126,14 @@ pub fn srli(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let bit_multiplier = 1u32 << (shamt % 8);
 
     // opcode flags: sll=0, srl=1, sra=0
-    fill_shifts_imm(
-        tracer,
-        old_pc,
-        &rd,
-        &rs1,
-        w.rs1_sign,
-        shamt,
-        [0, 1, 0],
-        0,
-        bit_multiplier,
-        w.bit_shift_marker,
-        w.limb_shift_marker,
-        w.bit_shift_carry,
+    trace_op!(shifts_imm: tracer, old_pc, rd, rs1,
+        w.rs1_sign, shamt,
+        0, 1, 0,  // opcode flags
+        0, bit_multiplier,  // bit_multiplier_left, bit_multiplier_right
+        w.bit_shift_marker[0], w.bit_shift_marker[1], w.bit_shift_marker[2], w.bit_shift_marker[3],
+        w.bit_shift_marker[4], w.bit_shift_marker[5], w.bit_shift_marker[6], w.bit_shift_marker[7],
+        w.limb_shift_marker[0], w.limb_shift_marker[1], w.limb_shift_marker[2], w.limb_shift_marker[3],
+        w.bit_shift_carry[0], w.bit_shift_carry[1], w.bit_shift_carry[2], w.bit_shift_carry[3]
     );
 }
 
@@ -292,85 +149,20 @@ pub fn srai(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let bit_multiplier = 1u32 << (shamt % 8);
 
     // opcode flags: sll=0, srl=0, sra=1
-    fill_shifts_imm(
-        tracer,
-        old_pc,
-        &rd,
-        &rs1,
-        w.rs1_sign,
-        shamt,
-        [0, 0, 1],
-        0,
-        bit_multiplier,
-        w.bit_shift_marker,
-        w.limb_shift_marker,
-        w.bit_shift_carry,
+    trace_op!(shifts_imm: tracer, old_pc, rd, rs1,
+        w.rs1_sign, shamt,
+        0, 0, 1,  // opcode flags
+        0, bit_multiplier,  // bit_multiplier_left, bit_multiplier_right
+        w.bit_shift_marker[0], w.bit_shift_marker[1], w.bit_shift_marker[2], w.bit_shift_marker[3],
+        w.bit_shift_marker[4], w.bit_shift_marker[5], w.bit_shift_marker[6], w.bit_shift_marker[7],
+        w.limb_shift_marker[0], w.limb_shift_marker[1], w.limb_shift_marker[2], w.limb_shift_marker[3],
+        w.bit_shift_carry[0], w.bit_shift_carry[1], w.bit_shift_carry[2], w.bit_shift_carry[3]
     );
 }
 
 // =============================================================================
 // Less Than Imm (slti/sltiu) - airs.md Section 6
 // =============================================================================
-
-/// Fill one lt_imm row from the rs1 read, rd write, the comparison bit, the
-/// most-significant-limb witness, the immediate limbs, difference markers and
-/// the slti/sltiu flags.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn fill_lt_imm(
-    tracer: &mut Tracer,
-    pc: u32,
-    rd: &crate::trace::Access,
-    rs1: &crate::trace::Access,
-    cmp_result: u32,
-    rs1_msl_felt: u32,
-    imm_limbs: (u32, u32, u32),
-    flags: [u32; 2],
-    diff_marker: [u32; 4],
-    diff_val: u32,
-) {
-    use stwo::core::fields::m31::BaseField;
-    let f = BaseField::from_u32_unchecked;
-    let clock = tracer.clock;
-    let limbs = |a: &crate::trace::Access| {
-        [
-            a.addr,
-            a.prev & 0xFF,
-            (a.prev >> 8) & 0xFF,
-            (a.prev >> 16) & 0xFF,
-            (a.prev >> 24) & 0xFF,
-            a.clock_prev,
-            a.next & 0xFF,
-            (a.next >> 8) & 0xFF,
-            (a.next >> 16) & 0xFF,
-            (a.next >> 24) & 0xFF,
-        ]
-    };
-    let (imm_0, imm_1, imm_msb) = imm_limbs;
-    let mut args = Vec::with_capacity(34);
-    args.extend([clock, pc]);
-    args.extend(limbs(rd));
-    args.extend(limbs(rs1));
-    args.extend([
-        cmp_result,
-        rs1_msl_felt,
-        imm_0,
-        imm_1,
-        imm_msb,
-        flags[0],
-        flags[1],
-    ]);
-    args.extend(diff_marker);
-    args.push(diff_val);
-    air::opcodes::lt_imm::lt_imm_fill(
-        &mut tracer.lt_imm,
-        args.into_iter()
-            .map(f)
-            .collect::<Vec<_>>()
-            .try_into()
-            .expect("lt_imm fill takes 34 felts"),
-        [],
-    );
-}
 
 pub fn slti(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let old_pc = cpu.pc;
@@ -379,21 +171,16 @@ pub fn slti(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let rd = cpu.write_reg(inst.rd, cmp_result, tracer);
     cpu.advance_pc();
 
-    let imm_limbs = decode_imm_limbs(inst.imm);
+    let (imm_0, imm_1, imm_msb) = decode_imm_limbs(inst.imm);
     let w = compute_lt_imm_witness(rs1.next, inst.imm, true);
 
     // opcode flags: slti=1, sltiu=0
-    fill_lt_imm(
-        tracer,
-        old_pc,
-        &rd,
-        &rs1,
-        cmp_result,
-        w.rs1_msl_felt,
-        imm_limbs,
-        [1, 0],
-        w.diff_marker,
-        w.diff_val,
+    trace_op!(lt_imm: tracer, old_pc, rd, rs1,
+        cmp_result, w.rs1_msl_felt,
+        imm_0, imm_1, imm_msb,
+        1, 0,  // opcode flags
+        w.diff_marker[0], w.diff_marker[1], w.diff_marker[2], w.diff_marker[3],
+        w.diff_val
     );
 }
 
@@ -404,20 +191,15 @@ pub fn sltiu(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
     let rd = cpu.write_reg(inst.rd, cmp_result, tracer);
     cpu.advance_pc();
 
-    let imm_limbs = decode_imm_limbs(inst.imm);
+    let (imm_0, imm_1, imm_msb) = decode_imm_limbs(inst.imm);
     let w = compute_lt_imm_witness(rs1.next, inst.imm, false);
 
     // opcode flags: slti=0, sltiu=1
-    fill_lt_imm(
-        tracer,
-        old_pc,
-        &rd,
-        &rs1,
-        cmp_result,
-        w.rs1_msl_felt,
-        imm_limbs,
-        [0, 1],
-        w.diff_marker,
-        w.diff_val,
+    trace_op!(lt_imm: tracer, old_pc, rd, rs1,
+        cmp_result, w.rs1_msl_felt,
+        imm_0, imm_1, imm_msb,
+        0, 1,  // opcode flags
+        w.diff_marker[0], w.diff_marker[1], w.diff_marker[2], w.diff_marker[3],
+        w.diff_val
     );
 }

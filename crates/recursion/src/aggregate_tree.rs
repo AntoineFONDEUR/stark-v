@@ -112,16 +112,12 @@ pub fn prove_base_node(
     ))
 }
 
-/// Prove a whole RISC-V execution as one constant-size n-to-1 recursion root.
+/// Prove a whole RISC-V execution as one constant-size n-to-1 recursion root,
+/// splitting into fixed `segment_cycles`-cycle continuation segments.
 ///
-/// `segment_cycles` bounds each continuation segment (≤ 2^20 for the clock
-/// range check); `arity` is the fan-in at every aggregation level. Returns
-/// the root [`CompressedNode`], verifiable with
-/// [`crate::node::verify_node_compressed`]. Per-phase wall-clock is emitted at
-/// `info` level so a caller with a tracing subscriber can read the timings.
-///
-/// Requires the run to split into at least two base groups (otherwise there is
-/// no tree to fold); size `segment_cycles` accordingly.
+/// `arity` is the fan-in at every aggregation level. Prefer
+/// [`prove_guest_recursive_by_capacity`], which packs each segment up to a row
+/// budget instead of guessing a cycle count.
 pub fn prove_guest_recursive(
     elf_bytes: &[u8],
     input: &[u8],
@@ -131,17 +127,58 @@ pub fn prove_guest_recursive(
     config: PcsConfig,
     preprocessing: &Preprocessing<Poseidon2M31MerkleHasher>,
 ) -> Result<CompressedNode, VerificationError> {
-    let invalid = |what: &str| VerificationError::InvalidStructure(what.to_string());
-
     let t = Instant::now();
     let segments =
         runner::run_segments_with_input(elf_bytes, input, Some(segment_cycles), max_cycles)
-            .map_err(|e| invalid(&format!("segmented run failed: {e:?}")))?;
+            .map_err(|e| {
+                VerificationError::InvalidStructure(format!("segmented run failed: {e:?}"))
+            })?;
     info!(
         segments = segments.len(),
         elapsed_ms = t.elapsed().as_millis(),
         "continuation"
     );
+    prove_recursive_from_segments(segments, arity, config, preprocessing)
+}
+
+/// Prove a whole RISC-V execution as one constant-size n-to-1 recursion root,
+/// closing each continuation segment when any component table (or the distinct
+/// read/write address set) reaches `max_rows` — capacity-aware segmentation.
+///
+/// `arity` is the fan-in at every aggregation level. Returns the root
+/// [`CompressedNode`], verifiable with [`crate::node::verify_node_compressed`].
+pub fn prove_guest_recursive_by_capacity(
+    elf_bytes: &[u8],
+    input: &[u8],
+    arity: usize,
+    max_rows: u32,
+    max_cycles: u64,
+    config: PcsConfig,
+    preprocessing: &Preprocessing<Poseidon2M31MerkleHasher>,
+) -> Result<CompressedNode, VerificationError> {
+    let t = Instant::now();
+    let segments = runner::run_segments_by_capacity(elf_bytes, input, max_rows, max_cycles)
+        .map_err(|e| VerificationError::InvalidStructure(format!("segmented run failed: {e:?}")))?;
+    info!(
+        segments = segments.len(),
+        max_rows,
+        elapsed_ms = t.elapsed().as_millis(),
+        "continuation (capacity)"
+    );
+    prove_recursive_from_segments(segments, arity, config, preprocessing)
+}
+
+/// Prove segment proofs and fold them `arity`-to-1 into one constant-size root.
+///
+/// Per-phase wall-clock is emitted at `info` level. Requires at least two base
+/// groups (otherwise there is no tree to fold).
+fn prove_recursive_from_segments(
+    segments: Vec<runner::RunResult>,
+    arity: usize,
+    config: PcsConfig,
+    preprocessing: &Preprocessing<Poseidon2M31MerkleHasher>,
+) -> Result<CompressedNode, VerificationError> {
+    let invalid = |what: &str| VerificationError::InvalidStructure(what.to_string());
 
     let t = Instant::now();
     let proofs = prover::e2e::prove_segments_with_channel::<Poseidon2M31MerkleChannel>(
@@ -169,7 +206,7 @@ pub fn prove_guest_recursive(
 
     if leaves.len() < 2 {
         return Err(invalid(
-            "run produced fewer than two base groups; lower segment_cycles or arity",
+            "run produced fewer than two base groups; lower the budget or arity",
         ));
     }
 

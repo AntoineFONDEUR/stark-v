@@ -131,30 +131,21 @@ pub fn run_with_input(
         .expect("execution produces at least one segment"))
 }
 
-/// Run an ELF program to completion, splitting the execution trace into
-/// segments of at most `segment_cycles` cycles each.
+/// Run an ELF program to completion, closing the current segment whenever
+/// `should_close` returns true for the live tracer (checked before fetching
+/// the next instruction, so the boundary lands cleanly between instructions).
 ///
 /// Each segment gets its own tracer with the clock restarting at 0, so each
 /// can be proven independently; consecutive segments chain on
 /// `(final_pc, final_regs, final_rw_root) == (initial_pc, initial_regs, initial_rw_root)`.
 /// Input is anchored in the first segment and outputs in the last (see
-/// [`SegmentRole`]). With `segment_cycles = None` the whole execution is a
-/// single segment, identical to [`run_with_input`].
-pub fn run_segments_with_input(
+/// [`SegmentRole`]).
+fn run_segments_impl<F: Fn(&Tracer) -> bool>(
     elf_bytes: &[u8],
     input: &[u8],
-    segment_cycles: Option<u32>,
+    should_close: F,
     max_cycles: u64,
 ) -> Result<Vec<RunResult>, RunError> {
-    if let Some(n) = segment_cycles {
-        // Clock differences within a segment must stay range-checkable
-        // (RangeCheck20), and a zero-length segment cannot make progress.
-        assert!(
-            n > 0 && n < (1 << 20),
-            "segment_cycles must be in 1..2^20, got {n}"
-        );
-    }
-
     let loaded = load_elf(elf_bytes)?;
     let layout = commitment::MemoryLayout::from_loaded(&loaded);
 
@@ -197,7 +188,7 @@ pub fn run_segments_with_input(
 
         // Segment boundary: close the current tracer and start a fresh one.
         // The next instruction belongs to the next segment.
-        if segment_cycles.is_some_and(|n| tracer.clock >= n) {
+        if should_close(&tracer) {
             let role = SegmentRole {
                 is_first: segments.is_empty(),
                 is_last: false,
@@ -288,6 +279,71 @@ pub fn run_segments_with_input(
     }
     segments.push(result);
     Ok(segments)
+}
+
+/// Run an ELF program, splitting into segments of at most `segment_cycles`
+/// cycles each. With `segment_cycles = None` the whole execution is a single
+/// segment, identical to [`run_with_input`].
+///
+/// A fixed cycle count is a coarse proxy for capacity: different opcode/lookup
+/// mixes fill the component tables at different rates, so prefer
+/// [`run_segments_by_capacity`] to pack each segment up to a row budget.
+pub fn run_segments_with_input(
+    elf_bytes: &[u8],
+    input: &[u8],
+    segment_cycles: Option<u32>,
+    max_cycles: u64,
+) -> Result<Vec<RunResult>, RunError> {
+    if let Some(n) = segment_cycles {
+        // Clock differences within a segment must stay range-checkable
+        // (RangeCheck20), and a zero-length segment cannot make progress.
+        assert!(
+            n > 0 && n < (1 << 20),
+            "segment_cycles must be in 1..2^20, got {n}"
+        );
+    }
+    run_segments_impl(
+        elf_bytes,
+        input,
+        move |tracer| segment_cycles.is_some_and(|n| tracer.clock >= n),
+        max_cycles,
+    )
+}
+
+/// Run an ELF program, closing a segment as soon as any component table — or
+/// the distinct read/write address set that drives the finalization
+/// commitment tables — would reach `max_rows`, rather than after a fixed cycle
+/// count.
+///
+/// The prover pads every component to a power of two at least its row count,
+/// so the fullest table bounds the segment's proving size; closing on it packs
+/// each segment near the row budget regardless of the opcode/lookup mix. The
+/// clock (one row per cycle) is itself one of the monitored quantities, so the
+/// segment always closes by `clock == max_rows`, keeping clock differences
+/// range-checkable (`max_rows < 2^20`).
+pub fn run_segments_by_capacity(
+    elf_bytes: &[u8],
+    input: &[u8],
+    max_rows: u32,
+    max_cycles: u64,
+) -> Result<Vec<RunResult>, RunError> {
+    assert!(
+        max_rows > 0 && max_rows < (1 << 20),
+        "max_rows must be in 1..2^20, got {max_rows}"
+    );
+    let budget = max_rows as usize;
+    run_segments_impl(
+        elf_bytes,
+        input,
+        move |tracer| {
+            tracer.clock as usize >= budget
+                || tracer.max_table_len() >= budget
+                // Distinct RW addresses drive the memory and poseidon2/merkle
+                // commitment tables built at finalization.
+                || tracer.mem_clock.len() >= budget
+        },
+        max_cycles,
+    )
 }
 
 /// IO-region addresses captured from the loaded ELF before its memory is

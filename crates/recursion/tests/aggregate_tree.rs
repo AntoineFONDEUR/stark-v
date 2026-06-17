@@ -16,7 +16,7 @@
 
 use prover::poseidon2_channel::Poseidon2M31MerkleChannel;
 use prover::{PcsConfig, preprocess_with_channel};
-use recursion::aggregate_tree::prove_guest_recursive;
+use recursion::aggregate_tree::{prove_guest_recursive, prove_guest_recursive_by_capacity};
 use recursion::node::verify_node_compressed;
 use runner::run;
 
@@ -46,9 +46,39 @@ fn test_guest_recursive_arity_2_verifies() {
     verify_node_compressed(root, config).expect("root verification failed");
 }
 
-/// Tunable harness: sweep `RECURSION_ARITY` (and guest / segment size) on the
-/// host to find the throughput-optimal fan-in. Logs per-phase timings and
-/// checks the root verifies.
+/// Capacity-aware segmentation end to end: a small run split on a row budget
+/// (not a cycle count), folded 2-to-1 to one root that verifies.
+#[test_log::test]
+fn test_guest_recursive_by_capacity_verifies() {
+    prover::e2e::ensure_guest_built();
+    let elf = std::fs::read(prover::e2e::guest_bin_dir().join("fib")).expect("read fib ELF");
+    let reference = run(&elf, 10_000_000).expect("run fib");
+
+    // A budget of ~1/3 the run yields >= 3 segments, so arity-2 base grouping
+    // gives >= 2 leaves (clamped to the range check's 2^20 limit).
+    let max_rows = u32::try_from(reference.cycles / 3 + 1)
+        .expect("fits u32")
+        .clamp(2, (1 << 20) - 1);
+    let config = PcsConfig::default();
+    let preprocessing = preprocess_with_channel::<Poseidon2M31MerkleChannel>(config);
+
+    let root = prove_guest_recursive_by_capacity(
+        &elf,
+        &[],
+        2,
+        max_rows,
+        10_000_000,
+        config,
+        &preprocessing,
+    )
+    .expect("recursive proving failed");
+    verify_node_compressed(root, config).expect("root verification failed");
+}
+
+/// Tunable harness: sweep `RECURSION_ARITY` and the per-segment row budget
+/// `RECURSION_MAX_ROWS` (capacity-aware) on the host to find the
+/// throughput-optimal fan-in. Logs per-phase timings and checks the root
+/// verifies.
 #[test_log::test]
 #[ignore]
 fn bench_guest_recursive() {
@@ -57,8 +87,8 @@ fn bench_guest_recursive() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(2);
-    // Default segment bound is the RangeCheck20 clock limit (2^20 - 1).
-    let segment_cycles: u32 = std::env::var("RECURSION_SEGMENT_CYCLES")
+    // Default budget is the RangeCheck20 clock limit (2^20 - 1).
+    let max_rows: u32 = std::env::var("RECURSION_MAX_ROWS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or((1 << 20) - 1);
@@ -69,11 +99,11 @@ fn bench_guest_recursive() {
 
     let config = PcsConfig::default();
     let preprocessing = preprocess_with_channel::<Poseidon2M31MerkleChannel>(config);
-    let root = prove_guest_recursive(
+    let root = prove_guest_recursive_by_capacity(
         &elf,
         &[],
         arity,
-        segment_cycles,
+        max_rows,
         20_000_000,
         config,
         &preprocessing,

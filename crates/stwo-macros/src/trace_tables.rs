@@ -1696,6 +1696,24 @@ fn generate_tracer(
         })
         .collect();
 
+    // Per-table row counts for the segment-capacity check: a segment closes
+    // when the largest table would overflow its budget, not after a fixed
+    // cycle count.
+    let external_max_updates: Vec<_> = externals
+        .iter()
+        .map(|ext| {
+            let field = &ext.field;
+            quote! { m = m.max(self.#field.len()); }
+        })
+        .collect();
+    let opcode_max_updates: Vec<_> = opcodes
+        .iter()
+        .map(|op| {
+            let name = &op.name;
+            quote! { m = m.max(self.#name.len()); }
+        })
+        .collect();
+
     let debug_table_fields: Vec<_> = opcodes
         .iter()
         .map(|op| {
@@ -1825,6 +1843,22 @@ fn generate_tracer(
             /// Total number of traced instructions.
             pub fn total_traces(&self) -> usize {
                 0 #(#external_total_traces)* #(#total_traces_sum)*
+            }
+
+            /// The largest row count across every per-component trace table.
+            ///
+            /// This is the binding capacity of a segment: the prover sizes each
+            /// component to a power of two at least its row count, so the
+            /// fullest table is what would first overflow a row budget. A
+            /// capacity-aware runner closes a segment when this reaches the
+            /// budget rather than after a fixed number of cycles, which keeps
+            /// every opcode/lookup mix near the budget instead of guessing a
+            /// cycle count.
+            pub fn max_table_len(&self) -> usize {
+                let mut m = self.clock_update.len();
+                #(#external_max_updates)*
+                #(#opcode_max_updates)*
+                m
             }
 
             /// Print all non-empty trace tables as DataFrames.

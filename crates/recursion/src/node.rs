@@ -381,8 +381,8 @@ use crate::openings::{TREE_ID_STRIDE, replay_pcs_openings};
 use prover::poseidon2_channel::{Poseidon2M31MerkleChannel, Poseidon2M31MerkleHasher};
 use stwo::core::vcs_lifted::verifier::MerkleDecommitmentLifted;
 
-/// A constant-size 2-to-1 node: the parent recursion proof attests both
-/// children's **composition checks and Merkle/FRI openings** in-AIR, so the
+/// A constant-size n-to-1 node: the parent recursion proof attests every
+/// child's **composition check and Merkle/FRI openings** in-AIR, so the
 /// children's decommitments are dropped from the artifact.
 ///
 /// The children must be proven over the Poseidon2-M31 channel — the hash the
@@ -390,14 +390,18 @@ use stwo::core::vcs_lifted::verifier::MerkleDecommitmentLifted;
 /// openings become component rows in the parent's trace. This is the
 /// recursion-level analogue of [`crate::final_proof::FinalProof`]: where that
 /// strips an inner proof's decommitments into one recursion proof, this
-/// strips a child *recursion* proof's decommitments into the parent node,
+/// strips the child *recursion* proofs' decommitments into the parent node,
 /// closing the last host-side gap toward an artifact constant in tree depth.
+///
+/// The fan-in `n = children.len()` is a free parameter: a wider node folds
+/// more proofs into one parent trace (closer to stwo's peak-throughput cell
+/// budget) at the cost of a larger — but still depth-independent — root.
 pub struct CompressedNode {
-    /// The parent recursion proof attesting both children.
+    /// The parent recursion proof attesting all children.
     pub node: RecursionProof<Poseidon2M31MerkleHasher>,
-    /// The two child recursion proofs with decommitments stripped (their
-    /// openings live in `node` as `merkle_path` rows).
-    pub children: [RecursionProof<Poseidon2M31MerkleHasher>; 2],
+    /// The child recursion proofs with decommitments stripped (their openings
+    /// live in `node` as `merkle_path` rows).
+    pub children: Vec<RecursionProof<Poseidon2M31MerkleHasher>>,
 }
 
 /// Strip every Merkle decommitment from a recursion proof: its openings are
@@ -413,23 +417,37 @@ fn strip_recursion_decommitments(proof: &mut RecursionProof<Poseidon2M31MerkleHa
     }
 }
 
-/// Prove a constant-size 2-to-1 node over two Poseidon2-channel children.
-///
-/// For each child: record its composition (lowered into the parent trace as
-/// circuit `i`) and replay its openings (recorded as `merkle_path` rows and
-/// anchored by public root/leaf claims), then prove ONE parent recursion
-/// proof attesting both. The children's decommitments are stripped.
+/// Prove a constant-size 2-to-1 node — the common fan-in, kept as a thin
+/// wrapper over [`prove_node_compressed_n`].
 pub fn prove_node_compressed(
     left: RecursionProof<Poseidon2M31MerkleHasher>,
     right: RecursionProof<Poseidon2M31MerkleHasher>,
     config: PcsConfig,
 ) -> Result<CompressedNode, VerificationError> {
+    prove_node_compressed_n(vec![left, right], config)
+}
+
+/// Prove a constant-size n-to-1 node over `n` Poseidon2-channel children.
+///
+/// For each child: record its composition (lowered into the parent trace as
+/// circuit `i`) and replay its openings (recorded as `merkle_path` rows and
+/// anchored by public root/leaf claims), then prove ONE parent recursion
+/// proof attesting all of them. The children's decommitments are stripped.
+pub fn prove_node_compressed_n(
+    mut children: Vec<RecursionProof<Poseidon2M31MerkleHasher>>,
+    config: PcsConfig,
+) -> Result<CompressedNode, VerificationError> {
+    if children.len() < 2 {
+        return Err(VerificationError::InvalidStructure(
+            "a node attests at least two children".to_string(),
+        ));
+    }
     let mut traces = crate::prover::RecursionTraces::default();
-    let mut circuits = Vec::with_capacity(2);
+    let mut circuits = Vec::with_capacity(children.len());
     let mut roots = Vec::new();
     let mut leaves = Vec::new();
 
-    for (index, child) in [&left, &right].into_iter().enumerate() {
+    for (index, child) in children.iter().enumerate() {
         let (recorder, claimed, pcs) =
             recursion_binding::<Poseidon2M31MerkleChannel>(child, config)?;
         if recorder.accumulation.value() != claimed {
@@ -468,29 +486,28 @@ pub fn prove_node_compressed(
         config,
     );
 
-    let mut children = [left, right];
     for child in &mut children {
         strip_recursion_decommitments(child);
     }
     Ok(CompressedNode { node, children })
 }
 
-/// Verify a constant-size node: re-record both children's compositions and
-/// re-replay their openings from their (decommitment-free) public bodies,
-/// then verify the parent recursion proof attests exactly those circuits and
+/// Verify a constant-size node: re-record every child's composition and
+/// re-replay its openings from their (decommitment-free) public bodies, then
+/// verify the parent recursion proof attests exactly those circuits and
 /// anchors exactly those openings.
 pub fn verify_node_compressed(
     compressed: CompressedNode,
     config: PcsConfig,
 ) -> Result<(), VerificationError> {
     let CompressedNode { node, children } = compressed;
-    if node.circuits.len() != 2 {
+    if node.circuits.len() != children.len() {
         return Err(VerificationError::InvalidStructure(
-            "a 2-to-1 node attests exactly two child circuits".to_string(),
+            "a node attests exactly one circuit per child".to_string(),
         ));
     }
 
-    let mut arenas = Vec::with_capacity(2);
+    let mut arenas = Vec::with_capacity(children.len());
     let mut expected_roots = Vec::new();
     let mut expected_leaves = Vec::new();
     for (index, child) in children.iter().enumerate() {
@@ -535,40 +552,50 @@ pub fn verify_node_compressed(
     crate::prover::verify_recursion_with_channel::<Poseidon2M31MerkleChannel>(node, &arenas, config)
 }
 
-/// Fold a power-of-two set of Poseidon2-channel recursion proofs into a single
-/// constant-size root by repeated 2-to-1 compression (docs/recursion.md, the
-/// full aggregation tree).
+/// Fold a set of Poseidon2-channel recursion proofs into a single
+/// constant-size root by repeated `arity`-to-1 compression (docs/recursion.md,
+/// the full aggregation tree).
 ///
-/// Each level pairs its proofs and compresses every pair with
-/// [`prove_node_compressed`], carrying the resulting node proof up to the next
-/// level; the grandchildren's stripped bodies are dropped because each child
-/// node proof already attests its own subtree in-AIR. The returned
-/// [`CompressedNode`] is the tree root: the root recursion proof plus its two
-/// immediate (decommitment-free) child node proofs — a footprint independent
-/// of how many leaves sit beneath it.
+/// Each level groups its proofs into chunks of `arity` and compresses every
+/// chunk with [`prove_node_compressed_n`], carrying the resulting node proof
+/// up to the next level; the grandchildren's stripped bodies are dropped
+/// because each child node proof already attests its own subtree in-AIR. A
+/// trailing lone proof rides up a level unchanged so no node ever attests a
+/// single child. The returned [`CompressedNode`] is the tree root: the root
+/// recursion proof plus its (at most `arity`) immediate decommitment-free
+/// children — a footprint independent of how many leaves sit beneath it.
 pub fn prove_tree_compressed(
     leaves: Vec<RecursionProof<Poseidon2M31MerkleHasher>>,
+    arity: usize,
     config: PcsConfig,
 ) -> Result<CompressedNode, VerificationError> {
-    if !leaves.len().is_power_of_two() || leaves.len() < 2 {
+    if arity < 2 {
         return Err(VerificationError::InvalidStructure(
-            "a recursion tree needs a power-of-two leaf count of at least 2".to_string(),
+            "tree arity must be at least 2".to_string(),
+        ));
+    }
+    if leaves.len() < 2 {
+        return Err(VerificationError::InvalidStructure(
+            "a recursion tree needs at least 2 leaves".to_string(),
         ));
     }
     let mut level = leaves;
-    // Reduce to the final pair, taking each node proof up to the next level.
-    while level.len() > 2 {
-        let mut next = Vec::with_capacity(level.len() / 2);
-        let mut pairs = level.into_iter();
-        while let (Some(left), Some(right)) = (pairs.next(), pairs.next()) {
-            next.push(prove_node_compressed(left, right, config)?.node);
+    while level.len() > arity {
+        let mut next = Vec::with_capacity(level.len().div_ceil(arity));
+        let mut src = level.into_iter();
+        loop {
+            let chunk: Vec<_> = src.by_ref().take(arity).collect();
+            match chunk.len() {
+                0 => break,
+                // A lone trailing proof rides up unchanged (never a 1-child node).
+                1 => next.push(chunk.into_iter().next().expect("len 1")),
+                _ => next.push(prove_node_compressed_n(chunk, config)?.node),
+            }
         }
         level = next;
     }
-    let mut pair = level.into_iter();
-    let left = pair.next().expect("at least two proofs");
-    let right = pair.next().expect("at least two proofs");
-    prove_node_compressed(left, right, config)
+    // 2 ..= arity proofs remain: one final node is the root.
+    prove_node_compressed_n(level, config)
 }
 
 #[cfg(test)]
@@ -734,7 +761,7 @@ mod tests {
     fn test_compressed_tree_root_verifies() {
         let leaves = (1..=4u32).map(small_proof_poseidon).collect::<Vec<_>>();
         let root =
-            prove_tree_compressed(leaves, PcsConfig::default()).expect("tree proving failed");
+            prove_tree_compressed(leaves, 2, PcsConfig::default()).expect("tree proving failed");
         verify_node_compressed(root, PcsConfig::default()).expect("tree root verification failed");
     }
 
@@ -744,7 +771,7 @@ mod tests {
     fn test_compressed_tree_root_carries_two_children() {
         let leaves = (1..=4u32).map(small_proof_poseidon).collect::<Vec<_>>();
         let root =
-            prove_tree_compressed(leaves, PcsConfig::default()).expect("tree proving failed");
+            prove_tree_compressed(leaves, 2, PcsConfig::default()).expect("tree proving failed");
         assert_eq!(root.children.len(), 2);
     }
 
@@ -755,11 +782,13 @@ mod tests {
     fn test_compressed_tree_root_shape_is_depth_invariant() {
         let depth2 = prove_tree_compressed(
             (1..=4u32).map(small_proof_poseidon).collect(),
+            2,
             PcsConfig::default(),
         )
         .expect("depth-2 tree proving failed");
         let depth3 = prove_tree_compressed(
             (1..=8u32).map(small_proof_poseidon).collect(),
+            2,
             PcsConfig::default(),
         )
         .expect("depth-3 tree proving failed");

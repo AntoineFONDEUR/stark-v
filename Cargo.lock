@@ -1446,6 +1446,8 @@ dependencies = [
  "stwo",
  "stwo-constraint-framework",
  "stwo-macros",
+ "test-log",
+ "tracing",
 ]
 
 [[package]]

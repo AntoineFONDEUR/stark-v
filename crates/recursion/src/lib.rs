@@ -7,6 +7,7 @@
 #![allow(clippy::too_many_arguments)] // generated table push takes one arg per column
 
 pub mod aggregate;
+pub mod aggregate_tree;
 pub mod binding;
 pub mod channel_replay;
 pub mod circle_double;

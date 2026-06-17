@@ -693,6 +693,41 @@ mod tests {
             .expect("compressed node verification failed");
     }
 
+    /// Measurement (not a correctness check; `#[ignore]`d): report a 2-to-1
+    /// node's committed-cell budget and the arity that would fill stwo's
+    /// peak-throughput point (~2^30 cells). Run with:
+    ///   cargo test -p recursion --release measure_node_cell_budget -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn measure_node_cell_budget() {
+        let node = prove_node_compressed(
+            small_proof_poseidon(1),
+            small_proof_poseidon(2),
+            PcsConfig::default(),
+        )
+        .expect("node proving failed")
+        .node;
+
+        // Base trace: one entry per committed base column, at its log height.
+        let base: u64 = crate::prover::column_log_sizes(&node.log_sizes)
+            .iter()
+            .map(|&l| 1u64 << l)
+            .sum();
+        let peak: u64 = 1 << 30;
+        let per_child = base / 2; // a node attests two children
+        println!("node.log_sizes      = {:?}", node.log_sizes);
+        println!(
+            "base trace cells    = {base} (2^{:.1})",
+            (base as f64).log2()
+        );
+        println!(
+            "marginal per child  ~= {per_child} (2^{:.1})",
+            (per_child as f64).log2()
+        );
+        println!("k* to fill 2^30     ~= {}", peak / per_child.max(1));
+        assert!(base > 0);
+    }
+
     /// Four leaves fold through two level-1 nodes into one root, and the root
     /// — attesting the whole tree transitively in-AIR — verifies.
     #[test]

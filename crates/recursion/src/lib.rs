@@ -9,6 +9,7 @@
 pub mod aggregate;
 pub mod aggregate_tree;
 pub mod binding;
+pub mod boundary;
 pub mod channel_replay;
 pub mod circle_double;
 pub mod circuit;

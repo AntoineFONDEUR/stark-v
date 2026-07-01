@@ -20,16 +20,19 @@ use recursion::aggregate_tree::{prove_guest_recursive, prove_guest_recursive_by_
 use recursion::node::verify_node_compressed;
 use runner::run;
 
-/// A small execution folded 2-to-1 to one root that verifies: the full
-/// guest -> segments -> base nodes -> tree pipeline end to end.
+/// A small execution folded 2-to-1 through a multi-level tree to one root
+/// that verifies AND exposes the boundary of the whole run: the full
+/// guest -> segments -> base nodes -> tree pipeline end to end, with the
+/// root's boundary claim checked against an independent unsegmented run.
 #[test_log::test]
-fn test_guest_recursive_arity_2_verifies() {
+fn test_guest_recursive_arity_2_root_spans_the_run() {
     prover::e2e::ensure_guest_built();
     let elf = std::fs::read(prover::e2e::guest_bin_dir().join("fib")).expect("read fib ELF");
     let reference = run(&elf, 10_000_000).expect("run fib");
 
-    // Split into ~3 segments so arity-2 base grouping yields >= 2 leaves.
-    let segment_cycles = u32::try_from(reference.cycles / 3 + 1).expect("fits u32");
+    // Split into ~5 segments: arity-2 base grouping yields 3 leaves, so the
+    // fold has an intermediate level (a node child and a ridden-up leaf).
+    let segment_cycles = u32::try_from(reference.cycles / 5 + 1).expect("fits u32");
     let config = PcsConfig::default();
     let preprocessing = preprocess_with_channel::<Poseidon2M31MerkleChannel>(config);
 
@@ -43,7 +46,47 @@ fn test_guest_recursive_arity_2_verifies() {
         &preprocessing,
     )
     .expect("recursive proving failed");
-    verify_node_compressed(root, config).expect("root verification failed");
+    let boundary = verify_node_compressed(root, config)
+        .expect("root verification failed")
+        .expect("an execution tree carries a boundary");
+    assert_eq!(boundary.entry_pc, reference.initial_pc);
+    assert_eq!(boundary.exit_pc, reference.final_pc);
+    assert_eq!(boundary.entry_regs, reference.initial_regs);
+    assert_eq!(boundary.exit_regs, reference.final_regs);
+    assert!(boundary.program_root.is_some());
+}
+
+/// The degenerate tree: a run small enough for one base group still yields
+/// a root (a 1-child wrap) whose boundary spans the run.
+#[test_log::test]
+fn test_guest_recursive_single_segment_wraps() {
+    prover::e2e::ensure_guest_built();
+    let elf = std::fs::read(prover::e2e::guest_bin_dir().join("fib")).expect("read fib ELF");
+    let reference = run(&elf, 10_000_000).expect("run fib");
+
+    // A budget above the whole run: only the forced output-tail boundary
+    // splits it, so arity-2 base grouping folds everything into one leaf.
+    let segment_cycles = u32::try_from(reference.cycles + 1).expect("fits u32");
+    let config = PcsConfig::default();
+    let preprocessing = preprocess_with_channel::<Poseidon2M31MerkleChannel>(config);
+
+    let root = prove_guest_recursive(
+        &elf,
+        &[],
+        2,
+        segment_cycles,
+        10_000_000,
+        config,
+        &preprocessing,
+    )
+    .expect("recursive proving failed");
+    assert_eq!(root.children.len(), 1);
+    let boundary = verify_node_compressed(root, config)
+        .expect("root verification failed")
+        .expect("an execution tree carries a boundary");
+    assert_eq!(boundary.entry_pc, reference.initial_pc);
+    assert_eq!(boundary.exit_pc, reference.final_pc);
+    assert_eq!(boundary.exit_regs, reference.final_regs);
 }
 
 /// Capacity-aware segmentation end to end: a small run split on a row budget
@@ -72,7 +115,12 @@ fn test_guest_recursive_by_capacity_verifies() {
         &preprocessing,
     )
     .expect("recursive proving failed");
-    verify_node_compressed(root, config).expect("root verification failed");
+    let boundary = verify_node_compressed(root, config)
+        .expect("root verification failed")
+        .expect("an execution tree carries a boundary");
+    assert_eq!(boundary.entry_pc, reference.initial_pc);
+    assert_eq!(boundary.exit_pc, reference.final_pc);
+    assert_eq!(boundary.exit_regs, reference.final_regs);
 }
 
 /// Tunable harness: sweep `RECURSION_ARITY` and the per-segment row budget

@@ -30,6 +30,7 @@ use stwo::core::verifier::VerificationError;
 use tracing::info;
 
 use crate::binding::CompositionRecorder;
+use crate::boundary::{Boundary, fold_boundaries};
 use crate::circuit::lower_arena;
 use crate::node::{CompressedNode, prove_tree_compressed};
 use crate::openings::{TREE_ID_STRIDE, replay_pcs_openings};
@@ -41,7 +42,9 @@ use crate::transcript::full_binding_data_with_channel;
 ///
 /// For each segment: record its composition through the inner `evaluate()`
 /// and replay its Merkle/FRI openings as `merkle_path` rows, then prove ONE
-/// recursion proof attesting them all. The result is itself a
+/// recursion proof attesting them all. The leaf's boundary claim is the
+/// chain of the segments' public boundaries — the seam where the tree's
+/// boundary claims meet the actual execution. The result is itself a
 /// [`RecursionProof`], so it is a valid leaf for [`prove_tree_compressed`].
 pub fn prove_base_node(
     segments: &[Proof<Poseidon2M31MerkleHasher>],
@@ -53,6 +56,9 @@ pub fn prove_base_node(
             "a base node folds at least one segment".to_string(),
         ));
     }
+    let boundary = fold_boundaries(segments.iter().map(Boundary::of_segment)).map_err(|what| {
+        VerificationError::InvalidStructure(format!("segment boundaries do not chain: {what}"))
+    })?;
     let mut traces = RecursionTraces::default();
     let mut circuits = Vec::with_capacity(segments.len());
     let mut roots = Vec::new();
@@ -108,6 +114,7 @@ pub fn prove_base_node(
         leaves,
         vec![],
         circuits,
+        boundary,
         config,
     ))
 }
@@ -170,16 +177,14 @@ pub fn prove_guest_recursive_by_capacity(
 
 /// Prove segment proofs and fold them `arity`-to-1 into one constant-size root.
 ///
-/// Per-phase wall-clock is emitted at `info` level. Requires at least two base
-/// groups (otherwise there is no tree to fold).
+/// Per-phase wall-clock is emitted at `info` level. A run small enough for a
+/// single base group yields a 1-child root wrapping that lone leaf.
 fn prove_recursive_from_segments(
     segments: Vec<runner::RunResult>,
     arity: usize,
     config: PcsConfig,
     preprocessing: &Preprocessing<Poseidon2M31MerkleHasher>,
 ) -> Result<CompressedNode, VerificationError> {
-    let invalid = |what: &str| VerificationError::InvalidStructure(what.to_string());
-
     let t = Instant::now();
     let proofs = prover::e2e::prove_segments_with_channel::<Poseidon2M31MerkleChannel>(
         segments,
@@ -203,12 +208,6 @@ fn prove_recursive_from_segments(
         elapsed_ms = t.elapsed().as_millis(),
         "base nodes"
     );
-
-    if leaves.len() < 2 {
-        return Err(invalid(
-            "run produced fewer than two base groups; lower the budget or arity",
-        ));
-    }
 
     let t = Instant::now();
     let root = prove_tree_compressed(leaves, arity, config)?;

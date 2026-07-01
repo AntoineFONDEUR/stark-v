@@ -7,14 +7,14 @@
 //! the parent's trace and proving one parent recursion proof. No child is
 //! re-proven; the parent attests them.
 //!
-//! - [`replay_recursion_composition`] / [`prove_node`] / [`verify_node`]:
-//!   the composition half (Blake2s channel), the recursion-level analogue of
-//!   the M1 seam.
-//! - [`prove_node_compressed`] / [`verify_node_compressed`]: the constant-size
-//!   node — children proven over the Poseidon2-M31 channel so their openings
-//!   become `merkle_path` rows in the parent, their decommitments stripped
-//!   from the artifact. This is the recursion-level analogue of
-//!   [`crate::final_proof::FinalProof`].
+//! - [`replay_recursion_composition`]: the composition half alone (a
+//!   diagnostic seam — the recursion-level analogue of the M1 seam).
+//! - [`prove_node_compressed`] / [`verify_node_compressed`]: the node — its
+//!   children are proven over the Poseidon2-M31 channel so their openings
+//!   become `merkle_path` rows in the parent and their decommitments are
+//!   stripped from the artifact, and its boundary claim chains the
+//!   children's. This is the recursion-level analogue of
+//!   [`crate::final_proof::FinalProof`] and the only node API.
 
 use num_traits::Zero;
 use stwo::core::air::Components as CoreComponents;
@@ -34,9 +34,10 @@ use prover::PcsConfig;
 use prover::relations::Relations;
 
 use crate::binding::record_component;
+use crate::boundary::{Boundary, fold_boundaries};
 use crate::prover::{
-    RecursionProof, column_log_sizes, components, mix_channels, mix_circuits, mix_claim,
-    mix_leaves, mix_roots,
+    RecursionProof, column_log_sizes, components, mix_boundary, mix_channels, mix_circuits,
+    mix_claim, mix_leaves, mix_roots,
 };
 use crate::recorder::Rec;
 use crate::relations::RecursionRelations;
@@ -90,6 +91,7 @@ fn recursion_binding<MC: MerkleChannel>(
     mix_leaves(channel, &proof.leaves);
     mix_channels(channel, &proof.channels);
     mix_circuits(channel, &proof.circuits);
+    mix_boundary(channel, &proof.boundary);
     commitment_scheme.commit(commitments[1], &column_log_sizes(&proof.log_sizes), channel);
 
     let relations = Relations::draw(channel);
@@ -295,86 +297,8 @@ fn recorder_output(recorder: &crate::recorder::Recorder) -> Result<usize, Verifi
     }
 }
 
-/// A 2-to-1 aggregation node: a recursion proof attesting that its two child
-/// recursion proofs' composition checks pass.
-///
-/// This is the recursive step of node compression (docs/recursion.md). Each
-/// child's composition is recorded from its transcript (no re-proving) and
-/// lowered into the parent's trace as circuits `0` and `1`; the parent
-/// recursion proof then attests both. Applied up a binary tree, the root is
-/// one recursion proof for the whole execution. As with the segment-leaf
-/// path (`prove_segment_composition`), the children's FRI/Merkle openings are
-/// verified host-side until they too move in-AIR — the documented trust
-/// split that keeps each step sound while shrinking the host remainder.
-pub fn prove_node(
-    left: &RecursionProof<Blake2sMerkleHasher>,
-    right: &RecursionProof<Blake2sMerkleHasher>,
-    config: PcsConfig,
-) -> Result<RecursionProof<Blake2sMerkleHasher>, VerificationError> {
-    let mut traces = crate::prover::RecursionTraces::default();
-    let mut circuits = Vec::with_capacity(2);
-    for (circuit_id, child) in [left, right].into_iter().enumerate() {
-        let (recorder, claimed, _) = recursion_binding::<Blake2sMerkleChannel>(child, config)?;
-        if recorder.accumulation.value() != claimed {
-            return Err(VerificationError::InvalidStructure(
-                "child recursion composition does not match its claim".to_string(),
-            ));
-        }
-        let output = recorder_output(&recorder)?;
-        circuits.push(crate::circuit::lower_arena(
-            &mut traces,
-            circuit_id as u32,
-            &recorder.arena.borrow(),
-            output,
-            0,
-            SecureField::zero(),
-        ));
-    }
-    Ok(crate::prover::prove_recursion(
-        traces,
-        vec![],
-        vec![],
-        vec![],
-        circuits,
-        config,
-    ))
-}
-
-/// Verify a 2-to-1 node: re-record the two children's canonical composition
-/// circuits from their transcripts and verify the parent recursion proof
-/// attests exactly them.
-pub fn verify_node(
-    node: RecursionProof<Blake2sMerkleHasher>,
-    left: &RecursionProof<Blake2sMerkleHasher>,
-    right: &RecursionProof<Blake2sMerkleHasher>,
-    config: PcsConfig,
-) -> Result<(), VerificationError> {
-    if node.circuits.len() != 2 {
-        return Err(VerificationError::InvalidStructure(
-            "a 2-to-1 node attests exactly two child circuits".to_string(),
-        ));
-    }
-    let mut arenas = Vec::with_capacity(2);
-    for (circuit_id, child) in [left, right].into_iter().enumerate() {
-        let (recorder, claimed, _) = recursion_binding::<Blake2sMerkleChannel>(child, config)?;
-        if recorder.accumulation.value() != claimed {
-            return Err(VerificationError::InvalidStructure(
-                "child recursion composition does not match its claim".to_string(),
-            ));
-        }
-        if node.circuits[circuit_id].circuit_id != circuit_id as u32 {
-            return Err(VerificationError::InvalidStructure(
-                "node circuit ids must be the child indices".to_string(),
-            ));
-        }
-        let output = recorder_output(&recorder)?;
-        arenas.push((recorder.arena, output));
-    }
-    crate::prover::verify_recursion(node, &arenas, config)
-}
-
 // =============================================================================
-// Constant-size node: child openings attested in-AIR
+// The node: child compositions and openings attested in-AIR
 // =============================================================================
 
 use crate::openings::{TREE_ID_STRIDE, replay_pcs_openings};
@@ -402,6 +326,25 @@ pub struct CompressedNode {
     /// The child recursion proofs with decommitments stripped (their openings
     /// live in `node` as `merkle_path` rows).
     pub children: Vec<RecursionProof<Poseidon2M31MerkleHasher>>,
+}
+
+/// Fold the children's boundary claims into the span the node covers.
+///
+/// Boundary presence must be uniform: an execution tree carries a boundary
+/// on every proof, a standalone-circuit tree on none — a mix means a child
+/// from a different pipeline was smuggled in.
+fn fold_child_boundaries(
+    children: &[RecursionProof<Poseidon2M31MerkleHasher>],
+) -> Result<Option<Boundary>, VerificationError> {
+    let with_boundary = children.iter().filter(|c| c.boundary.is_some()).count();
+    if with_boundary != 0 && with_boundary != children.len() {
+        return Err(VerificationError::InvalidStructure(
+            "children must uniformly carry or omit a boundary claim".to_string(),
+        ));
+    }
+    fold_boundaries(children.iter().filter_map(|c| c.boundary.clone())).map_err(|what| {
+        VerificationError::InvalidStructure(format!("child boundaries do not chain: {what}"))
+    })
 }
 
 /// Strip every Merkle decommitment from a recursion proof: its openings are
@@ -433,15 +376,21 @@ pub fn prove_node_compressed(
 /// circuit `i`) and replay its openings (recorded as `merkle_path` rows and
 /// anchored by public root/leaf claims), then prove ONE parent recursion
 /// proof attesting all of them. The children's decommitments are stripped.
+///
+/// The parent's boundary claim is the chain of the children's, in order —
+/// children that do not chain are rejected here, before any proving work.
+/// A single child yields a 1-child node: the wrap that strips the last
+/// decommitments off a lone leaf (the degenerate single-segment tree).
 pub fn prove_node_compressed_n(
     mut children: Vec<RecursionProof<Poseidon2M31MerkleHasher>>,
     config: PcsConfig,
 ) -> Result<CompressedNode, VerificationError> {
-    if children.len() < 2 {
+    if children.is_empty() {
         return Err(VerificationError::InvalidStructure(
-            "a node attests at least two children".to_string(),
+            "a node attests at least one child".to_string(),
         ));
     }
+    let boundary = fold_child_boundaries(&children)?;
     let mut traces = crate::prover::RecursionTraces::default();
     let mut circuits = Vec::with_capacity(children.len());
     let mut roots = Vec::new();
@@ -483,6 +432,7 @@ pub fn prove_node_compressed_n(
         leaves,
         vec![],
         circuits,
+        boundary,
         config,
     );
 
@@ -495,11 +445,13 @@ pub fn prove_node_compressed_n(
 /// Verify a constant-size node: re-record every child's composition and
 /// re-replay its openings from their (decommitment-free) public bodies, then
 /// verify the parent recursion proof attests exactly those circuits and
-/// anchors exactly those openings.
+/// anchors exactly those openings, and that its boundary claim is exactly
+/// the chain of the children's. Returns the verified execution span
+/// (`None` for trees not tied to an execution).
 pub fn verify_node_compressed(
     compressed: CompressedNode,
     config: PcsConfig,
-) -> Result<(), VerificationError> {
+) -> Result<Option<Boundary>, VerificationError> {
     let CompressedNode { node, children } = compressed;
     if node.circuits.len() != children.len() {
         return Err(VerificationError::InvalidStructure(
@@ -549,7 +501,19 @@ pub fn verify_node_compressed(
         ));
     }
 
-    crate::prover::verify_recursion_with_channel::<Poseidon2M31MerkleChannel>(node, &arenas, config)
+    // The node must claim exactly the span its children chain to — the
+    // children's own claims are bound by their transcripts, replayed above.
+    let expected_boundary = fold_child_boundaries(&children)?;
+    if node.boundary != expected_boundary {
+        return Err(VerificationError::InvalidStructure(
+            "node boundary claim does not match the chained children boundaries".to_string(),
+        ));
+    }
+
+    crate::prover::verify_recursion_with_channel::<Poseidon2M31MerkleChannel>(
+        node, &arenas, config,
+    )?;
+    Ok(expected_boundary)
 }
 
 /// Fold a set of Poseidon2-channel recursion proofs into a single
@@ -560,10 +524,12 @@ pub fn verify_node_compressed(
 /// chunk with [`prove_node_compressed_n`], carrying the resulting node proof
 /// up to the next level; the grandchildren's stripped bodies are dropped
 /// because each child node proof already attests its own subtree in-AIR. A
-/// trailing lone proof rides up a level unchanged so no node ever attests a
-/// single child. The returned [`CompressedNode`] is the tree root: the root
-/// recursion proof plus its (at most `arity`) immediate decommitment-free
-/// children — a footprint independent of how many leaves sit beneath it.
+/// trailing lone proof rides up a level unchanged so no intermediate node
+/// attests a single child; only a single-leaf tree yields a 1-child root
+/// (the wrap of a lone leaf). The returned [`CompressedNode`] is the tree
+/// root: the root recursion proof plus its (at most `arity`) immediate
+/// decommitment-free children — a footprint independent of how many leaves
+/// sit beneath it.
 pub fn prove_tree_compressed(
     leaves: Vec<RecursionProof<Poseidon2M31MerkleHasher>>,
     arity: usize,
@@ -574,9 +540,9 @@ pub fn prove_tree_compressed(
             "tree arity must be at least 2".to_string(),
         ));
     }
-    if leaves.len() < 2 {
+    if leaves.is_empty() {
         return Err(VerificationError::InvalidStructure(
-            "a recursion tree needs at least 2 leaves".to_string(),
+            "a recursion tree needs at least 1 leaf".to_string(),
         ));
     }
     let mut level = leaves;
@@ -628,6 +594,13 @@ mod tests {
     /// The same small recursion proof, but over the Poseidon2-M31 channel so
     /// its openings can be attested in-AIR by a parent node.
     fn small_proof_poseidon(seed: u32) -> RecursionProof<Poseidon2M31MerkleHasher> {
+        small_proof_poseidon_with_boundary(seed, None)
+    }
+
+    fn small_proof_poseidon_with_boundary(
+        seed: u32,
+        boundary: Option<Boundary>,
+    ) -> RecursionProof<Poseidon2M31MerkleHasher> {
         let mut traces = RecursionTraces::default();
         for i in 1..5u32 {
             let a = QM31::from_u32_unchecked(seed + i, i + 1, i + 2, i + 3);
@@ -642,8 +615,23 @@ mod tests {
             vec![],
             vec![],
             vec![],
+            boundary,
             PcsConfig::default(),
         )
+    }
+
+    /// A synthetic boundary spanning `[entry_pc, exit_pc)` for boundary-fold
+    /// tests; registers and roots are fixed so consecutive spans chain.
+    fn span(entry_pc: u32, exit_pc: u32) -> Boundary {
+        Boundary {
+            entry_pc,
+            exit_pc,
+            entry_regs: [0; 32],
+            exit_regs: [0; 32],
+            entry_rw_root: Some(7),
+            exit_rw_root: Some(7),
+            program_root: Some(42),
+        }
     }
 
     #[test]
@@ -671,29 +659,6 @@ mod tests {
             recorded: check.recorded,
         };
         assert!(!bumped.holds());
-    }
-
-    /// A 2-to-1 node over two child recursion proofs: the parent recursion
-    /// proof attests both children's composition checks, and verifies against
-    /// the children re-recorded from their transcripts. This is the recursive
-    /// node-compression step.
-    #[test]
-    fn test_node_attests_two_children() {
-        let left = small_proof_seeded(1);
-        let right = small_proof_seeded(2);
-        let node = prove_node(&left, &right, PcsConfig::default()).expect("node proving failed");
-        verify_node(node, &left, &right, PcsConfig::default()).expect("node verification failed");
-    }
-
-    #[test]
-    fn test_node_rejects_wrong_child() {
-        let left = small_proof_seeded(1);
-        let right = small_proof_seeded(2);
-        let node = prove_node(&left, &right, PcsConfig::default()).expect("node proving failed");
-        // Verifying against a different right child: its canonical circuit
-        // differs from what the node attested, so verification fails.
-        let other = small_proof_seeded(3);
-        assert!(verify_node(node, &left, &other, PcsConfig::default()).is_err());
     }
 
     /// Constant-size node: the parent attests both Poseidon2-channel
@@ -773,6 +738,107 @@ mod tests {
         let root =
             prove_tree_compressed(leaves, 2, PcsConfig::default()).expect("tree proving failed");
         assert_eq!(root.children.len(), 2);
+    }
+
+    /// A node's boundary claim is the chain of its children's, and verifying
+    /// returns the folded span.
+    #[test]
+    fn test_compressed_node_folds_child_boundaries() {
+        let left = small_proof_poseidon_with_boundary(1, Some(span(0, 4)));
+        let right = small_proof_poseidon_with_boundary(2, Some(span(4, 8)));
+        let compressed = prove_node_compressed(left, right, PcsConfig::default())
+            .expect("compressed node proving failed");
+        assert_eq!(compressed.node.boundary, Some(span(0, 8)));
+        let verified = verify_node_compressed(compressed, PcsConfig::default())
+            .expect("compressed node verification failed");
+        assert_eq!(verified, Some(span(0, 8)));
+    }
+
+    /// Children whose boundaries do not chain are rejected before any
+    /// proving work.
+    #[test]
+    fn test_compressed_node_rejects_non_chaining_children() {
+        let left = small_proof_poseidon_with_boundary(1, Some(span(0, 4)));
+        let right = small_proof_poseidon_with_boundary(2, Some(span(8, 12)));
+        assert!(prove_node_compressed(left, right, PcsConfig::default()).is_err());
+    }
+
+    /// A mix of boundary-carrying and boundary-free children means a proof
+    /// from a different pipeline was smuggled in.
+    #[test]
+    fn test_compressed_node_rejects_mixed_boundary_presence() {
+        let left = small_proof_poseidon_with_boundary(1, Some(span(0, 4)));
+        let right = small_proof_poseidon(2);
+        assert!(prove_node_compressed(left, right, PcsConfig::default()).is_err());
+    }
+
+    /// Swapping the children after proving breaks verification: the openings
+    /// no longer match the node's claims and the boundaries chain backwards.
+    #[test]
+    fn test_compressed_node_rejects_swapped_children() {
+        let left = small_proof_poseidon_with_boundary(1, Some(span(0, 4)));
+        let right = small_proof_poseidon_with_boundary(2, Some(span(4, 8)));
+        let mut compressed = prove_node_compressed(left, right, PcsConfig::default())
+            .expect("compressed node proving failed");
+        compressed.children.swap(0, 1);
+        assert!(verify_node_compressed(compressed, PcsConfig::default()).is_err());
+    }
+
+    /// Forging the root's boundary claim is caught: it no longer matches the
+    /// chain of the children's transcript-bound claims.
+    #[test]
+    fn test_compressed_node_rejects_forged_boundary() {
+        let left = small_proof_poseidon_with_boundary(1, Some(span(0, 4)));
+        let right = small_proof_poseidon_with_boundary(2, Some(span(4, 8)));
+        let mut compressed = prove_node_compressed(left, right, PcsConfig::default())
+            .expect("compressed node proving failed");
+        compressed.node.boundary = Some(span(0, 16));
+        assert!(verify_node_compressed(compressed, PcsConfig::default()).is_err());
+    }
+
+    /// Replacing a child with one from a different run (same shape, different
+    /// span) is caught by the chain check and the opening claims alike.
+    #[test]
+    fn test_compressed_node_rejects_child_from_other_run() {
+        let left = small_proof_poseidon_with_boundary(1, Some(span(0, 4)));
+        let right = small_proof_poseidon_with_boundary(2, Some(span(4, 8)));
+        let compressed = prove_node_compressed(left, right, PcsConfig::default())
+            .expect("compressed node proving failed");
+        let mut other = small_proof_poseidon_with_boundary(3, Some(span(4, 8)));
+        strip_recursion_decommitments(&mut other);
+        let forged = CompressedNode {
+            node: compressed.node,
+            children: vec![compressed.children[0].clone(), other],
+        };
+        assert!(verify_node_compressed(forged, PcsConfig::default()).is_err());
+    }
+
+    /// A single leaf wraps into a 1-child root whose boundary is the leaf's.
+    #[test]
+    fn test_compressed_tree_of_one_leaf_wraps_and_verifies() {
+        let leaf = small_proof_poseidon_with_boundary(1, Some(span(0, 4)));
+        let root = prove_tree_compressed(vec![leaf], 2, PcsConfig::default())
+            .expect("single-leaf tree proving failed");
+        assert_eq!(root.children.len(), 1);
+        let verified = verify_node_compressed(root, PcsConfig::default())
+            .expect("single-leaf root verification failed");
+        assert_eq!(verified, Some(span(0, 4)));
+    }
+
+    /// An odd leaf count folds cleanly: the trailing leaf rides up a level
+    /// and the root still spans the whole sequence.
+    #[test]
+    fn test_compressed_tree_folds_odd_leaf_count() {
+        let leaves = vec![
+            small_proof_poseidon_with_boundary(1, Some(span(0, 4))),
+            small_proof_poseidon_with_boundary(2, Some(span(4, 8))),
+            small_proof_poseidon_with_boundary(3, Some(span(8, 12))),
+        ];
+        let root = prove_tree_compressed(leaves, 2, PcsConfig::default())
+            .expect("odd-leaf tree proving failed");
+        let verified = verify_node_compressed(root, PcsConfig::default())
+            .expect("odd-leaf root verification failed");
+        assert_eq!(verified, Some(span(0, 12)));
     }
 
     /// Constant size to the top: an 8-leaf (depth-3) tree and a 4-leaf

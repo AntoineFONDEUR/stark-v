@@ -28,6 +28,7 @@ use stwo_constraint_framework::TraceLocationAllocator;
 use air::trace::Poseidon2Table;
 use prover::relations::Relations;
 
+use crate::boundary::Boundary;
 use crate::circuit::{CircuitClaim, public_circuit_terms};
 use crate::recorder::Arena;
 use crate::relations::RecursionRelations;
@@ -79,7 +80,36 @@ pub struct RecursionProof<H: MerkleHasherLifted> {
     pub channels: Vec<ChannelClaim>,
     /// Lowered composition circuits (public inputs and outputs).
     pub circuits: Vec<CircuitClaim>,
+    /// Execution boundary the attested subtree spans: chained from the
+    /// segment public data at the base and folded upward node by node.
+    /// `None` for proofs not tied to an execution (component tests,
+    /// standalone circuits).
+    pub boundary: Option<Boundary>,
     pub stark_proof: StarkProof<H>,
+}
+
+/// Mix the boundary claim into the Fiat-Shamir channel. Presence flags keep
+/// the encoding injective: absent boundary and absent memory/program roots
+/// each contribute a distinguishable word.
+pub(crate) fn mix_boundary<C: Channel>(channel: &mut C, boundary: &Option<Boundary>) {
+    let Some(boundary) = boundary else {
+        channel.mix_u32s(&[0]);
+        return;
+    };
+    let mut words = vec![1, boundary.entry_pc, boundary.exit_pc];
+    words.extend_from_slice(&boundary.entry_regs);
+    words.extend_from_slice(&boundary.exit_regs);
+    for root in [
+        boundary.entry_rw_root,
+        boundary.exit_rw_root,
+        boundary.program_root,
+    ] {
+        match root {
+            Some(value) => words.extend_from_slice(&[1, value]),
+            None => words.push(0),
+        }
+    }
+    channel.mix_u32s(&words);
 }
 
 pub(crate) fn mix_circuits<C: Channel>(channel: &mut C, circuits: &[CircuitClaim]) {
@@ -372,7 +402,7 @@ pub fn prove_recursion(
     config: PcsConfig,
 ) -> RecursionProof<<Blake2sMerkleChannel as MerkleChannel>::H> {
     prove_recursion_with_channel::<Blake2sMerkleChannel>(
-        traces, roots, leaves, channels, circuits, config,
+        traces, roots, leaves, channels, circuits, None, config,
     )
 }
 
@@ -394,6 +424,7 @@ pub fn prove_recursion_with_channel<MC: MerkleChannel>(
     leaves: Vec<LeafClaim>,
     channels: Vec<ChannelClaim>,
     circuits: Vec<CircuitClaim>,
+    boundary: Option<Boundary>,
     config: PcsConfig,
 ) -> RecursionProof<MC::H>
 where
@@ -451,6 +482,7 @@ where
     mix_leaves(channel, &leaves);
     mix_channels(channel, &channels);
     mix_circuits(channel, &circuits);
+    mix_boundary(channel, &boundary);
 
     // Tree 1: all component tables, in the fixed commit order.
     let mut tree_builder = commitment_scheme.tree_builder();
@@ -547,6 +579,7 @@ where
         leaves,
         channels,
         circuits,
+        boundary,
         stark_proof,
     }
 }
@@ -586,6 +619,7 @@ pub fn verify_recursion_with_channel<MC: MerkleChannel>(
     mix_leaves(channel, &proof.leaves);
     mix_channels(channel, &proof.channels);
     mix_circuits(channel, &proof.circuits);
+    mix_boundary(channel, &proof.boundary);
     commitment_scheme.commit(commitments[1], &column_log_sizes(&proof.log_sizes), channel);
 
     let relations = Relations::draw(channel);
@@ -822,6 +856,7 @@ mod tests {
             vec![],
             channels,
             vec![],
+            None,
             PcsConfig::default(),
         );
         verify_recursion_with_channel::<Poseidon2M31MerkleChannel>(

@@ -50,8 +50,37 @@ pub enum RunError {
     #[error("Input length {len} exceeds input capacity {capacity}")]
     InputTooLarge { len: usize, capacity: usize },
 
+    #[error("Memory fault at PC=0x{pc:08x}: {kind} address 0x{addr:08x}")]
+    MemoryFault {
+        pc: u32,
+        addr: u32,
+        kind: MemoryFaultKind,
+    },
+
     #[error("Commitment error: {0}")]
     Commitment(#[from] CommitmentError),
+}
+
+/// Why a memory access was rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryFaultKind {
+    /// A store targeting the read-only code (TEXT) region. The program table
+    /// commits instructions separately, so such a write cannot change what
+    /// executes — it is always a guest bug, caught here rather than silently
+    /// writing to a shadow location.
+    StoreIntoText,
+    /// A load or store touching the null page (address below the TEXT origin),
+    /// which no valid pointer addresses.
+    NullPage,
+}
+
+impl std::fmt::Display for MemoryFaultKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MemoryFaultKind::StoreIntoText => write!(f, "store into read-only code"),
+            MemoryFaultKind::NullPage => write!(f, "null-page"),
+        }
+    }
 }
 
 /// Word-aligned I/O word captured from memory.
@@ -167,6 +196,10 @@ fn run_segments_impl<F: Fn(&Tracer) -> bool>(
         output_data: loaded.output_data_addr,
         output_end: loaded.output_end_addr,
     };
+    // The read-only code region (stores here are always guest bugs) and the
+    // TEXT origin (nothing valid lives below it — the null page).
+    let text_range = loaded.text_base..loaded.text_end;
+    let null_page_top = loaded.text_base;
     let mut mem = loaded.memory;
     let input_start = io_addrs.input_start;
     let input_end = io_addrs.input_end;
@@ -180,6 +213,11 @@ fn run_segments_impl<F: Fn(&Tracer) -> bool>(
     for (idx, byte) in input.iter().enumerate() {
         let addr = input_start.wrapping_add(idx as u32);
         mem.write_u8(addr, *byte);
+    }
+    // Publish the actual input length so the guest reads only live bytes
+    // instead of treating the whole buffer as input.
+    if let Some(addr) = loaded.input_len_addr {
+        mem.write_u32(addr, input.len() as u32);
     }
     let mut cache: InstCache = InstCache::default();
     let mut tracer = Tracer::default();
@@ -204,6 +242,11 @@ fn run_segments_impl<F: Fn(&Tracer) -> bool>(
         // current segment so the whole output tail lands in the final one.
         let next_inst = get_or_decode(&mut cache, &mem, cpu.pc)
             .ok_or(RunError::InvalidInstruction { pc: cpu.pc })?;
+        // Reject stores into read-only code and any access to the null page
+        // before it can silently corrupt a shadow location.
+        if let Some(fault) = memory_fault(&cpu, &next_inst, &text_range, null_page_top) {
+            return Err(fault);
+        }
         let output_write = writes_output_region(&cpu, &next_inst, io_addrs);
         let splitting = should_close.is_some();
         let force_close = splitting && output_write && !output_phase && tracer.clock > 0;
@@ -387,6 +430,52 @@ fn writes_output_region(cpu: &Cpu, inst: &DecodedInst, io: IoAddrs) -> bool {
     let len_word = io.output_len & !3;
     let overlaps = |lo: u32, hi: u32| addr < hi && end > lo;
     overlaps(len_word, len_word.wrapping_add(4)) || overlaps(io.output_data, io.output_end)
+}
+
+/// The effective address and access width of a load/store, or `None` for a
+/// non-memory instruction. Pure: depends only on the register file.
+fn mem_access(cpu: &Cpu, inst: &DecodedInst) -> Option<(u32, u32, bool)> {
+    // (addr, width, is_store)
+    let (width, is_store) = match inst.opcode {
+        Opcode::Sb => (1, true),
+        Opcode::Sh => (2, true),
+        Opcode::Sw => (4, true),
+        Opcode::Lb | Opcode::Lbu => (1, false),
+        Opcode::Lh | Opcode::Lhu => (2, false),
+        Opcode::Lw => (4, false),
+        _ => return None,
+    };
+    let addr = cpu.reg(inst.rs1).wrapping_add(inst.imm as u32);
+    Some((addr, width, is_store))
+}
+
+/// Reject stores into the read-only code region and any access straddling the
+/// null page. Returns the fault to raise, or `None` if the access is allowed.
+fn memory_fault(
+    cpu: &Cpu,
+    inst: &DecodedInst,
+    text_range: &core::ops::Range<u32>,
+    null_page_top: u32,
+) -> Option<RunError> {
+    let (addr, width, is_store) = mem_access(cpu, inst)?;
+    let end = addr.wrapping_add(width);
+    let overlaps = |lo: u32, hi: u32| addr < hi && end > lo;
+
+    if addr < null_page_top {
+        return Some(RunError::MemoryFault {
+            pc: cpu.pc,
+            addr,
+            kind: MemoryFaultKind::NullPage,
+        });
+    }
+    if is_store && !text_range.is_empty() && overlaps(text_range.start, text_range.end) {
+        return Some(RunError::MemoryFault {
+            pc: cpu.pc,
+            addr,
+            kind: MemoryFaultKind::StoreIntoText,
+        });
+    }
+    None
 }
 
 /// IO-region addresses captured from the loaded ELF before its memory is

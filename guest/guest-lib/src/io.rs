@@ -6,12 +6,27 @@
 //! This module is only available when compiling for riscv32.
 
 unsafe extern "C" {
+    static __input_len: u8;
     static __input_start: u8;
     static __input_end: u8;
     static __halt_flag: u8;
     static __output_len: u8;
     static __output_data: u8;
     static __output_end: u8;
+}
+
+/// Read the actual number of input bytes the host provided.
+///
+/// The host writes this at `__input_len` before execution; it is at most the
+/// input buffer capacity (`__input_end - __input_start`).
+///
+/// # Safety
+/// Only call from within a zkVM guest program.
+pub unsafe fn read_input_len() -> usize {
+    unsafe {
+        let len_addr = core::ptr::addr_of!(__input_len) as *const u32;
+        core::ptr::read_volatile(len_addr) as usize
+    }
 }
 
 /// Read input bytes from the input buffer.

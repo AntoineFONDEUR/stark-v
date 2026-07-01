@@ -46,6 +46,10 @@ fn test_guest_recursive_arity_2_root_spans_the_run() {
         &preprocessing,
     )
     .expect("recursive proving failed");
+    assert!(
+        root.children.len() > 1,
+        "expected a multi-level tree (a node child plus a ridden-up leaf)"
+    );
     let boundary = verify_node_compressed(root, config)
         .expect("root verification failed")
         .expect("an execution tree carries a boundary");
@@ -86,6 +90,7 @@ fn test_guest_recursive_single_segment_wraps() {
         .expect("an execution tree carries a boundary");
     assert_eq!(boundary.entry_pc, reference.initial_pc);
     assert_eq!(boundary.exit_pc, reference.final_pc);
+    assert_eq!(boundary.entry_regs, reference.initial_regs);
     assert_eq!(boundary.exit_regs, reference.final_regs);
 }
 

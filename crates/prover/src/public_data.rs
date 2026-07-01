@@ -349,6 +349,8 @@ mod tests {
                     value: u32::from_le_bytes([1, 2, 3, 4]),
                 },
             ],
+            initial_journal: [0u32; 16],
+            final_journal: [0u32; 16],
             tracer,
         }
     }

@@ -211,6 +211,18 @@ so `verify_final` approaches statement-size work:
    then true 2-to-1 node compression (a recursion proof attesting two child
    recursion proofs) for unbounded depth at constant artifact size.
 
+The preprocessed-columns half of item 3 is sequenced AFTER item 2 for a
+soundness reason, not a preference: the recorded circuit's `Const` nodes carry
+per-proof values — the inner relations' drawn `z`/`alphas` and each component's
+`cumsum_shift` — and the canonical re-record is precisely what pins those values
+to the child's Fiat-Shamir transcript (the recorder re-derives them from the
+replay before recomputing the arena). Moving the structure to preprocessed
+columns and dropping the re-record would leave the relation randomness claimed
+but unchecked; only the draws-binding of item 2 (drawn values bound to circuit
+wires through the in-AIR channel) can replace that check. Until then the
+re-record stays: it costs O(one fixed circuit) per immediate child of the root —
+constant in tree depth and in leaf program size.
+
 Item 3 is the end state: a binary tree whose leaves are segment proofs, whose
 every internal node is one constant-size recursion proof attesting that its two
 children verify and chain, and whose root is the single artifact for the whole
@@ -220,33 +232,37 @@ collapses verification to one stwo check, but its public remainder grows
 linearly with segment count; node compression caps the artifact at one node
 regardless of depth.
 
-The composition half of a node is **implemented** in `recursion::node`:
+The node is **implemented** in `recursion::node`:
 
 - `replay_recursion_composition` replays a recursion proof's own Fiat-Shamir
   transcript and records its composition check through the recursion components'
   `evaluate()` — the recursion-level analogue of the M1 seam
   (`test_recursion_composition_replay_matches_claim`).
-- `prove_node(left, right)` records both child recursion proofs' compositions
-  and lowers them into a parent recursion proof (circuits `0` and `1`, via
-  `lower_arena`); `verify_node` re-records the children from their transcripts
-  and checks the parent attests exactly them (`test_node_attests_two_children`,
-  `test_node_rejects_wrong_child`). Applied up a binary tree, the root is one
-  recursion proof attesting the whole execution's composition.
+- `prove_node_compressed_n` / `verify_node_compressed` take Poseidon2-M31 child
+  recursion proofs, record each child's composition (lowered into the parent
+  trace) **and replay its Merkle/FRI openings** (recorded as `merkle_path` rows
+  anchored by public root/leaf claims), and prove one parent recursion proof
+  attesting them all. The children's decommitments are stripped from the
+  artifact — the parent carries them as component rows, exactly as `FinalProof`
+  does for inner proofs (`test_compressed_node_attests_children_openings`).
+- Every `RecursionProof` carries a public **boundary claim** (entry/exit pc,
+  register file, memory and program roots), mixed into its transcript like the
+  root/leaf/circuit claims. `prove_base_node` chains the segment boundaries into
+  the leaf's claim; each node chains its children's claims into its own;
+  `verify_node_compressed` recomputes the chain from the children's
+  transcript-bound claims, rejects a mismatched root claim, and returns the
+  verified span (`test_compressed_node_folds_child_boundaries`, swap/forge/
+  cross-run tamper tests). The root therefore publicly states _which_ execution
+  it proves, not just that some valid proofs were folded.
 
-The constant-size node is **implemented**: `prove_node_compressed` /
-`verify_node_compressed` take two Poseidon2-M31-channel child recursion proofs,
-record each child's composition (lowered into the parent trace) **and replay its
-Merkle/FRI openings** (recorded as `merkle_path` rows anchored by public
-root/leaf claims), and prove one parent recursion proof attesting both. The
-children's decommitments are stripped from the artifact — the parent carries
-them as component rows, exactly as `FinalProof` does for inner proofs.
-`test_compressed_node_attests_children_openings` proves it end to end: a node
-over two children verifies from their decommitment-free bodies. Applied up the
-tree, the root is constant in depth (each node attests exactly two children; the
-recorded openings and composition are bounded), closing the M6 gap; what remains
-is wiring the recursive driver (`prove_node_compressed` over each level) and the
-boundary chaining (`Boundary::chain`, already implemented) into a single
-top-level entry point.
+The full driver is **implemented**: `prove_tree_compressed` folds any leaf set
+`arity`-to-1 to a single root (a lone trailing proof rides up a level; a
+single-leaf tree wraps into a 1-child root), and
+`aggregate_tree::prove_guest_recursive[_by_capacity]` runs the whole pipeline —
+guest → capacity-bounded segments → base-node leaves → tree — with the root
+boundary asserted against an independent unsegmented reference run
+(`test_guest_recursive_arity_2_root_spans_the_run`). The root's trace shape is
+depth-invariant (`test_compressed_tree_root_shape_is_depth_invariant`).
 
 ## Production topology (streaming)
 

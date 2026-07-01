@@ -14,7 +14,7 @@ static SHARED: std::sync::OnceLock<(FinalProof, u32, u32, [u32; 32])> = std::syn
 /// expensive part; tampering only needs a clone of the artifact).
 fn shared_final() -> &'static (FinalProof, u32, u32, [u32; 32]) {
     SHARED.get_or_init(|| {
-        let (final_proof, reference) = prove_two_segment_final();
+        let (final_proof, reference) = prove_split_run_final();
         (
             final_proof,
             reference.initial_pc,
@@ -24,7 +24,7 @@ fn shared_final() -> &'static (FinalProof, u32, u32, [u32; 32]) {
     })
 }
 
-fn prove_two_segment_final() -> (FinalProof, runner::RunResult) {
+fn prove_split_run_final() -> (FinalProof, runner::RunResult) {
     prover::e2e::ensure_guest_built();
     let elf_path = prover::e2e::guest_bin_dir().join("mulhu_alias");
     let elf_bytes = std::fs::read(&elf_path).expect("Failed to read mulhu_alias ELF");
@@ -33,7 +33,8 @@ fn prove_two_segment_final() -> (FinalProof, runner::RunResult) {
     let segment_cycles = u32::try_from(reference.cycles / 2 + 1).expect("fits u32");
     let segments = run_segments_with_input(&elf_bytes, &[], Some(segment_cycles), 10_000_000)
         .expect("segmented run failed");
-    assert_eq!(segments.len(), 2);
+    // Two halves plus the forced boundary at the first output-region store.
+    assert_eq!(segments.len(), 3);
 
     let preprocessing = preprocess_with_channel::<Poseidon2M31MerkleChannel>(PcsConfig::default());
     let proofs = prove_segments_with_channel::<Poseidon2M31MerkleChannel>(
@@ -46,7 +47,7 @@ fn prove_two_segment_final() -> (FinalProof, runner::RunResult) {
 }
 
 #[test]
-fn test_final_proof_roundtrip_two_segments() {
+fn test_final_proof_roundtrip_split_run() {
     let (final_proof, entry_pc, exit_pc, exit_regs) = shared_final();
     let final_proof = final_proof.clone();
 

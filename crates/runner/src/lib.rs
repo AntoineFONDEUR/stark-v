@@ -140,10 +140,19 @@ pub fn run_with_input(
 /// `(final_pc, final_regs, final_rw_root) == (initial_pc, initial_regs, initial_rw_root)`.
 /// Input is anchored in the first segment and outputs in the last (see
 /// [`SegmentRole`]).
+///
+/// Output anchoring consumes each output word's access within the LAST
+/// segment's trace, so when splitting is enabled (`should_close` is `Some`)
+/// every output-region write must land there: the first store into the
+/// output region forces a boundary just before it, and no segment closes
+/// afterwards. The mirror of "input is read within the first segment" is
+/// thus "output is written within the last segment" — guests must fit their
+/// output tail (first output store to halt) in one segment budget.
+/// `should_close = None` runs the whole execution as one segment.
 fn run_segments_impl<F: Fn(&Tracer) -> bool>(
     elf_bytes: &[u8],
     input: &[u8],
-    should_close: F,
+    should_close: Option<F>,
     max_cycles: u64,
 ) -> Result<Vec<RunResult>, RunError> {
     let loaded = load_elf(elf_bytes)?;
@@ -180,15 +189,32 @@ fn run_segments_impl<F: Fn(&Tracer) -> bool>(
     let mut seg_initial_pc = cpu.pc;
     let mut seg_initial_regs = cpu.regs();
 
+    // Set once the guest first stores into the output region: from then on
+    // the run is in its output tail and the current segment is the last one.
+    let mut output_phase = false;
+
     let final_pc = loop {
         // Check halt flag before executing next instruction
         if mem.read_u32(io_addrs.halt_flag) != 0 {
             break cpu.pc;
         }
 
+        // Decoding is pure (no trace side effects), so the next instruction
+        // can steer the boundary: a first output-region store closes the
+        // current segment so the whole output tail lands in the final one.
+        let next_inst = get_or_decode(&mut cache, &mem, cpu.pc)
+            .ok_or(RunError::InvalidInstruction { pc: cpu.pc })?;
+        let output_write = writes_output_region(&cpu, &next_inst, io_addrs);
+        let splitting = should_close.is_some();
+        let force_close = splitting && output_write && !output_phase && tracer.clock > 0;
+        let capacity_close =
+            should_close.as_ref().is_some_and(|close| close(&tracer)) && !output_phase;
+
         // Segment boundary: close the current tracer and start a fresh one.
-        // The next instruction belongs to the next segment.
-        if should_close(&tracer) {
+        // The next instruction belongs to the next segment. After the output
+        // phase starts, no boundary is allowed — output words must be
+        // anchored by the last segment's trace.
+        if capacity_close || force_close {
             let role = SegmentRole {
                 is_first: segments.is_empty(),
                 is_last: false,
@@ -218,11 +244,11 @@ fn run_segments_impl<F: Fn(&Tracer) -> bool>(
             seg_initial_pc = cpu.pc;
             seg_initial_regs = cpu.regs();
         }
+        output_phase |= output_write;
 
         let prev_pc = cpu.pc;
 
-        let inst = get_or_decode(&mut cache, &mem, cpu.pc)
-            .ok_or(RunError::InvalidInstruction { pc: cpu.pc })?;
+        let inst = next_inst;
         tracer.trace_instr_access(cpu.pc);
 
         // Early-exit on explicit self-loop sentinels (e.g., `jal x0, 0` used to halt tests).
@@ -305,7 +331,7 @@ pub fn run_segments_with_input(
     run_segments_impl(
         elf_bytes,
         input,
-        move |tracer| segment_cycles.is_some_and(|n| tracer.clock >= n),
+        segment_cycles.map(|n| move |tracer: &Tracer| tracer.clock >= n),
         max_cycles,
     )
 }
@@ -335,15 +361,32 @@ pub fn run_segments_by_capacity(
     run_segments_impl(
         elf_bytes,
         input,
-        move |tracer| {
+        Some(move |tracer: &Tracer| {
             tracer.clock as usize >= budget
                 || tracer.max_table_len() >= budget
                 // Distinct RW addresses drive the memory and poseidon2/merkle
                 // commitment tables built at finalization.
                 || tracer.mem_clock.len() >= budget
-        },
+        }),
         max_cycles,
     )
+}
+
+/// Whether executing `inst` would store into the guest's output region (the
+/// word holding the output length, or the output data buffer). Pure: the
+/// effective address only depends on the current register file.
+fn writes_output_region(cpu: &Cpu, inst: &DecodedInst, io: IoAddrs) -> bool {
+    let width = match inst.opcode {
+        Opcode::Sb => 1,
+        Opcode::Sh => 2,
+        Opcode::Sw => 4,
+        _ => return false,
+    };
+    let addr = cpu.reg(inst.rs1).wrapping_add(inst.imm as u32);
+    let end = addr.wrapping_add(width);
+    let len_word = io.output_len & !3;
+    let overlaps = |lo: u32, hi: u32| addr < hi && end > lo;
+    overlaps(len_word, len_word.wrapping_add(4)) || overlaps(io.output_data, io.output_end)
 }
 
 /// IO-region addresses captured from the loaded ELF before its memory is

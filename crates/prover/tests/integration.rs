@@ -1034,15 +1034,17 @@ fn test_prove_verify_segmented_run() {
     let elf_path = guest_bin_dir().join("mulhu_alias");
     let elf_bytes = std::fs::read(&elf_path).expect("Failed to read mulhu_alias ELF");
 
-    // Size segments to split the run in two: a fixed tiny segment size would
+    // Size segments to split the run in half: a fixed tiny segment size would
     // make as many proofs as there are segments and blow up the test runtime.
+    // The halves plus the forced boundary at the first output-region store
+    // (the output tail always gets its own final segment) give 3 segments.
     let cycles = runner::run(&elf_bytes, 10_000_000)
         .expect("Failed to run mulhu_alias")
         .cycles;
     let segment_cycles = u32::try_from(cycles / 2 + 1).expect("cycle count fits u32");
     let segments = run_segments_with_input(&elf_bytes, &[], Some(segment_cycles), 10_000_000)
         .expect("Failed to run mulhu_alias segmented");
-    assert_eq!(segments.len(), 2, "expected exactly 2 segments");
+    assert_eq!(segments.len(), 3, "expected exactly 3 segments");
 
     // Boundary invariants hold by construction on the runner side.
     for pair in segments.windows(2) {
@@ -1055,6 +1057,36 @@ fn test_prove_verify_segmented_run() {
     verify_segments(proofs, PcsConfig::default(), &preprocessing)
         .expect("segmented verification failed");
 }
+
+/// Output anchoring consumes each output word's access within the final
+/// segment's trace, so the runner must place the whole output tail there no
+/// matter where the cycle budget would have cut: the first output-region
+/// store forces a boundary just before it. One test per split factor.
+macro_rules! output_tail_test {
+    ($name:ident, $divisor:expr) => {
+        #[test_log::test]
+        fn $name() {
+            use prover::e2e::{ensure_guest_built, guest_bin_dir};
+            ensure_guest_built();
+            let elf_bytes = std::fs::read(guest_bin_dir().join("fib")).expect("read fib ELF");
+            let cycles = runner::run(&elf_bytes, 10_000_000).expect("run fib").cycles;
+            let segment_cycles = u32::try_from(cycles / $divisor + 1).expect("fits u32");
+            let segments =
+                runner::run_segments_with_input(&elf_bytes, &[], Some(segment_cycles), 10_000_000)
+                    .expect("segmented run failed");
+            let last = segments.last().expect("at least one segment");
+            assert!(
+                last.output_words
+                    .iter()
+                    .all(|w| last.tracer.mem_clock.contains_key(&w.addr)),
+                "an output word was written outside the final segment"
+            );
+        }
+    };
+}
+
+output_tail_test!(test_output_tail_lands_in_final_segment_split_5, 5);
+output_tail_test!(test_output_tail_lands_in_final_segment_split_7, 7);
 
 /// Full inner proof over the Poseidon2-M31 channel (docs/recursion.md, M4):
 /// the entire stark-v pipeline — preprocessing, proving, verification —

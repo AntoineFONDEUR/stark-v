@@ -119,7 +119,8 @@ fn test_aggregate_with_recursion_proof_leaves() {
     let segment_cycles = u32::try_from(reference.cycles / 2 + 1).expect("fits u32");
     let segments = run_segments_with_input(&elf_bytes, &[], Some(segment_cycles), 10_000_000)
         .expect("segmented run failed");
-    assert_eq!(segments.len(), 2);
+    // Two halves plus the forced boundary at the first output-region store.
+    assert_eq!(segments.len(), 3);
 
     let preprocessing = prover::preprocess(PcsConfig::default());
     let proofs = prove_segments(segments, PcsConfig::default(), &preprocessing);

@@ -3,13 +3,16 @@
 > **Status:** the cross-proof binding mechanism is implemented and tested in
 > `crates/prover/src/precompile.rs` — two independent stwo proofs sharing one
 > LogUp relation drawn via the two-phase handshake below, whose claimed sums
-> must cancel. A toy "square precompile" (`y = x²`) stands in for the hash: the
-> host proof emits `value(x, y)`, the precompile proof consumes it and proves
-> the relationship. Six tests cover the roundtrip and the soundness failures
-> (host emits an unvalidated pair, precompile validates an unused pair, forged
-> claimed sum). What remains for the Poseidon2 split specifically is mechanical:
-> widen the relation to the 32-word `poseidon2_io` tuple and move the existing
-> `poseidon2` component into the precompile instance.
+> must cancel. Two instances exist side by side: the didactic "square
+> precompile" (`y = x²`, `prove_binding`/`verify_binding`) and the real
+> Poseidon2 binding (`prove_hash_binding`/`verify_hash_binding`) over the
+> 32-word `poseidon2_io` tuple, whose precompile side is the reused stark-v
+> `poseidon2` component itself proving io rows — the exact component the zkVM
+> commits, in its own instance. Eleven tests cover both roundtrips and the
+> soundness failures (unvalidated/unused/forged tuples, forged claimed sum).
+> What remains to actually offload the zkVM is the pipeline switch: the rv32im
+> prover keeps `poseidon2` rows out of its trace and emits `poseidon2_io` tuples
+> instead, proven against a hash-precompile instance via this binding.
 
 Goal: take the Poseidon2 table out of the rv32im stwo instance and prove it in
 its own instance, binding the two proofs through their shared LogUp relation.

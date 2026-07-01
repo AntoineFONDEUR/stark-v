@@ -162,6 +162,8 @@ words:
   - storew
   - strtab
   - stwo
+  - syscall
+  - syscalls
   - subexpression
   - subi
   - swatinem

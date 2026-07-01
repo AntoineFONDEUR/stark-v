@@ -77,6 +77,8 @@ pub fn decode_program_word(addr: u32, word: u32) -> Result<[u32; 4], CommitmentE
             inst.rs2 as u32,
             imm_to_felt(inst.imm),
         ],
+        // ECALL has no register or immediate operands in its encoding.
+        Opcode::Ecall => [opcode_id, 0, 0, 0],
     };
 
     Ok(values)

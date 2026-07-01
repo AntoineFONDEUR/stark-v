@@ -134,7 +134,7 @@ fn bench_guest_recursive() {
     let arity: usize = std::env::var("RECURSION_ARITY")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(2);
+        .unwrap_or(recursion::aggregate_tree::DEFAULT_RECURSION_ARITY);
     // Default budget is the RangeCheck20 clock limit (2^20 - 1).
     let max_rows: u32 = std::env::var("RECURSION_MAX_ROWS")
         .ok()

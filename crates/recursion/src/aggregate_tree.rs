@@ -38,6 +38,17 @@ use crate::prover::{RecursionProof, RecursionTraces, prove_recursion_with_channe
 use crate::recorder::Rec;
 use crate::transcript::full_binding_data_with_channel;
 
+/// Default fan-in for the aggregation tree.
+///
+/// A 2-to-1 node commits ~2^19 cells (`measure_node_cell_budget`), far below
+/// stwo's peak-throughput point, so wider nodes amortize the per-node
+/// overhead. Sweeping `bench_guest_recursive` over a 12-segment 20M-cycle run
+/// (Apple Silicon, release): tree fold 6.4s at arity 2, 2.5s at 4, 1.4s at 8,
+/// with base-node and segment-proof phases flat. Past 8 the fold is already
+/// negligible next to segment proving; the optimum is machine-dependent and
+/// re-measurable with the env-driven bench.
+pub const DEFAULT_RECURSION_ARITY: usize = 8;
+
 /// Fold a group of stark-v segment proofs into one Poseidon2 recursion leaf.
 ///
 /// For each segment: record its composition through the inner `evaluate()`

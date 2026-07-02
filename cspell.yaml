@@ -160,6 +160,7 @@ words:
   - storeb
   - storeh
   - storew
+  - forgeable
   - strtab
   - stwo
   - syscall
@@ -168,7 +169,6 @@ words:
   - subi
   - swatinem
   - syms
-  - syscalls
   - thiserror
   - tikv
   - trac

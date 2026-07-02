@@ -102,48 +102,6 @@ pub unsafe fn write_output_bytes(data: &[u8]) {
     }
 }
 
-/// Commit one word to the output journal via the COMMIT syscall (ECALL).
-///
-/// The word is absorbed into a running Poseidon2 sponge maintained by the VM
-/// across the whole execution; the final digest is the program's committed
-/// output. Unlike [`write_output_bytes`], the journal has no size limit and
-/// its words may be produced across any continuation segments.
-///
-/// # Safety
-/// Only call from within a zkVM guest program.
-#[cfg(target_arch = "riscv32")]
-pub unsafe fn commit_word(word: u32) {
-    unsafe {
-        core::arch::asm!(
-            "ecall",
-            in("a0") word,
-            options(nostack, preserves_flags),
-        );
-    }
-}
-
-/// Commit a byte slice to the output journal, one little-endian word at a
-/// time (the final word zero-padded).
-///
-/// # Safety
-/// Only call from within a zkVM guest program.
-#[cfg(target_arch = "riscv32")]
-pub unsafe fn commit_bytes(data: &[u8]) {
-    unsafe {
-        let mut chunks = data.chunks_exact(4);
-        for chunk in &mut chunks {
-            let word = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-            commit_word(word);
-        }
-        let rem = chunks.remainder();
-        if !rem.is_empty() {
-            let mut buf = [0u8; 4];
-            buf[..rem.len()].copy_from_slice(rem);
-            commit_word(u32::from_le_bytes(buf));
-        }
-    }
-}
-
 /// Signal halt to the zkVM runtime.
 ///
 /// # Safety

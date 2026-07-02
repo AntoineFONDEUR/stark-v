@@ -502,7 +502,6 @@ mod tests {
         let initial_regs = cpu.regs();
         let mut mem = loaded.memory;
         let mut cache: InstCache = InstCache::default();
-        let mut journal = [0u32; 16];
 
         loop {
             if mem.read_u32(loaded.halt_flag_addr) != 0 {
@@ -535,8 +534,6 @@ mod tests {
                     output_data_addr: loaded.output_data_addr,
                     output_end_addr: loaded.output_end_addr,
                     output_words,
-                    initial_journal: [0u32; 16],
-                    final_journal: journal,
                     tracer,
                 });
             }
@@ -584,14 +581,12 @@ mod tests {
                     output_data_addr: loaded.output_data_addr,
                     output_end_addr: loaded.output_end_addr,
                     output_words,
-                    initial_journal: [0u32; 16],
-                    final_journal: journal,
                     tracer,
                 });
             }
 
             tracer.clock += 1;
-            execute(&mut cpu, &mut mem, &inst, &mut tracer, &mut journal);
+            execute(&mut cpu, &mut mem, &inst, &mut tracer);
 
             if cpu.pc == prev_pc {
                 let output_len = mem.read_u32(loaded.output_len_addr);
@@ -623,8 +618,6 @@ mod tests {
                     output_data_addr: loaded.output_data_addr,
                     output_end_addr: loaded.output_end_addr,
                     output_words,
-                    initial_journal: [0u32; 16],
-                    final_journal: journal,
                     tracer,
                 });
             }

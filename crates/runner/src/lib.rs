@@ -8,7 +8,7 @@ mod memory;
 mod program;
 #[macro_use]
 mod trace;
-pub mod ops;
+mod ops;
 
 use thiserror::Error;
 
@@ -121,12 +121,6 @@ pub struct RunResult {
     pub output_end_addr: u32,
     /// Output words (length word + output data words).
     pub output_words: Vec<IoWord>,
-    /// Output journal sponge state at the START of this segment (all-zero for
-    /// the first segment of a run).
-    pub initial_journal: [u32; 16],
-    /// Output journal sponge state at the END of this segment. The final
-    /// segment's value is the run's committed output digest.
-    pub final_journal: [u32; 16],
     /// Execution trace for proving.
     pub tracer: Tracer,
 }
@@ -232,11 +226,6 @@ fn run_segments_impl<F: Fn(&Tracer) -> bool>(
     let mut completed_cycles: u64 = 0;
     let mut seg_initial_pc = cpu.pc;
     let mut seg_initial_regs = cpu.regs();
-    // Output journal sponge, cumulative across the whole run (genesis all-zero).
-    // `journal` is the live state; `seg_initial_journal` is its value at the
-    // start of the current segment, recorded on the segment's RunResult.
-    let mut journal = [0u32; 16];
-    let mut seg_initial_journal = journal;
 
     // Set once the guest first stores into the output region: from then on
     // the run is in its output tail and the current segment is the last one.
@@ -285,8 +274,6 @@ fn run_segments_impl<F: Fn(&Tracer) -> bool>(
                 input,
                 &mem,
                 io_addrs,
-                seg_initial_journal,
-                journal,
             );
             // Outputs are anchored in the last segment only; inputs in
             // the first only.
@@ -299,7 +286,6 @@ fn run_segments_impl<F: Fn(&Tracer) -> bool>(
             segments.push(result);
             seg_initial_pc = cpu.pc;
             seg_initial_regs = cpu.regs();
-            seg_initial_journal = journal;
         }
         output_phase |= output_write;
 
@@ -325,7 +311,7 @@ fn run_segments_impl<F: Fn(&Tracer) -> bool>(
         // Update tracer clock before executing instruction
         tracer.clock += 1;
 
-        execute(&mut cpu, &mut mem, &inst, &mut tracer, &mut journal);
+        execute(&mut cpu, &mut mem, &inst, &mut tracer);
 
         // Halt on infinite loop (PC unchanged after execution) - backup detection
         if cpu.pc == prev_pc {
@@ -356,8 +342,6 @@ fn run_segments_impl<F: Fn(&Tracer) -> bool>(
         input,
         &mem,
         io_addrs,
-        seg_initial_journal,
-        journal,
     );
     if !role.is_first {
         result.input = Vec::new();
@@ -518,8 +502,6 @@ fn make_run_result(
     input: &[u8],
     mem: &Memory,
     io_addrs: IoAddrs,
-    initial_journal: [u32; 16],
-    final_journal: [u32; 16],
 ) -> RunResult {
     let output_len = mem.read_u32(io_addrs.output_len);
     let output = io::read_output(
@@ -545,8 +527,6 @@ fn make_run_result(
         output_data_addr: io_addrs.output_data,
         output_end_addr: io_addrs.output_end,
         output_words,
-        initial_journal,
-        final_journal,
         tracer,
     }
 }

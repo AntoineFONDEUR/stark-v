@@ -1,16 +1,8 @@
-use crate::ops::system::Journal;
-use crate::ops::{alu, alu_imm, branch, jump, load, muldiv, store, system, upper};
+use crate::ops::{alu, alu_imm, branch, jump, load, muldiv, store, upper};
 use crate::{Cpu, DecodedInst, Memory, Opcode, Tracer};
 
-/// Execute a decoded instruction. Each opcode handles PC advancement
-/// internally. `journal` is the output sponge, mutated only by ECALL.
-pub fn execute(
-    cpu: &mut Cpu,
-    mem: &mut Memory,
-    inst: &DecodedInst,
-    tracer: &mut Tracer,
-    journal: &mut Journal,
-) {
+/// Execute a decoded instruction. Each opcode handles PC advancement internally.
+pub fn execute(cpu: &mut Cpu, mem: &mut Memory, inst: &DecodedInst, tracer: &mut Tracer) {
     match inst.opcode {
         // R-type ALU
         Opcode::Add => alu::add(cpu, inst, tracer),
@@ -72,8 +64,5 @@ pub fn execute(
         Opcode::Divu => muldiv::divu(cpu, inst, tracer),
         Opcode::Rem => muldiv::rem(cpu, inst, tracer),
         Opcode::Remu => muldiv::remu(cpu, inst, tracer),
-
-        // SYSTEM
-        Opcode::Ecall => system::ecall(cpu, journal, inst, tracer),
     }
 }

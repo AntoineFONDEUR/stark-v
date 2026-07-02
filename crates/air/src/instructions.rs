@@ -66,9 +66,6 @@ pub enum Opcode {
     Divu,
     Rem,
     Remu,
-
-    // SYSTEM
-    Ecall,
 }
 
 /// Decoded instruction with all fields extracted.
@@ -225,17 +222,6 @@ impl DecodedInst {
             0b0010111 => {
                 let imm_u = (inst & 0xFFFFF000) as i32;
                 (Opcode::Auipc, imm_u)
-            }
-
-            // SYSTEM: ECALL (imm12 == 0). The zkVM's one syscall is COMMIT —
-            // absorb register a0 into the output journal sponge. funct3 must
-            // be 0 and rd/rs1 must be x0, as in the base ISA encoding.
-            0b1110011 => {
-                let imm12 = inst >> 20;
-                if funct3 != 0 || imm12 != 0 {
-                    return None;
-                }
-                (Opcode::Ecall, 0)
             }
 
             _ => return None,

@@ -1,0 +1,8 @@
+ts	phase	decision	why	evidence	result
+2026-07-10T08:54:25Z	frame	build a protocol-breaking fixed-shape recursion V2	the current parent AIR omits verifier obligations and cannot soundly discard descendants	crates/recursion/src/node.rs:399, crates/recursion/src/openings.rs:61	open
+2026-07-10T08:54:25Z	frame	use one slot-indexed universal AIR with segment, empty, and binary-node modes	exact slot coverage and decreasing height make the induction and padding canonical	crates/recursion/src/boundary.rs:14, crates/recursion/src/node.rs:519	open
+2026-07-10T08:54:25Z	baseline	release workspace suite is the runtime gate	recursion proving is impractically slow without optimization	cargo test --workspace --release --no-fail-fast	1 target failed in 571.93s
+2026-07-10T08:54:25Z	baseline	fix the AIR table-rendering regression before protocol work	a known unrelated failure would hide whether later phases restore a green baseline	crates/air/src/trace.rs:395	reproduced in debug and release
+2026-07-10T08:54:25Z	preflight	start from the clean remote-synchronized branch	the implementation must not absorb untracked user work or stale remote changes	bf4562b8f15cf9e29d41724c29b0d9819583e778	clean, 0 ahead, 0 behind
+2026-07-10T08:55:17Z	baseline	replace the brittle multi-table rendering test with the missing structured JAL header check	two assertions duplicated neighboring tests and rendered strings truncate table headers	crates/air/src/trace.rs:395	51 release tests passed
+2026-07-10T08:57:00Z	baseline	commit and push the green release baseline before recursion work	later failures need a clean known-good starting point	commit 808efd04	pushed

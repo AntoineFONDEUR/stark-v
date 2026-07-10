@@ -1,10 +1,11 @@
 //! Merkle hash-step component: witness generation and AIR evaluation.
 //!
-//! Each enabled row claims `parent = permute(left || right)[..8]` through the
-//! stark-v poseidon2 relation: it emits the 16-word permutation input and
-//! consumes the 8-word wide output. The permutation constraints live solely
-//! in the reused `prover::components::poseidon2` component, whose witness
-//! table carries one wide row per hash step — no hash constraint is copied.
+//! Each enabled row claims `parent = permute(left || right)[..8]` through one
+//! atomic 32-word `poseidon2_io` tuple. The permutation constraints live
+//! solely in the reused `prover::components::poseidon2` component, whose
+//! witness table carries one matching io row per hash step. Keeping input and
+//! output in the same tuple prevents different hash calls from exchanging
+//! otherwise valid outputs.
 
 use air::poseidon2::{T, poseidon2_traced_state};
 use air::trace::Poseidon2Table;
@@ -47,10 +48,12 @@ impl FrameworkEval for Eval {
         for constraint in cols.constraints() {
             eval.add_constraint(constraint);
         }
-        // Emit the permutation input (consumed by the poseidon2 component).
+        // Consume one complete permutation call emitted by the poseidon2
+        // component. The second output half is retained solely to make the
+        // call identity atomic; the Merkle digest is the first eight words.
         eval.add_to_relation(RelationEntry::new(
-            &self.relations.poseidon2,
-            E::EF::from(cols.enabler.clone()),
+            &self.relations.poseidon2_io,
+            -E::EF::from(cols.enabler.clone()),
             &[
                 cols.left_0.clone(),
                 cols.left_1.clone(),
@@ -68,13 +71,6 @@ impl FrameworkEval for Eval {
                 cols.right_5.clone(),
                 cols.right_6.clone(),
                 cols.right_7.clone(),
-            ],
-        ));
-        // Consume the wide digest (emitted by the poseidon2 component).
-        eval.add_to_relation(RelationEntry::new(
-            &self.relations.poseidon2,
-            -E::EF::from(cols.enabler.clone()),
-            &[
                 cols.parent_0.clone(),
                 cols.parent_1.clone(),
                 cols.parent_2.clone(),
@@ -83,6 +79,14 @@ impl FrameworkEval for Eval {
                 cols.parent_5.clone(),
                 cols.parent_6.clone(),
                 cols.parent_7.clone(),
+                cols.output_8.clone(),
+                cols.output_9.clone(),
+                cols.output_10.clone(),
+                cols.output_11.clone(),
+                cols.output_12.clone(),
+                cols.output_13.clone(),
+                cols.output_14.clone(),
+                cols.output_15.clone(),
             ],
         ));
         // Consume this row's own node claim (emitted by the parent row, or
@@ -163,7 +167,7 @@ pub fn push_path_step(
     let mut state = [0u32; T];
     state[..8].copy_from_slice(&left);
     state[8..].copy_from_slice(&right);
-    let out = poseidon2_traced_state(poseidon2, state, true, false);
+    let out = poseidon2_traced_state(poseidon2, state, false, true);
     let parent: [u32; 8] = out[..8].try_into().expect("8 words");
     table.push(
         tree_id,
@@ -195,6 +199,14 @@ pub fn push_path_step(
         parent[5],
         parent[6],
         parent[7],
+        out[8],
+        out[9],
+        out[10],
+        out[11],
+        out[12],
+        out[13],
+        out[14],
+        out[15],
         child[0],
         child[1],
         child[2],
@@ -207,8 +219,8 @@ pub fn push_path_step(
     parent
 }
 
-/// Generate the interaction trace and the claimed sum of the two relation
-/// entries (cancels against the poseidon2 component's wide rows).
+/// Generate the interaction trace and the claimed sum of the atomic hash
+/// call plus the two path-chain entries.
 pub fn gen_interaction_trace(
     trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     relations: &Relations,
@@ -222,15 +234,12 @@ pub fn gen_interaction_trace(
     let log_size = trace[0].domain.log_size();
     let mut logup_gen = LogupTraceGenerator::new(log_size);
 
-    let pos_enabler: Vec<PackedQM31> = (0..simd_size)
-        .map(|i| PackedQM31::from(cols.enabler[i]))
-        .collect();
     let neg_enabler: Vec<PackedQM31> = (0..simd_size)
         .map(|i| -PackedQM31::from(cols.enabler[i]))
         .collect();
 
-    let input_denom = combine!(
-        relations.poseidon2,
+    let hash_io_denom = combine!(
+        relations.poseidon2_io,
         [
             cols.left_0,
             cols.left_1,
@@ -247,12 +256,7 @@ pub fn gen_interaction_trace(
             cols.right_4,
             cols.right_5,
             cols.right_6,
-            cols.right_7
-        ]
-    );
-    let parent_denom = combine!(
-        relations.poseidon2,
-        [
+            cols.right_7,
             cols.parent_0,
             cols.parent_1,
             cols.parent_2,
@@ -260,7 +264,15 @@ pub fn gen_interaction_trace(
             cols.parent_4,
             cols.parent_5,
             cols.parent_6,
-            cols.parent_7
+            cols.parent_7,
+            cols.output_8,
+            cols.output_9,
+            cols.output_10,
+            cols.output_11,
+            cols.output_12,
+            cols.output_13,
+            cols.output_14,
+            cols.output_15
         ]
     );
 
@@ -309,18 +321,18 @@ pub fn gen_interaction_trace(
     );
 
     write_pair!(
-        &pos_enabler,
-        &input_denom,
         &neg_enabler,
-        &parent_denom,
-        logup_gen
-    );
-    write_pair!(
+        &hash_io_denom,
         &neg_enabler,
         &own_denom,
-        &child_enabler,
-        &child_denom,
         logup_gen
     );
+    let mut child_col = logup_gen.new_col();
+    for (vec_row, (&numerator, &denominator)) in
+        child_enabler.iter().zip(child_denom.iter()).enumerate()
+    {
+        child_col.write_frac(vec_row, numerator, denominator);
+    }
+    child_col.finalize_col();
     logup_gen.finalize_last()
 }

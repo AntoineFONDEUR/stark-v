@@ -148,10 +148,10 @@ define_component_tables! {
 
     // One Merkle hash step over 8-word digests: parent = permute(left || right)[..8].
     // The permutation itself is proven by the reused stark-v poseidon2
-    // component; this table only claims the binding through the poseidon2
-    // relation (emit the 16-word input, consume the 8-word wide output), so
-    // no hash constraint exists here. Path chaining and root anchoring come
-    // with the chain relation (docs/recursion.md, M4 remaining).
+    // component; this table binds the complete 16-word input and 16-word
+    // output in one atomic relation tuple. The unused output half remains in
+    // the witness because omitting it would split a permutation call into
+    // input and output claims that can be permuted independently.
     // Path chaining: each row consumes its own node claim
     // (tree_id, depth, index, parent) and emits the on-path child claim
     // (tree_id, depth + 1, 2*index + direction, child) through the
@@ -163,6 +163,8 @@ define_component_tables! {
             left_0, left_1, left_2, left_3, left_4, left_5, left_6, left_7,
             right_0, right_1, right_2, right_3, right_4, right_5, right_6, right_7,
             parent_0, parent_1, parent_2, parent_3, parent_4, parent_5, parent_6, parent_7,
+            output_8, output_9, output_10, output_11,
+            output_12, output_13, output_14, output_15,
             child_0, child_1, child_2, child_3, child_4, child_5, child_6, child_7,
         },
         constraints: {

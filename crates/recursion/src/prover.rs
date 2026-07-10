@@ -901,6 +901,155 @@ mod tests {
     }
 
     #[test]
+    fn test_recursion_air_rejects_permuted_merkle_hash_outputs() {
+        use air::poseidon2::{T, poseidon2_traced_state};
+
+        let mut traces = RecursionTraces::default();
+        let left_a = [11, 12, 13, 14, 15, 16, 17, 18];
+        let right_a = [21, 22, 23, 24, 25, 26, 27, 28];
+        let left_b = [31, 32, 33, 34, 35, 36, 37, 38];
+        let right_b = [41, 42, 43, 44, 45, 46, 47, 48];
+
+        let mut input_a = [0; T];
+        input_a[..8].copy_from_slice(&left_a);
+        input_a[8..].copy_from_slice(&right_a);
+        let output_a = poseidon2_traced_state(&mut traces.poseidon2, input_a, false, true);
+
+        let mut input_b = [0; T];
+        input_b[..8].copy_from_slice(&left_b);
+        input_b[8..].copy_from_slice(&right_b);
+        let output_b = poseidon2_traced_state(&mut traces.poseidon2, input_b, false, true);
+
+        // Each path uses a valid permutation input and a valid permutation
+        // output, but the outputs belong to the other path. Atomic hash-call
+        // binding must reject this cross-call splice.
+        traces.merkle_path.push(
+            0,
+            0,
+            0,
+            0,
+            0,
+            left_a[0],
+            left_a[1],
+            left_a[2],
+            left_a[3],
+            left_a[4],
+            left_a[5],
+            left_a[6],
+            left_a[7],
+            right_a[0],
+            right_a[1],
+            right_a[2],
+            right_a[3],
+            right_a[4],
+            right_a[5],
+            right_a[6],
+            right_a[7],
+            output_b[0],
+            output_b[1],
+            output_b[2],
+            output_b[3],
+            output_b[4],
+            output_b[5],
+            output_b[6],
+            output_b[7],
+            output_b[8],
+            output_b[9],
+            output_b[10],
+            output_b[11],
+            output_b[12],
+            output_b[13],
+            output_b[14],
+            output_b[15],
+            left_a[0],
+            left_a[1],
+            left_a[2],
+            left_a[3],
+            left_a[4],
+            left_a[5],
+            left_a[6],
+            left_a[7],
+        );
+        traces.merkle_path.push(
+            1,
+            0,
+            0,
+            0,
+            0,
+            left_b[0],
+            left_b[1],
+            left_b[2],
+            left_b[3],
+            left_b[4],
+            left_b[5],
+            left_b[6],
+            left_b[7],
+            right_b[0],
+            right_b[1],
+            right_b[2],
+            right_b[3],
+            right_b[4],
+            right_b[5],
+            right_b[6],
+            right_b[7],
+            output_a[0],
+            output_a[1],
+            output_a[2],
+            output_a[3],
+            output_a[4],
+            output_a[5],
+            output_a[6],
+            output_a[7],
+            output_a[8],
+            output_a[9],
+            output_a[10],
+            output_a[11],
+            output_a[12],
+            output_a[13],
+            output_a[14],
+            output_a[15],
+            left_b[0],
+            left_b[1],
+            left_b[2],
+            left_b[3],
+            left_b[4],
+            left_b[5],
+            left_b[6],
+            left_b[7],
+        );
+
+        let roots = vec![
+            RootClaim {
+                tree_id: 0,
+                root: output_b[..8].try_into().expect("digest width"),
+                n_paths: 1,
+            },
+            RootClaim {
+                tree_id: 1,
+                root: output_a[..8].try_into().expect("digest width"),
+                n_paths: 1,
+            },
+        ];
+        let leaves = vec![
+            LeafClaim {
+                tree_id: 0,
+                depth: 1,
+                index: 0,
+                digest: left_a,
+            },
+            LeafClaim {
+                tree_id: 1,
+                depth: 1,
+                index: 0,
+                digest: left_b,
+            },
+        ];
+        let proof = prove_recursion(traces, roots, leaves, vec![], vec![], PcsConfig::default());
+
+        assert!(verify_recursion(proof, &[], PcsConfig::default()).is_err());
+    }
+
+    #[test]
     fn test_recursion_air_rejects_wrong_root_claim() {
         let (traces, _, mut roots, channels) = random_traces(7, 20);
         roots[0].root[0] += 1;

@@ -157,6 +157,14 @@ semantic_digest!(
     "Commitment to a canonical read-write memory state."
 );
 semantic_digest!(
+    IoDigest,
+    "Commitment to one canonical public IO stream or state."
+);
+semantic_digest!(
+    ProtocolId,
+    "Identity of one complete versioned proof protocol."
+);
+semantic_digest!(
     HashSuiteDigest,
     "Commitment to the hash construction and its domain assignments."
 );
@@ -216,5 +224,10 @@ mod tests {
     #[test]
     fn program_and_memory_commitments_have_distinct_types() {
         assert_ne!(TypeId::of::<ProgramDigest>(), TypeId::of::<MemoryDigest>());
+    }
+
+    #[test]
+    fn protocol_and_io_commitments_have_distinct_types() {
+        assert_ne!(TypeId::of::<ProtocolId>(), TypeId::of::<IoDigest>());
     }
 }

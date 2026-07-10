@@ -38,7 +38,7 @@ use stwo::core::poly::line::LineDomain;
 use stwo::core::queries::{Queries, draw_queries};
 use stwo::core::utils::bit_reverse_index;
 use stwo::core::vcs_lifted::merkle_hasher::MerkleHasherLifted;
-use stwo::core::vcs_lifted::verifier::MerkleDecommitmentLifted;
+use stwo::core::vcs_lifted::verifier::{LOG_PACKED_LEAF_SIZE, MerkleDecommitmentLifted};
 
 use crate::merkle_path::{PathStep, push_path_step};
 use crate::prover::{LeafClaim, RecursionTraces, RootClaim};
@@ -47,6 +47,9 @@ use crate::prover::{LeafClaim, RecursionTraces, RootClaim};
 /// commitment trees plus one per FRI layer. Segments space their
 /// `tree_id_base` by this stride.
 pub const TREE_ID_STRIDE: u32 = 64;
+
+/// Largest FRI folding step accepted by the recursion opening replay.
+const MAX_FRI_FOLD_STEP: u32 = 4;
 
 /// The public anchors of a proof's openings.
 #[derive(Default, Clone, Debug)]
@@ -65,11 +68,12 @@ pub fn replay_pcs_openings(
     tree_id_base: u32,
     mut traces: Option<&mut RecursionTraces>,
 ) -> Result<OpeningClaims, String> {
-    assert_eq!(
-        config.fri_config.fold_step, 1,
-        "openings replay supports fold_step 1 (packed FRI leaves not yet bound in-AIR)"
-    );
-    let fold_step = 1u32;
+    let fold_step = config.fri_config.fold_step;
+    if !(1..=MAX_FRI_FOLD_STEP).contains(&fold_step) {
+        return Err(format!(
+            "unsupported FRI fold step {fold_step}; expected 1..={MAX_FRI_FOLD_STEP}"
+        ));
+    }
     let log_blowup = config.fri_config.log_blowup_factor;
     let lifting_log_size = pcs.lifting_log_size;
     let mut channel: Poseidon2M31Channel = pcs.channel.clone();
@@ -90,6 +94,7 @@ pub fn replay_pcs_openings(
         domain: LineDomain,
         alpha: SecureField,
         fold_step: u32,
+        pack_leaves: bool,
         commitment: Poseidon2M31Hash,
     }
     let mut inner_layers = Vec::new();
@@ -116,6 +121,7 @@ pub fn replay_pcs_openings(
             domain: layer_domain,
             alpha: channel.draw_secure_felt(),
             fold_step: layer_fold_step,
+            pack_leaves: layer_domain.log_size() >= LOG_PACKED_LEAF_SIZE && layer_fold_step > 1,
             commitment: layer_proof.commitment,
         });
         layer_log_degree = layer_log_degree
@@ -215,6 +221,7 @@ pub fn replay_pcs_openings(
         first_layer_domain.log_size(),
         &positions,
         subsets.iter().flatten().copied(),
+        first_layer_domain.log_size() >= LOG_PACKED_LEAF_SIZE && fold_step > 1,
         traces
             .as_deref_mut()
             .map(|t| (&fri_proof.first_layer.decommitment, t)),
@@ -225,10 +232,7 @@ pub fn replay_pcs_openings(
         .iter()
         .zip(&initials)
         .map(|(subset, &initial)| {
-            // fold_step 1: one circle->line butterfly per subset.
-            let fold_domain_initial = first_layer_domain.index_at(initial);
-            let circle_fold_domain = CircleDomain::new(Coset::new(fold_domain_initial, 0));
-            fold_circle_into_line(subset, circle_fold_domain, first_alpha)[0]
+            fold_circle_subset(subset, initial, first_layer_domain, first_alpha, fold_step)
         })
         .collect();
 
@@ -253,6 +257,7 @@ pub fn replay_pcs_openings(
             layer.domain.log_size(),
             &positions,
             subsets.iter().flatten().copied(),
+            layer.pack_leaves,
             traces
                 .as_deref_mut()
                 .map(|t| (&fri_proof.inner_layers[layer_index].decommitment, t)),
@@ -279,6 +284,25 @@ pub fn replay_pcs_openings(
     }
 
     Ok(claims)
+}
+
+/// Fold one circle-domain subset with Stwo's first-layer challenge schedule.
+fn fold_circle_subset(
+    subset: &[SecureField],
+    domain_initial_index: usize,
+    source_domain: CircleDomain,
+    alpha: SecureField,
+    fold_step: u32,
+) -> SecureField {
+    let fold_domain_initial = source_domain.index_at(domain_initial_index);
+    let circle_fold_domain = CircleDomain::new(Coset::new(fold_domain_initial, fold_step - 1));
+    let line_evals = fold_circle_into_line(subset, circle_fold_domain, alpha);
+    if fold_step == 1 {
+        return line_evals[0];
+    }
+    let line_fold_step = fold_step - 1;
+    let line_fold_domain = LineDomain::new(Coset::new(fold_domain_initial, line_fold_step));
+    fold_coset(line_evals, line_fold_domain, alpha * alpha)
 }
 
 /// A FRI layer's rebuilt openings: the decommitted positions, the per-subset
@@ -384,27 +408,58 @@ fn open_lifted_tree(
     finish_tree_opening(tree_id, root, height, leaf_digests, decommit, claims)
 }
 
-/// Open a FRI layer tree: each opened position's leaf is the four base-field
-/// coordinates of one secure-field evaluation.
+/// Open a FRI layer tree using STWO's fixed multi-evaluation leaf packing.
+#[allow(clippy::too_many_arguments)]
 fn open_secure_column_tree(
     tree_id: u32,
     root: Poseidon2M31Hash,
-    height: u32,
+    domain_log_size: u32,
     positions: &[usize],
     values: impl Iterator<Item = SecureField>,
+    pack_leaves: bool,
     decommit: Option<(
         &MerkleDecommitmentLifted<Poseidon2M31MerkleHasher>,
         &mut RecursionTraces,
     )>,
     claims: &mut OpeningClaims,
 ) -> Result<(), String> {
+    let leaf_log_size = if pack_leaves { LOG_PACKED_LEAF_SIZE } else { 0 };
+    let height = domain_log_size
+        .checked_sub(leaf_log_size)
+        .ok_or("packed FRI leaf exceeds its domain")?;
+    let leaf_size = 1usize << leaf_log_size;
+    let values: Vec<SecureField> = values.collect();
+    if positions.len() != values.len() || !positions.len().is_multiple_of(leaf_size) {
+        return Err("invalid FRI leaf value count".to_string());
+    }
+
     let mut leaf_digests: BTreeMap<usize, [u32; 8]> = BTreeMap::new();
-    for (&pos, value) in positions.iter().zip(values) {
-        let coords = value.to_m31_array();
-        debug_assert_eq!(coords.len(), SECURE_EXTENSION_DEGREE);
+    for (position_chunk, value_chunk) in positions
+        .chunks_exact(leaf_size)
+        .zip(values.chunks_exact(leaf_size))
+    {
+        let leaf_position = position_chunk[0] >> leaf_log_size;
+        let row_start = leaf_position << leaf_log_size;
+        if position_chunk
+            .iter()
+            .copied()
+            .ne(row_start..row_start + leaf_size)
+        {
+            return Err("FRI leaf positions are not consecutive".to_string());
+        }
+        let row: Vec<BaseField> = value_chunk
+            .iter()
+            .flat_map(|value| value.to_m31_array())
+            .collect();
+        debug_assert_eq!(row.len(), SECURE_EXTENSION_DEGREE * leaf_size);
         let mut hasher = Poseidon2M31MerkleHasher::default();
-        hasher.update_leaf(&coords);
-        leaf_digests.insert(pos, hasher.finalize().0);
+        hasher.update_leaf(&row);
+        if leaf_digests
+            .insert(leaf_position, hasher.finalize().0)
+            .is_some()
+        {
+            return Err("duplicate FRI Merkle leaf".to_string());
+        }
     }
     finish_tree_opening(tree_id, root, height, leaf_digests, decommit, claims)
 }

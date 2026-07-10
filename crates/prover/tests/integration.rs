@@ -143,6 +143,35 @@ fn test_prove_verify_mulhu_alias() {
     .expect("Verification failed");
 }
 
+/// The supplied preprocessing commitment is part of the verifier-owned statement.
+#[test_log::test]
+fn test_verify_rejects_mismatched_preprocessing_commitment() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+
+    let elf_bytes =
+        std::fs::read(guest_bin_dir().join("mulhu_alias")).expect("Failed to read mulhu_alias ELF");
+    let run_result = run(&elf_bytes, 10_000_000).expect("Failed to run mulhu_alias");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    let mut supplied_preprocessing = preprocessing.clone();
+    let mut mismatched_root = proof.stark_proof.commitments[0];
+    mismatched_root.0[0] ^= 1;
+    supplied_preprocessing.merkle_layers[0][0] = mismatched_root;
+
+    let result = verify_rv32im(proof, config, &supplied_preprocessing);
+
+    assert!(matches!(
+        result,
+        Err(prover::VerificationError::PreprocessingCommitmentMismatch)
+    ));
+}
+
 /// Full end-to-end proof + verification for a single MULHU with rd != rs2.
 #[test_log::test]
 fn test_prove_verify_mulhu_no_alias() {

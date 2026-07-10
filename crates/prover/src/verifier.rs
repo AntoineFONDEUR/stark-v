@@ -27,6 +27,19 @@ pub fn replay_claim_phase<MC: MerkleChannel>(
     config: PcsConfig,
     preprocessing: &Preprocessing<MC::H>,
 ) -> Result<(MC::C, CommitmentSchemeVerifier<MC>, Relations), VerificationError> {
+    // Preprocessing defines trusted lookup columns, so its commitment must not come from the proof.
+    let proof_preprocessing_root = proof
+        .stark_proof
+        .commitments
+        .first()
+        .ok_or(VerificationError::MissingProofPreprocessingCommitment)?;
+    let verifier_preprocessing_root = preprocessing
+        .commitment_root()
+        .ok_or(VerificationError::MissingVerifierPreprocessingCommitment)?;
+    if *proof_preprocessing_root != verifier_preprocessing_root {
+        return Err(VerificationError::PreprocessingCommitmentMismatch);
+    }
+
     let mut channel = MC::C::default();
     let mut commitment_scheme = CommitmentSchemeVerifier::<MC>::new(config);
 

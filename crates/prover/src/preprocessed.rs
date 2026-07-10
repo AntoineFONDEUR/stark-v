@@ -40,6 +40,14 @@ pub struct Preprocessing<H: MerkleHasherLifted = Blake2sMerkleHasher> {
 }
 
 impl<H: MerkleHasherLifted> Preprocessing<H> {
+    /// Return the verifier-owned commitment so proofs cannot select their own preprocessing.
+    pub fn commitment_root(&self) -> Option<H::Hash> {
+        self.merkle_layers
+            .first()
+            .and_then(|root_layer| root_layer.first())
+            .copied()
+    }
+
     /// Get the preprocessed column IDs as PreProcessedColumnId objects.
     pub fn column_ids(
         &self,

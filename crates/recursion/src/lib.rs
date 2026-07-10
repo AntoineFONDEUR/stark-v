@@ -26,6 +26,7 @@ pub mod qm31_mul;
 pub mod recorder;
 pub mod relations;
 pub mod transcript;
+pub mod v2;
 
 // combine!/write_pair! are used by witness modules.
 #[macro_use]

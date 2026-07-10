@@ -20,6 +20,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 rand.workspace = true
+rstest.workspace = true
 test-log.workspace = true
 
 [features]

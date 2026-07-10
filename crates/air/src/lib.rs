@@ -11,6 +11,7 @@ mod schema;
 pub use schema::relations;
 
 pub mod clock;
+pub mod digest;
 pub mod instructions;
 pub mod poseidon2;
 pub mod preprocessed;

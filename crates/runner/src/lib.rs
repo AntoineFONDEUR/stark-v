@@ -50,6 +50,13 @@ pub enum RunError {
     #[error("Input length {len} exceeds input capacity {capacity}")]
     InputTooLarge { len: usize, capacity: usize },
 
+    #[error("Finalized segment {segment_index} uses {rows} rows, exceeding max_rows {max_rows}")]
+    FinalizedSegmentCapacityExceeded {
+        segment_index: usize,
+        rows: usize,
+        max_rows: u32,
+    },
+
     #[error("Memory fault at PC=0x{pc:08x}: {kind} address 0x{addr:08x}")]
     MemoryFault {
         pc: u32,
@@ -182,6 +189,7 @@ fn run_segments_impl<F: Fn(&Tracer) -> bool>(
     elf_bytes: &[u8],
     input: &[u8],
     should_close: Option<F>,
+    max_rows: Option<u32>,
     max_cycles: u64,
 ) -> Result<Vec<RunResult>, RunError> {
     let loaded = load_elf(elf_bytes)?;
@@ -263,6 +271,7 @@ fn run_segments_impl<F: Fn(&Tracer) -> bool>(
                 is_last: false,
             };
             commitment::finalize_commitments_with_role(&mut tracer, &mem, &layout, role)?;
+            ensure_finalized_segment_capacity(&tracer, segments.len(), max_rows)?;
             let finished = std::mem::take(&mut tracer);
             completed_cycles += finished.clock as u64;
             let mut result = make_run_result(
@@ -333,6 +342,7 @@ fn run_segments_impl<F: Fn(&Tracer) -> bool>(
         is_last: true,
     };
     commitment::finalize_commitments_with_role(&mut tracer, &mem, &layout, role)?;
+    ensure_finalized_segment_capacity(&tracer, segments.len(), max_rows)?;
     let mut result = make_run_result(
         tracer,
         seg_initial_pc,
@@ -375,6 +385,7 @@ pub fn run_segments_with_input(
         elf_bytes,
         input,
         segment_cycles.map(|n| move |tracer: &Tracer| tracer.clock >= n),
+        None,
         max_cycles,
     )
 }
@@ -390,6 +401,8 @@ pub fn run_segments_with_input(
 /// clock (one row per cycle) is itself one of the monitored quantities, so the
 /// segment always closes by `clock == max_rows`, keeping clock differences
 /// range-checkable (`max_rows < 2^20`).
+/// Finalized tables are checked again because commitment construction can add
+/// rows that were absent when the live segment reached its boundary.
 pub fn run_segments_by_capacity(
     elf_bytes: &[u8],
     input: &[u8],
@@ -411,8 +424,29 @@ pub fn run_segments_by_capacity(
                 // commitment tables built at finalization.
                 || tracer.mem_clock.len() >= budget
         }),
+        Some(max_rows),
         max_cycles,
     )
+}
+
+/// Check completed tables because finalization adds rows absent from the live tracer.
+fn ensure_finalized_segment_capacity(
+    tracer: &Tracer,
+    segment_index: usize,
+    max_rows: Option<u32>,
+) -> Result<(), RunError> {
+    let Some(max_rows) = max_rows else {
+        return Ok(());
+    };
+    let rows = tracer.max_table_len();
+    if rows > max_rows as usize {
+        return Err(RunError::FinalizedSegmentCapacityExceeded {
+            segment_index,
+            rows,
+            max_rows,
+        });
+    }
+    Ok(())
 }
 
 /// Whether executing `inst` would store into the guest's output region (the

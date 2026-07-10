@@ -9,15 +9,18 @@
 //! (docs/recursion.md, M4+).
 
 use num_traits::Zero;
+use stwo::core::air::Components as CoreComponents;
 use stwo::core::channel::{Channel, MerkleChannel};
-use stwo::core::fields::qm31::SecureField;
+use stwo::core::circle::SECURE_FIELD_CIRCLE_GEN;
+use stwo::core::fields::qm31::{SECURE_EXTENSION_DEGREE, SecureField};
+use stwo::core::pcs::utils::try_get_lifting_log_size;
 use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
 use stwo::core::vcs_lifted::merkle_hasher::MerkleHasherLifted;
-use stwo::core::verifier::VerificationError;
 use stwo::core::verifier::verify;
+use stwo::core::verifier::{COMPOSITION_LOG_SPLIT, VerificationError};
 use stwo::prover::backend::BackendForChannel;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::pcs::CommitmentSchemeProver;
@@ -296,6 +299,195 @@ pub(crate) fn column_log_sizes(log_sizes: &[u32; 9]) -> Vec<u32> {
         .zip(widths)
         .flat_map(|(&log_size, width)| std::iter::repeat_n(log_size, width))
         .collect()
+}
+
+/// Interaction-tree column log sizes in commit order.
+fn interaction_column_log_sizes(log_sizes: &[u32; 9]) -> Vec<u32> {
+    std::iter::repeat_n(log_sizes[0], 8)
+        .chain(std::iter::repeat_n(log_sizes[1], 8))
+        .chain(std::iter::repeat_n(log_sizes[4], 4))
+        .chain(std::iter::repeat_n(log_sizes[5], 8))
+        .chain(std::iter::repeat_n(log_sizes[6], 8))
+        .chain(std::iter::repeat_n(log_sizes[7], 8))
+        .chain(std::iter::repeat_n(log_sizes[8], 8))
+        .collect()
+}
+
+fn validate_tree_column_counts<T>(
+    name: &str,
+    trees: &[Vec<T>],
+    expected_columns: &[usize],
+) -> Result<(), VerificationError> {
+    if trees.len() != expected_columns.len() {
+        return Err(VerificationError::InvalidStructure(format!(
+            "expected {} {name} trees, got {}",
+            expected_columns.len(),
+            trees.len()
+        )));
+    }
+    for (tree, &expected) in trees.iter().zip(expected_columns) {
+        if tree.len() != expected {
+            return Err(VerificationError::InvalidStructure(format!(
+                "expected {expected} {name} columns, got {}",
+                tree.len()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Reject inconsistent per-column query counts before the Merkle verifier indexes them.
+fn validate_queried_value_counts<T>(
+    trees: &[Vec<Vec<T>>],
+    max_queries: usize,
+) -> Result<(), VerificationError> {
+    for (tree_index, tree) in trees.iter().enumerate() {
+        let Some(first_column) = tree.first() else {
+            continue;
+        };
+        let expected = first_column.len();
+        if expected == 0 || expected > max_queries {
+            return Err(VerificationError::InvalidStructure(format!(
+                "invalid queried-value count {expected} in tree {tree_index}"
+            )));
+        }
+        for (column_index, column) in tree.iter().enumerate().skip(1) {
+            if column.len() != expected {
+                return Err(VerificationError::InvalidStructure(format!(
+                    "expected {expected} queried values in tree {tree_index} column {column_index}, got {}",
+                    column.len()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate every per-column OODS sample count against the fixed component mask plan.
+fn validate_sample_counts(
+    components: &CoreComponents<'_>,
+    config: PcsConfig,
+    sampled_values: &[Vec<Vec<SecureField>>],
+) -> Result<(), VerificationError> {
+    let split_composition_log_degree_bound = components
+        .composition_log_degree_bound()
+        .checked_sub(COMPOSITION_LOG_SPLIT)
+        .ok_or_else(|| {
+            VerificationError::InvalidStructure(
+                "composition degree bound is too small to split".to_string(),
+            )
+        })?;
+    let min_lifting_log_size = split_composition_log_degree_bound
+        .checked_add(config.fri_config.log_blowup_factor)
+        .ok_or_else(|| {
+            VerificationError::InvalidStructure("lifting log size overflows".to_string())
+        })?;
+    let lifting_log_size = try_get_lifting_log_size(&config, min_lifting_log_size)?;
+    let max_log_degree_bound = lifting_log_size
+        .checked_sub(config.fri_config.log_blowup_factor)
+        .ok_or_else(|| {
+            VerificationError::InvalidStructure(
+                "lifting log size is below the blowup factor".to_string(),
+            )
+        })?;
+
+    // Mask cardinalities do not depend on the sampled point, so the canonical
+    // circle generator gives the same shape without replaying the transcript.
+    let point = SECURE_FIELD_CIRCLE_GEN;
+    let mut expected = components.mask_points(point, max_log_degree_bound, false);
+    expected.push(vec![vec![point]; 2 * SECURE_EXTENSION_DEGREE]);
+
+    for (tree_index, (actual_tree, expected_tree)) in
+        sampled_values.iter().zip(expected.iter()).enumerate()
+    {
+        for (column_index, (actual, expected_points)) in
+            actual_tree.iter().zip(expected_tree).enumerate()
+        {
+            if actual.len() != expected_points.len() {
+                return Err(VerificationError::InvalidStructure(format!(
+                    "expected {} samples in tree {tree_index} column {column_index}, got {}",
+                    expected_points.len(),
+                    actual.len()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate proof-owned vectors before calling STWO code that assumes aligned shapes.
+fn validate_recursion_proof_structure<MC: MerkleChannel>(
+    proof: &RecursionProof<MC::H>,
+    circuit_arenas: &[(std::rc::Rc<core::cell::RefCell<Arena>>, usize)],
+    config: PcsConfig,
+) -> Result<(), VerificationError> {
+    if let Some(log_size) = proof
+        .log_sizes
+        .iter()
+        .copied()
+        .find(|&log_size| CanonicCoset::try_new(log_size).is_err())
+    {
+        return Err(VerificationError::InvalidStructure(format!(
+            "invalid recursion trace log size {log_size}"
+        )));
+    }
+    if proof.circuits.len() != circuit_arenas.len() {
+        return Err(VerificationError::InvalidStructure(
+            "expected one re-recorded arena per circuit claim".to_string(),
+        ));
+    }
+
+    let scheme_proof = &proof.stark_proof.0;
+    let expected_tree_columns = [
+        0,
+        column_log_sizes(&proof.log_sizes).len(),
+        interaction_column_log_sizes(&proof.log_sizes).len(),
+        2 * SECURE_EXTENSION_DEGREE,
+    ];
+    if scheme_proof.commitments.len() != expected_tree_columns.len() {
+        return Err(VerificationError::InvalidStructure(format!(
+            "expected {} commitments, got {}",
+            expected_tree_columns.len(),
+            scheme_proof.commitments.len()
+        )));
+    }
+    if scheme_proof.decommitments.len() != expected_tree_columns.len() {
+        return Err(VerificationError::InvalidStructure(format!(
+            "expected {} decommitment trees, got {}",
+            expected_tree_columns.len(),
+            scheme_proof.decommitments.len()
+        )));
+    }
+    validate_tree_column_counts(
+        "sampled-value",
+        &scheme_proof.sampled_values,
+        &expected_tree_columns,
+    )?;
+    validate_tree_column_counts(
+        "queried-value",
+        &scheme_proof.queried_values,
+        &expected_tree_columns,
+    )?;
+    validate_queried_value_counts(&scheme_proof.queried_values, config.fri_config.n_queries)?;
+
+    for (claim, (arena, output)) in proof.circuits.iter().zip(circuit_arenas) {
+        let output_value = arena
+            .borrow()
+            .nodes
+            .get(*output)
+            .map(|node| node.value)
+            .ok_or_else(|| {
+                VerificationError::InvalidStructure(
+                    "circuit output index is outside the re-recorded arena".to_string(),
+                )
+            })?;
+        if output_value != claim.output.1 {
+            return Err(VerificationError::InvalidStructure(
+                "claimed circuit output does not match the canonical circuit".to_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Build the four components in commit order against a shared allocator.
@@ -595,20 +787,7 @@ pub fn verify_recursion_with_channel<MC: MerkleChannel>(
     circuit_arenas: &[(std::rc::Rc<core::cell::RefCell<Arena>>, usize)],
     config: PcsConfig,
 ) -> Result<(), VerificationError> {
-    assert_eq!(
-        proof.circuits.len(),
-        circuit_arenas.len(),
-        "one re-recorded arena per circuit claim"
-    );
-    for (claim, (arena, output)) in proof.circuits.iter().zip(circuit_arenas) {
-        // The claimed output must be what the canonical circuit computes
-        // over the claimed inputs.
-        if arena.borrow().nodes[*output].value != claim.output.1 {
-            return Err(VerificationError::InvalidStructure(
-                "claimed circuit output does not match the canonical circuit".to_string(),
-            ));
-        }
-    }
+    validate_recursion_proof_structure::<MC>(&proof, circuit_arenas, config)?;
     let channel = &mut MC::C::default();
     let mut commitment_scheme = CommitmentSchemeVerifier::<MC>::new(config);
 
@@ -656,14 +835,7 @@ pub fn verify_recursion_with_channel<MC: MerkleChannel>(
     mix_claim(channel, &proof.log_sizes, sums);
     // Interaction tree: one secure column (4 base) for logup_sum, two for
     // merkle_path (hash binding + node chaining), two for poseidon2.
-    let interaction_log_sizes: Vec<u32> = std::iter::repeat_n(proof.log_sizes[0], 8)
-        .chain(std::iter::repeat_n(proof.log_sizes[1], 8))
-        .chain(std::iter::repeat_n(proof.log_sizes[4], 4))
-        .chain(std::iter::repeat_n(proof.log_sizes[5], 8))
-        .chain(std::iter::repeat_n(proof.log_sizes[6], 8))
-        .chain(std::iter::repeat_n(proof.log_sizes[7], 8))
-        .chain(std::iter::repeat_n(proof.log_sizes[8], 8))
-        .collect();
+    let interaction_log_sizes = interaction_column_log_sizes(&proof.log_sizes);
     commitment_scheme.commit(commitments[2], &interaction_log_sizes, channel);
 
     let mut location_allocator = TraceLocationAllocator::default();
@@ -675,14 +847,36 @@ pub fn verify_recursion_with_channel<MC: MerkleChannel>(
         &recursion_relations,
     );
 
-    verify(
-        &[
+    let core_components = CoreComponents {
+        n_preprocessed_columns: 0,
+        components: vec![
             &mul, &inv, &fold, &double, &sum, &merkle, &replay, &linear, &poseidon2,
         ],
-        channel,
-        &mut commitment_scheme,
-        proof.stark_proof,
-    )
+    };
+    validate_sample_counts(
+        &core_components,
+        config,
+        &proof.stark_proof.0.sampled_values,
+    )?;
+    drop(core_components);
+
+    // STWO still contains structural unwraps below this public boundary. All
+    // proof-shape panics are rejection, never process-level verifier output.
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        verify(
+            &[
+                &mul, &inv, &fold, &double, &sum, &merkle, &replay, &linear, &poseidon2,
+            ],
+            channel,
+            &mut commitment_scheme,
+            proof.stark_proof,
+        )
+    }))
+    .unwrap_or_else(|_| {
+        Err(VerificationError::InvalidStructure(
+            "malformed proof triggered an internal structural check".to_string(),
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -700,6 +894,17 @@ mod tests {
             rng.gen_range(0..(1 << 30)),
             rng.gen_range(0..(1 << 30)),
             rng.gen_range(0..(1 << 30)),
+        )
+    }
+
+    fn minimal_recursion_proof() -> RecursionProof<<Blake2sMerkleChannel as MerkleChannel>::H> {
+        prove_recursion(
+            RecursionTraces::default(),
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            PcsConfig::default(),
         )
     }
 
@@ -814,6 +1019,190 @@ mod tests {
             PcsConfig::default(),
         );
         verify_recursion(proof, &[], PcsConfig::default()).expect("verification failed");
+    }
+
+    #[test]
+    fn test_recursion_verifier_rejects_circuit_count_mismatch_without_panicking() {
+        let proof = minimal_recursion_proof();
+        let arena = std::rc::Rc::new(core::cell::RefCell::new(Arena::default()));
+
+        let result = verify_recursion(proof, &[(arena, 0)], PcsConfig::default());
+
+        assert!(matches!(
+            result,
+            Err(VerificationError::InvalidStructure(_))
+        ));
+    }
+
+    #[test]
+    fn test_recursion_verifier_rejects_invalid_arena_output_without_panicking() {
+        let mut proof = minimal_recursion_proof();
+        proof.circuits.push(CircuitClaim {
+            circuit_id: 0,
+            inputs: vec![],
+            inner_log_size: 0,
+            inner_claimed_sum: SecureField::zero(),
+            output: (0, SecureField::zero()),
+        });
+        let arena = std::rc::Rc::new(core::cell::RefCell::new(Arena::default()));
+
+        let result = verify_recursion(proof, &[(arena, 0)], PcsConfig::default());
+
+        assert!(matches!(
+            result,
+            Err(VerificationError::InvalidStructure(_))
+        ));
+    }
+
+    #[test]
+    fn test_recursion_verifier_rejects_missing_commitments_without_panicking() {
+        let mut proof = minimal_recursion_proof();
+        proof.stark_proof.0.commitments.0.clear();
+
+        let result = verify_recursion(proof, &[], PcsConfig::default());
+
+        assert!(matches!(
+            result,
+            Err(VerificationError::InvalidStructure(_))
+        ));
+    }
+
+    #[test]
+    fn test_recursion_verifier_rejects_extra_commitment_without_panicking() {
+        let mut proof = minimal_recursion_proof();
+        let extra = proof.stark_proof.0.commitments[0];
+        proof.stark_proof.0.commitments.0.push(extra);
+
+        let result = verify_recursion(proof, &[], PcsConfig::default());
+
+        assert!(matches!(
+            result,
+            Err(VerificationError::InvalidStructure(_))
+        ));
+    }
+
+    #[test]
+    fn test_recursion_verifier_rejects_missing_sampled_column_without_panicking() {
+        let mut proof = minimal_recursion_proof();
+        proof.stark_proof.0.sampled_values[1].pop();
+
+        let result = verify_recursion(proof, &[], PcsConfig::default());
+
+        assert!(matches!(
+            result,
+            Err(VerificationError::InvalidStructure(_))
+        ));
+    }
+
+    #[test]
+    fn test_recursion_verifier_rejects_missing_sample_without_panicking() {
+        let mut proof = minimal_recursion_proof();
+        let samples = proof
+            .stark_proof
+            .0
+            .sampled_values
+            .iter_mut()
+            .flatten()
+            .find(|samples| !samples.is_empty())
+            .expect("valid proof has sampled values");
+        samples.pop();
+
+        let result = verify_recursion(proof, &[], PcsConfig::default());
+
+        assert!(matches!(
+            result,
+            Err(VerificationError::InvalidStructure(_))
+        ));
+    }
+
+    #[test]
+    fn test_recursion_verifier_rejects_extra_sample_without_panicking() {
+        let mut proof = minimal_recursion_proof();
+        let samples = proof
+            .stark_proof
+            .0
+            .sampled_values
+            .iter_mut()
+            .flatten()
+            .find(|samples| !samples.is_empty())
+            .expect("valid proof has sampled values");
+        samples.push(SecureField::zero());
+
+        let result = verify_recursion(proof, &[], PcsConfig::default());
+
+        assert!(matches!(
+            result,
+            Err(VerificationError::InvalidStructure(_))
+        ));
+    }
+
+    #[test]
+    fn test_recursion_verifier_rejects_missing_queried_value_without_panicking() {
+        let mut proof = minimal_recursion_proof();
+        let values = proof
+            .stark_proof
+            .0
+            .queried_values
+            .iter_mut()
+            .flatten()
+            .find(|values| !values.is_empty())
+            .expect("valid proof has queried values");
+        values.pop();
+
+        let result = verify_recursion(proof, &[], PcsConfig::default());
+
+        assert!(matches!(
+            result,
+            Err(VerificationError::InvalidStructure(_))
+        ));
+    }
+
+    #[test]
+    fn test_recursion_verifier_rejects_extra_queried_value_without_panicking() {
+        let mut proof = minimal_recursion_proof();
+        let values = proof
+            .stark_proof
+            .0
+            .queried_values
+            .iter_mut()
+            .flatten()
+            .find(|values| !values.is_empty())
+            .expect("valid proof has queried values");
+        values.push(BaseField::from_u32_unchecked(0));
+
+        let result = verify_recursion(proof, &[], PcsConfig::default());
+
+        assert!(matches!(
+            result,
+            Err(VerificationError::InvalidStructure(_))
+        ));
+    }
+
+    #[test]
+    fn test_recursion_verifier_rejects_extra_queried_tree_without_panicking() {
+        let mut proof = minimal_recursion_proof();
+        let extra = proof.stark_proof.0.queried_values[0].clone();
+        proof.stark_proof.0.queried_values.0.push(extra);
+
+        let result = verify_recursion(proof, &[], PcsConfig::default());
+
+        assert!(matches!(
+            result,
+            Err(VerificationError::InvalidStructure(_))
+        ));
+    }
+
+    #[test]
+    fn test_recursion_verifier_rejects_invalid_log_size_without_panicking() {
+        let mut proof = minimal_recursion_proof();
+        proof.log_sizes[0] = u32::MAX;
+
+        let result = verify_recursion(proof, &[], PcsConfig::default());
+
+        assert!(matches!(
+            result,
+            Err(VerificationError::InvalidStructure(_))
+        ));
     }
 
     #[test]

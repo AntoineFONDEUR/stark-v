@@ -8,6 +8,7 @@
 //! root of an aggregation tree exposes one boundary spanning the entire
 //! execution regardless of its length.
 
+use air::poseidon2::Poseidon2Digest;
 use prover::Proof;
 use stwo::core::vcs_lifted::merkle_hasher::MerkleHasherLifted;
 
@@ -18,9 +19,9 @@ pub struct Boundary {
     pub exit_pc: u32,
     pub entry_regs: [u32; 32],
     pub exit_regs: [u32; 32],
-    pub entry_rw_root: Option<u32>,
-    pub exit_rw_root: Option<u32>,
-    pub program_root: Option<u32>,
+    pub entry_rw_root: Option<Poseidon2Digest>,
+    pub exit_rw_root: Option<Poseidon2Digest>,
+    pub program_root: Option<Poseidon2Digest>,
 }
 
 impl Boundary {
@@ -90,9 +91,9 @@ mod tests {
             exit_pc,
             entry_regs: [0; 32],
             exit_regs: [0; 32],
-            entry_rw_root: Some(7),
-            exit_rw_root: Some(7),
-            program_root: Some(42),
+            entry_rw_root: Some([7; 8]),
+            exit_rw_root: Some([7; 8]),
+            program_root: Some([42; 8]),
         }
     }
 
@@ -110,7 +111,7 @@ mod tests {
     #[test]
     fn test_chain_rejects_program_mismatch() {
         let mut right = boundary(4, 8);
-        right.program_root = Some(43);
+        right.program_root = Some([43; 8]);
         assert!(boundary(0, 4).chain(&right).is_err());
     }
 

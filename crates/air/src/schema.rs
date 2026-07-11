@@ -5,7 +5,9 @@ stwo_macros::define_air! {
         registers_state: pc, clock;
         memory_access: addr_space, addr, clock, limb_0, limb_1, limb_2, limb_3;
         program_access: addr, value_0, value_1, value_2, value_3;
-        merkle: index, depth, value, root;
+        merkle: index, depth,
+            value_0, value_1, value_2, value_3, value_4, value_5, value_6, value_7,
+            root_0, root_1, root_2, root_3, root_4, root_5, root_6, root_7;
         poseidon2: state0, state1, state2, state3, state4, state5, state6, state7,
             state8, state9, state10, state11, state12, state13, state14, state15;
         poseidon2_io: in0, in1, in2, in3, in4, in5, in6, in7,
@@ -1369,7 +1371,8 @@ stwo_macros::define_air! {
         // ==========================================================================
         program: {
             committed: {
-                addr, value_0, value_1, value_2, value_3, multiplicity, root,
+                addr, value_0, value_1, value_2, value_3, multiplicity,
+                root_0, root_1, root_2, root_3, root_4, root_5, root_6, root_7,
             },
             lookups: {
                 // Emit each fetched instruction `multiplicity` times (consumed by
@@ -1377,10 +1380,26 @@ stwo_macros::define_air! {
                 multiplicity * program_access(addr, value_0, value_1, value_2, value_3),
                 // The four instruction limbs are leaves of the program
                 // commitment tree at consecutive indices.
-                -enabler * merkle(addr, constant(crate::MAX_TREE_HEIGHT - 1), value_0, root),
-                -enabler * merkle(addr + 1, constant(crate::MAX_TREE_HEIGHT - 1), value_1, root),
-                -enabler * merkle(addr + 2, constant(crate::MAX_TREE_HEIGHT - 1), value_2, root),
-                -enabler * merkle(addr + 3, constant(crate::MAX_TREE_HEIGHT - 1), value_3, root),
+                -enabler * merkle(
+                    addr, constant(crate::MAX_TREE_HEIGHT - 1),
+                    value_0, 0, 0, 0, 0, 0, 0, 0,
+                    root_0, root_1, root_2, root_3, root_4, root_5, root_6, root_7,
+                ),
+                -enabler * merkle(
+                    addr + 1, constant(crate::MAX_TREE_HEIGHT - 1),
+                    value_1, 0, 0, 0, 0, 0, 0, 0,
+                    root_0, root_1, root_2, root_3, root_4, root_5, root_6, root_7,
+                ),
+                -enabler * merkle(
+                    addr + 2, constant(crate::MAX_TREE_HEIGHT - 1),
+                    value_2, 0, 0, 0, 0, 0, 0, 0,
+                    root_0, root_1, root_2, root_3, root_4, root_5, root_6, root_7,
+                ),
+                -enabler * merkle(
+                    addr + 3, constant(crate::MAX_TREE_HEIGHT - 1),
+                    value_3, 0, 0, 0, 0, 0, 0, 0,
+                    root_0, root_1, root_2, root_3, root_4, root_5, root_6, root_7,
+                ),
             },
         },
 
@@ -1391,7 +1410,8 @@ stwo_macros::define_air! {
             committed: {
                 addr, clock,
                 value_0, value_1, value_2, value_3,
-                multiplicity, root,
+                multiplicity,
+                root_0, root_1, root_2, root_3, root_4, root_5, root_6, root_7,
             },
             constraints: {
                 // multiplicity is -1 (final state emission), 0 (padding), or 1
@@ -1406,10 +1426,26 @@ stwo_macros::define_air! {
                 // initial value, -1 consumes the final one.
                 multiplicity * memory_access(1, addr, clock, value_0, value_1, value_2, value_3),
                 // The four word limbs are leaves of the memory commitment tree.
-                -enabler * merkle(addr, constant(crate::MAX_TREE_HEIGHT - 1), value_0, root),
-                -enabler * merkle(addr + 1, constant(crate::MAX_TREE_HEIGHT - 1), value_1, root),
-                -enabler * merkle(addr + 2, constant(crate::MAX_TREE_HEIGHT - 1), value_2, root),
-                -enabler * merkle(addr + 3, constant(crate::MAX_TREE_HEIGHT - 1), value_3, root),
+                -enabler * merkle(
+                    addr, constant(crate::MAX_TREE_HEIGHT - 1),
+                    value_0, 0, 0, 0, 0, 0, 0, 0,
+                    root_0, root_1, root_2, root_3, root_4, root_5, root_6, root_7,
+                ),
+                -enabler * merkle(
+                    addr + 1, constant(crate::MAX_TREE_HEIGHT - 1),
+                    value_1, 0, 0, 0, 0, 0, 0, 0,
+                    root_0, root_1, root_2, root_3, root_4, root_5, root_6, root_7,
+                ),
+                -enabler * merkle(
+                    addr + 2, constant(crate::MAX_TREE_HEIGHT - 1),
+                    value_2, 0, 0, 0, 0, 0, 0, 0,
+                    root_0, root_1, root_2, root_3, root_4, root_5, root_6, root_7,
+                ),
+                -enabler * merkle(
+                    addr + 3, constant(crate::MAX_TREE_HEIGHT - 1),
+                    value_3, 0, 0, 0, 0, 0, 0, 0,
+                    root_0, root_1, root_2, root_3, root_4, root_5, root_6, root_7,
+                ),
             },
         },
 
@@ -1419,9 +1455,13 @@ stwo_macros::define_air! {
         merkle: {
             committed: {
                 index, depth,
-                lhs, rhs, cur,
+                lhs_0, lhs_1, lhs_2, lhs_3, lhs_4, lhs_5, lhs_6, lhs_7,
+                rhs_0, rhs_1, rhs_2, rhs_3, rhs_4, rhs_5, rhs_6, rhs_7,
+                cur_0, cur_1, cur_2, cur_3, cur_4, cur_5, cur_6, cur_7,
+                output_8, output_9, output_10, output_11,
+                output_12, output_13, output_14, output_15,
                 lhs_mult, rhs_mult, cur_mult,
-                root,
+                root_0, root_1, root_2, root_3, root_4, root_5, root_6, root_7,
             },
             constraints: {
                 // Node multiplicities are 0, 1, or 2 (a node can be shared by
@@ -1433,12 +1473,31 @@ stwo_macros::define_air! {
             lookups: {
                 // Emit the two children claims, consume the parent claim
                 // (index halves, depth decreases toward the root).
-                lhs_mult * merkle(index, depth, lhs, root),
-                rhs_mult * merkle(index + 1, depth, rhs, root),
-                -cur_mult * merkle(index * inv(2), depth - 1, cur, root),
-                // The parent is the Poseidon2 hash of the two children.
-                enabler * poseidon2(lhs, rhs),
-                -enabler * poseidon2(cur),
+                lhs_mult * merkle(
+                    index, depth,
+                    lhs_0, lhs_1, lhs_2, lhs_3, lhs_4, lhs_5, lhs_6, lhs_7,
+                    root_0, root_1, root_2, root_3, root_4, root_5, root_6, root_7,
+                ),
+                rhs_mult * merkle(
+                    index + 1, depth,
+                    rhs_0, rhs_1, rhs_2, rhs_3, rhs_4, rhs_5, rhs_6, rhs_7,
+                    root_0, root_1, root_2, root_3, root_4, root_5, root_6, root_7,
+                ),
+                -cur_mult * merkle(
+                    index * inv(2), depth - 1,
+                    cur_0, cur_1, cur_2, cur_3, cur_4, cur_5, cur_6, cur_7,
+                    root_0, root_1, root_2, root_3, root_4, root_5, root_6, root_7,
+                ),
+                // Bind both children and the complete permutation output in
+                // one relation entry so no output limb can be spliced from a
+                // different Poseidon2 call.
+                -enabler * poseidon2_io(
+                    lhs_0, lhs_1, lhs_2, lhs_3, lhs_4, lhs_5, lhs_6, lhs_7,
+                    rhs_0, rhs_1, rhs_2, rhs_3, rhs_4, rhs_5, rhs_6, rhs_7,
+                    cur_0, cur_1, cur_2, cur_3, cur_4, cur_5, cur_6, cur_7,
+                    output_8, output_9, output_10, output_11,
+                    output_12, output_13, output_14, output_15,
+                ),
             },
         },
 

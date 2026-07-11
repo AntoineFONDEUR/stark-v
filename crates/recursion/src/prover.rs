@@ -108,7 +108,10 @@ pub(crate) fn mix_boundary<C: Channel>(channel: &mut C, boundary: &Option<Bounda
         boundary.program_root,
     ] {
         match root {
-            Some(value) => words.extend_from_slice(&[1, value]),
+            Some(value) => {
+                words.push(1);
+                words.extend_from_slice(&value);
+            }
             None => words.push(0),
         }
     }

@@ -628,9 +628,9 @@ mod tests {
             exit_pc,
             entry_regs: [0; 32],
             exit_regs: [0; 32],
-            entry_rw_root: Some(7),
-            exit_rw_root: Some(7),
-            program_root: Some(42),
+            entry_rw_root: Some([7; 8]),
+            exit_rw_root: Some([7; 8]),
+            program_root: Some([42; 8]),
         }
     }
 

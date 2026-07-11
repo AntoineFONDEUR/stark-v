@@ -172,6 +172,32 @@ fn test_verify_rejects_mismatched_preprocessing_commitment() {
     ));
 }
 
+/// Every program-root limb is part of the public statement.
+#[test_log::test]
+fn test_verify_rejects_tampered_program_root_tail() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+
+    let elf_bytes =
+        std::fs::read(guest_bin_dir().join("mulhu_alias")).expect("Failed to read mulhu_alias ELF");
+    let run_result = run(&elf_bytes, 10_000_000).expect("Failed to run mulhu_alias");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let mut proof = prove_rv32im(run_result, config, &preprocessing);
+    proof
+        .public_data
+        .program_root
+        .as_mut()
+        .expect("program root is present")[7] ^= 1;
+
+    let result = verify_rv32im(proof, config, &preprocessing);
+
+    assert!(result.is_err());
+}
+
 /// Full end-to-end proof + verification for a single MULHU with rd != rs2.
 #[test_log::test]
 fn test_prove_verify_mulhu_no_alias() {

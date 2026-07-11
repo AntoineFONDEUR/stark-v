@@ -94,19 +94,17 @@ fn test_guest_recursive_single_segment_wraps() {
     assert_eq!(boundary.exit_regs, reference.final_regs);
 }
 
-/// Capacity-aware segmentation end to end: a small run split on a row budget
-/// (not a cycle count), folded 2-to-1 to one root that verifies.
+/// Capacity-aware segmentation end to end: a run bounded by finalized table
+/// rows, folded 2-to-1 to one root that verifies.
 #[test_log::test]
 fn test_guest_recursive_by_capacity_verifies() {
     prover::e2e::ensure_guest_built();
     let elf = std::fs::read(prover::e2e::guest_bin_dir().join("fib")).expect("read fib ELF");
     let reference = run(&elf, 10_000_000).expect("run fib");
 
-    // A budget of ~1/3 the run yields >= 3 segments, so arity-2 base grouping
-    // gives >= 2 leaves (clamped to the range check's 2^20 limit).
-    let max_rows = u32::try_from(reference.cycles / 3 + 1)
-        .expect("fits u32")
-        .clamp(2, (1 << 20) - 1);
+    // Capacity is measured in finalized trace rows, whose fixed program and
+    // Merkle commitments can be much larger than the execution's cycle count.
+    let max_rows = u32::try_from(reference.tracer.max_table_len()).expect("row count fits u32");
     let config = PcsConfig::default();
     let preprocessing = preprocess_with_channel::<Poseidon2M31MerkleChannel>(config);
 
@@ -123,9 +121,14 @@ fn test_guest_recursive_by_capacity_verifies() {
     let boundary = verify_node_compressed(root, config)
         .expect("root verification failed")
         .expect("an execution tree carries a boundary");
-    assert_eq!(boundary.entry_pc, reference.initial_pc);
-    assert_eq!(boundary.exit_pc, reference.final_pc);
-    assert_eq!(boundary.exit_regs, reference.final_regs);
+    assert_eq!(
+        (boundary.entry_pc, boundary.exit_pc, boundary.exit_regs),
+        (
+            reference.initial_pc,
+            reference.final_pc,
+            reference.final_regs,
+        ),
+    );
 }
 
 /// Tunable harness: sweep `RECURSION_ARITY` and the per-segment row budget

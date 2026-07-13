@@ -1,5 +1,6 @@
 //! Versioned foundations for the sound binary recursion protocol.
 
+pub mod control_air;
 pub mod kernel;
 pub mod pow;
 pub mod protocol;

@@ -179,6 +179,125 @@ pub enum VerifierStep {
     Complete,
 }
 
+/// Fixed-width control encoding of one verifier step.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub struct EncodedVerifierStep {
+    tag: u32,
+    args: [u32; 4],
+    arity: u8,
+}
+
+impl EncodedVerifierStep {
+    pub const fn tag(self) -> u32 {
+        self.tag
+    }
+
+    pub const fn args(self) -> [u32; 4] {
+        self.args
+    }
+
+    pub const fn arity(self) -> u8 {
+        self.arity
+    }
+}
+
+impl VerifierStep {
+    /// Encodes the step with zero-filled unused arguments for fixed control rows.
+    pub const fn encode(self) -> EncodedVerifierStep {
+        macro_rules! step {
+            ($tag:expr) => {
+                EncodedVerifierStep {
+                    tag: $tag,
+                    args: [0, 0, 0, 0],
+                    arity: 0,
+                }
+            };
+            ($tag:expr, $arg_0:expr) => {
+                EncodedVerifierStep {
+                    tag: $tag,
+                    args: [$arg_0, 0, 0, 0],
+                    arity: 1,
+                }
+            };
+            ($tag:expr, $arg_0:expr, $arg_1:expr) => {
+                EncodedVerifierStep {
+                    tag: $tag,
+                    args: [$arg_0, $arg_1, 0, 0],
+                    arity: 2,
+                }
+            };
+            ($tag:expr, $arg_0:expr, $arg_1:expr, $arg_2:expr) => {
+                EncodedVerifierStep {
+                    tag: $tag,
+                    args: [$arg_0, $arg_1, $arg_2, 0],
+                    arity: 3,
+                }
+            };
+            ($tag:expr, $arg_0:expr, $arg_1:expr, $arg_2:expr, $arg_3:expr) => {
+                EncodedVerifierStep {
+                    tag: $tag,
+                    args: [$arg_0, $arg_1, $arg_2, $arg_3],
+                    arity: 4,
+                }
+            };
+        }
+        match self {
+            Self::BindProtocol => step!(1),
+            Self::BindStatement => step!(2),
+            Self::BindPcsParameters => step!(3),
+            Self::AbsorbTraceCommitment {
+                round,
+                tree,
+                height,
+            } => step!(4, round as u32, tree, height),
+            Self::AbsorbPublicClaim => step!(5),
+            Self::VerifyAndAbsorbInteractionPow { bits } => step!(6, bits),
+            Self::DrawRelationChallenge { challenge } => step!(7, challenge),
+            Self::AbsorbClaimedSums { count } => step!(8, count),
+            Self::DrawCompositionRandomness => step!(9),
+            Self::DrawOodsPoint => step!(10),
+            Self::AccumulatePublicLogupTerm { term } => step!(11, term),
+            Self::AssertGlobalLogupZero => step!(12),
+            Self::EvaluateAirInstruction { instruction } => step!(13, instruction),
+            Self::AssertComposition {
+                sampled_value_count,
+            } => step!(14, sampled_value_count),
+            Self::AbsorbSampledValues { count } => step!(15, count),
+            Self::DrawDeepRandomness => step!(16),
+            Self::AbsorbFriCommitment { layer } => step!(17, layer),
+            Self::DrawFriAlpha { layer } => step!(18, layer),
+            Self::AbsorbLastLayerCoefficients { count } => step!(19, count),
+            Self::VerifyAndAbsorbPcsPow { bits } => step!(20, bits),
+            Self::DrawQueryBlock {
+                block,
+                first_query,
+                query_count,
+            } => step!(21, block, first_query, query_count),
+            Self::VerifyTraceMerklePath { tree, query, depth } => {
+                step!(22, tree, query, depth)
+            }
+            Self::EvaluateDeepQuotient {
+                query,
+                queried_values_per_query,
+            } => step!(23, query, queried_values_per_query),
+            Self::VerifyFriMerklePath {
+                layer,
+                query,
+                depth,
+                width,
+            } => step!(24, layer, query, depth, width),
+            Self::FoldFri {
+                layer,
+                query,
+                width,
+            } => step!(25, layer, query, width),
+            Self::VerifyLastLayer { query } => step!(26, query),
+            Self::CloseRelation { relation } => step!(27, relation),
+            Self::Complete => step!(28),
+        }
+    }
+}
+
 /// Exact trusted schedule consumed by both verifier backends.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifierControlPlan {
@@ -593,65 +712,10 @@ fn push_step_word(words: &mut Vec<M31Word>, value: u32) {
 }
 
 fn append_step_words(step: VerifierStep, words: &mut Vec<M31Word>) {
-    macro_rules! step {
-        ($tag:expr $(, $value:expr)* $(,)?) => {{
-            words.push(M31Word::from($tag));
-            $(push_step_word(words, $value);)*
-        }};
-    }
-    match step {
-        VerifierStep::BindProtocol => step!(1),
-        VerifierStep::BindStatement => step!(2),
-        VerifierStep::BindPcsParameters => step!(3),
-        VerifierStep::AbsorbTraceCommitment {
-            round,
-            tree,
-            height,
-        } => step!(4, round as u32, tree, height),
-        VerifierStep::AbsorbPublicClaim => step!(5),
-        VerifierStep::VerifyAndAbsorbInteractionPow { bits } => step!(6, bits),
-        VerifierStep::DrawRelationChallenge { challenge } => step!(7, challenge),
-        VerifierStep::AbsorbClaimedSums { count } => step!(8, count),
-        VerifierStep::DrawCompositionRandomness => step!(9),
-        VerifierStep::DrawOodsPoint => step!(10),
-        VerifierStep::AccumulatePublicLogupTerm { term } => step!(11, term),
-        VerifierStep::AssertGlobalLogupZero => step!(12),
-        VerifierStep::EvaluateAirInstruction { instruction } => step!(13, instruction),
-        VerifierStep::AssertComposition {
-            sampled_value_count,
-        } => step!(14, sampled_value_count),
-        VerifierStep::AbsorbSampledValues { count } => step!(15, count),
-        VerifierStep::DrawDeepRandomness => step!(16),
-        VerifierStep::AbsorbFriCommitment { layer } => step!(17, layer),
-        VerifierStep::DrawFriAlpha { layer } => step!(18, layer),
-        VerifierStep::AbsorbLastLayerCoefficients { count } => step!(19, count),
-        VerifierStep::VerifyAndAbsorbPcsPow { bits } => step!(20, bits),
-        VerifierStep::DrawQueryBlock {
-            block,
-            first_query,
-            query_count,
-        } => step!(21, block, first_query, query_count),
-        VerifierStep::VerifyTraceMerklePath { tree, query, depth } => {
-            step!(22, tree, query, depth)
-        }
-        VerifierStep::EvaluateDeepQuotient {
-            query,
-            queried_values_per_query,
-        } => step!(23, query, queried_values_per_query),
-        VerifierStep::VerifyFriMerklePath {
-            layer,
-            query,
-            depth,
-            width,
-        } => step!(24, layer, query, depth, width),
-        VerifierStep::FoldFri {
-            layer,
-            query,
-            width,
-        } => step!(25, layer, query, width),
-        VerifierStep::VerifyLastLayer { query } => step!(26, query),
-        VerifierStep::CloseRelation { relation } => step!(27, relation),
-        VerifierStep::Complete => step!(28),
+    let encoded = step.encode();
+    push_step_word(words, encoded.tag());
+    for value in &encoded.args()[..encoded.arity() as usize] {
+        push_step_word(words, *value);
     }
 }
 

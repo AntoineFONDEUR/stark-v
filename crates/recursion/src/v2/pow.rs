@@ -199,7 +199,7 @@ define_component_tables! {
     },
     pow_frame: {
         committed: {
-            verifier_id, pow_kind, hash_id, call_id, bits,
+            verifier_id, sequence, pow_kind, hash_id, call_id, bits,
             word_0, word_1, word_2, word_3,
             word_4, word_5, word_6, word_7,
         },
@@ -213,7 +213,6 @@ define_component_tables! {
 use prover_columns::{PowCheckColumns, PowFrameColumns};
 
 relation!(PowCheckRelation, 5);
-relation!(PowControlRelation, 5);
 
 /// Domain tag for the two proof-of-work rounds in one verifier transcript.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -233,21 +232,18 @@ impl PowKind {
 #[derive(Clone)]
 pub struct PowRelations {
     pub check: PowCheckRelation,
-    pub control: PowControlRelation,
 }
 
 impl PowRelations {
     pub fn dummy() -> Self {
         Self {
             check: PowCheckRelation::dummy(),
-            control: PowControlRelation::dummy(),
         }
     }
 
     pub fn draw(channel: &mut impl Channel) -> Self {
         Self {
             check: PowCheckRelation::draw(channel),
-            control: PowControlRelation::draw(channel),
         }
     }
 }
@@ -296,6 +292,7 @@ impl FrameworkEval for Eval {
 pub struct FrameEval {
     pub log_size: u32,
     pub pow_relations: PowRelations,
+    pub control_relations: super::control_air::ControlRelations,
     pub transcript_relations: super::transcript_air::TranscriptAirRelations,
 }
 
@@ -332,15 +329,19 @@ impl FrameworkEval for FrameEval {
                 cols.word_7.clone(),
             ],
         ));
+        let pow_tag = cols.pow_kind.clone() * BaseField::from(14) - E::F::from(BaseField::from(8));
+        let zero = E::F::from(BaseField::from(0));
         eval.add_to_relation(RelationEntry::new(
-            &self.pow_relations.control,
+            &self.control_relations.step,
             -E::EF::from(cols.enabler.clone()),
             &[
                 cols.verifier_id.clone(),
-                cols.pow_kind.clone(),
-                cols.hash_id.clone(),
-                cols.call_id.clone(),
+                cols.sequence.clone(),
+                pow_tag,
                 cols.bits.clone(),
+                zero.clone(),
+                zero.clone(),
+                zero,
             ],
         ));
         eval.add_to_relation(RelationEntry::new(
@@ -393,6 +394,7 @@ pub fn gen_interaction_trace(
 pub fn gen_frame_interaction_trace(
     trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     pow_relations: &PowRelations,
+    control_relations: &super::control_air::ControlRelations,
     transcript_relations: &super::transcript_air::TranscriptAirRelations,
 ) -> (
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
@@ -425,14 +427,23 @@ pub fn gen_frame_interaction_trace(
             cols.word_7
         ]
     );
+    let fourteen = stwo::prover::backend::simd::m31::PackedM31::broadcast(BaseField::from(14));
+    let eight = stwo::prover::backend::simd::m31::PackedM31::broadcast(BaseField::from(8));
+    let pow_tag: Vec<_> = (0..cols.enabler.len())
+        .map(|row| cols.pow_kind[row] * fourteen - eight)
+        .collect();
+    let zero = stwo::prover::backend::simd::m31::PackedM31::broadcast(BaseField::from(0));
+    let zero_column: Vec<_> = (0..cols.enabler.len()).map(|_| zero).collect();
     let control_denom = combine!(
-        pow_relations.control,
+        control_relations.step,
         [
             cols.verifier_id,
-            cols.pow_kind,
-            cols.hash_id,
-            cols.call_id,
-            cols.bits
+            cols.sequence,
+            &pow_tag,
+            cols.bits,
+            &zero_column,
+            &zero_column,
+            &zero_column
         ]
     );
     let check_denom = combine!(
@@ -489,17 +500,39 @@ pub fn push_pow_check(
 pub fn push_pow_frames(
     table: &mut PowFrameTable,
     verifier_id: u32,
-    kinds: &[PowKind],
+    plan: &super::kernel::VerifierControlPlan,
     trace: &super::transcript::TranscriptTrace,
 ) -> Result<(), PowFrameError> {
     trace.sponge_rows().map_err(PowFrameError::Transcript)?;
-    if kinds.len() != trace.pow_checks.len() {
+    let schedule = plan
+        .steps()
+        .iter()
+        .copied()
+        .enumerate()
+        .filter_map(|(sequence, step)| match step {
+            super::kernel::VerifierStep::VerifyAndAbsorbInteractionPow { bits } => {
+                Some((sequence, PowKind::Interaction, bits))
+            }
+            super::kernel::VerifierStep::VerifyAndAbsorbPcsPow { bits } => {
+                Some((sequence, PowKind::Pcs, bits))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if schedule.len() != trace.pow_checks.len() {
         return Err(PowFrameError::KindCountMismatch {
             expected: trace.pow_checks.len(),
-            actual: kinds.len(),
+            actual: schedule.len(),
         });
     }
-    for (&kind, check) in kinds.iter().zip(&trace.pow_checks) {
+    for ((sequence, kind, bits), check) in schedule.into_iter().zip(&trace.pow_checks) {
+        if bits != check.bits {
+            return Err(PowFrameError::BitsMismatch {
+                call_id: check.call_id,
+                expected: bits,
+                actual: check.bits,
+            });
+        }
         let frame = trace
             .hash_frames
             .iter()
@@ -513,6 +546,7 @@ pub fn push_pow_frames(
         let output = frame.output.map(air::digest::M31Word::as_u32);
         table.push(
             verifier_id,
+            u32::try_from(sequence).map_err(|_| PowFrameError::SequenceOutOfRange { sequence })?,
             kind.as_u32(),
             frame.hash_id,
             check.call_id,
@@ -555,8 +589,21 @@ impl std::error::Error for PowWitnessError {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PowFrameError {
     Transcript(super::transcript::TranscriptError),
-    KindCountMismatch { expected: usize, actual: usize },
-    DrawFrameMissing { call_id: u32 },
+    KindCountMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    SequenceOutOfRange {
+        sequence: usize,
+    },
+    BitsMismatch {
+        call_id: u32,
+        expected: u32,
+        actual: u32,
+    },
+    DrawFrameMissing {
+        call_id: u32,
+    },
 }
 
 impl fmt::Display for PowFrameError {
@@ -566,6 +613,20 @@ impl fmt::Display for PowFrameError {
             Self::KindCountMismatch { expected, actual } => write!(
                 formatter,
                 "PoW frame has {actual} kind tags, expected {expected}"
+            ),
+            Self::SequenceOutOfRange { sequence } => {
+                write!(
+                    formatter,
+                    "PoW control sequence {sequence} does not fit u32"
+                )
+            }
+            Self::BitsMismatch {
+                call_id,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "PoW call {call_id} checks {actual} bits, control requires {expected}"
             ),
             Self::DrawFrameMissing { call_id } => write!(
                 formatter,
@@ -591,6 +652,9 @@ mod tests {
     use prover::poseidon2_channel::Poseidon2M31Channel;
 
     use super::*;
+    use crate::v2::control_air::ControlRelations;
+    use crate::v2::kernel::{VerifierControlPlan, VerifierProgramSpec, VerifierSchema};
+    use crate::v2::protocol::{FixedProofShape, OptionalM31Word, PcsParameters};
     use crate::v2::transcript::{RecordingTranscriptBackend, TranscriptKernel, TranscriptTrace};
 
     fn check(bits: u32, word: u32) -> PowCheck {
@@ -629,32 +693,78 @@ mod tests {
     fn pow_trace() -> TranscriptTrace {
         let mut reference = Poseidon2M31Channel::default();
         reference.mix_u32s(&[1, 2, 3]);
-        let nonce = <SimdBackend as GrindOps<Poseidon2M31Channel>>::grind(&reference, 8);
         let mut kernel = TranscriptKernel::<RecordingTranscriptBackend>::default();
         kernel
             .absorb_u32s(&[1, 2, 3])
             .expect("fixture words are accepted");
-        kernel
-            .verify_and_absorb_pow(nonce, 8)
-            .expect("ground nonce satisfies the fixture challenge");
+        for bits in [8, 10] {
+            let nonce = <SimdBackend as GrindOps<Poseidon2M31Channel>>::grind(&reference, bits);
+            kernel
+                .verify_and_absorb_pow(nonce, bits)
+                .expect("ground nonce satisfies the fixture challenge");
+            reference.mix_u64(nonce);
+        }
         kernel.into_backend().into_trace()
+    }
+
+    fn plan() -> VerifierControlPlan {
+        let pcs = PcsParameters {
+            interaction_pow_bits: M31Word::from(8),
+            pow_bits: M31Word::from(10),
+            fri_log_blowup_factor: M31Word::from(1),
+            fri_n_queries: M31Word::from(9),
+            fri_log_last_layer_degree_bound: M31Word::ZERO,
+            fri_fold_step: M31Word::from(2),
+            lifting_log_size: OptionalM31Word::Some(M31Word::from(8)),
+        };
+        let shape = FixedProofShape {
+            claimed_sum_count: M31Word::from(7),
+            sampled_value_count: M31Word::from(8),
+            queried_value_count: M31Word::from(36),
+            trace_path_count: M31Word::from(36),
+            raw_query_count: M31Word::from(9),
+            last_layer_coefficient_count: M31Word::from(1),
+            table_log_sizes: [M31Word::from(5), M31Word::from(6)],
+            tree_heights: [M31Word::from(8); 4],
+            fri_layer_fold_widths: [
+                M31Word::from(4),
+                M31Word::from(4),
+                M31Word::from(4),
+                M31Word::from(2),
+            ],
+            fri_layer_tree_heights: [
+                M31Word::from(6),
+                M31Word::from(4),
+                M31Word::from(2),
+                M31Word::from(2),
+            ],
+        };
+        let spec = VerifierProgramSpec::new(VerifierSchema::Vm, 3, 5, 7, 4)
+            .expect("fixture program has every mandatory phase");
+        VerifierControlPlan::new(spec, pcs, &shape).expect("fixture shape matches the PCS profile")
     }
 
     fn assert_frame_table_satisfies_constraints(table: PowFrameTable) {
         let pow_relations = PowRelations::dummy();
+        let control_relations = ControlRelations::dummy();
         let transcript_relations = super::super::transcript_air::TranscriptAirRelations::dummy();
         let trace = table.into_witness();
         let log_size = trace
             .first()
             .map(|column| column.domain.log_size())
             .expect("generated table has columns");
-        let (interaction, claimed_sum) =
-            gen_frame_interaction_trace(&trace, &pow_relations, &transcript_relations);
+        let (interaction, claimed_sum) = gen_frame_interaction_trace(
+            &trace,
+            &pow_relations,
+            &control_relations,
+            &transcript_relations,
+        );
         let traces = TreeVec::new(vec![vec![], trace, interaction]);
         let trace_polys = traces.map_cols(|column| column.interpolate());
         let eval = FrameEval {
             log_size,
             pow_relations,
+            control_relations,
             transcript_relations,
         };
         assert_constraints_on_polys(
@@ -730,7 +840,7 @@ mod tests {
     #[rstest]
     fn recorded_draw_frame_satisfies_the_pow_binding_air() {
         let mut table = PowFrameTable::new();
-        push_pow_frames(&mut table, 1, &[PowKind::Interaction], &pow_trace())
+        push_pow_frames(&mut table, 1, &plan(), &pow_trace())
             .expect("recorded PoW frame is canonical");
         assert_frame_table_satisfies_constraints(table);
     }
@@ -739,7 +849,7 @@ mod tests {
     #[should_panic]
     fn pow_frame_rejects_an_unknown_round_kind() {
         let mut table = PowFrameTable::new();
-        push_pow_frames(&mut table, 1, &[PowKind::Interaction], &pow_trace())
+        push_pow_frames(&mut table, 1, &plan(), &pow_trace())
             .expect("recorded PoW frame is canonical");
         table.pow_kind[0] = 3;
         assert_frame_table_satisfies_constraints(table);
@@ -747,12 +857,30 @@ mod tests {
 
     #[rstest]
     fn pow_frame_requires_one_kind_per_recorded_check() {
-        let result = push_pow_frames(&mut PowFrameTable::new(), 1, &[], &pow_trace());
+        let mut trace = pow_trace();
+        trace.pow_checks.pop();
+        let result = push_pow_frames(&mut PowFrameTable::new(), 1, &plan(), &trace);
         assert_eq!(
             result,
             Err(PowFrameError::KindCountMismatch {
                 expected: 1,
-                actual: 0,
+                actual: 2,
+            })
+        );
+    }
+
+    #[rstest]
+    fn pow_frame_uses_the_plan_difficulty() {
+        let mut trace = pow_trace();
+        trace.pow_checks[0].bits = 7;
+        let call_id = trace.pow_checks[0].call_id;
+        let result = push_pow_frames(&mut PowFrameTable::new(), 1, &plan(), &trace);
+        assert_eq!(
+            result,
+            Err(PowFrameError::BitsMismatch {
+                call_id,
+                expected: 8,
+                actual: 7,
             })
         );
     }
@@ -764,6 +892,7 @@ mod tests {
         let eval = FrameEval {
             log_size: 4,
             pow_relations: PowRelations::dummy(),
+            control_relations: ControlRelations::dummy(),
             transcript_relations: super::super::transcript_air::TranscriptAirRelations::dummy(),
         };
         let degrees = eval

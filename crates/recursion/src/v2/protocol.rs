@@ -16,6 +16,13 @@ use air::digest::{
 #[repr(transparent)]
 pub struct ProtocolVersion(pub M31Word);
 
+impl ProtocolVersion {
+    /// Returns the canonical version word used by the wire and transcript.
+    pub const fn word(self) -> M31Word {
+        self.0
+    }
+}
+
 /// An optional PCS parameter with one canonical two-word representation.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum OptionalM31Word {
@@ -26,6 +33,7 @@ pub enum OptionalM31Word {
 /// All parameters read by STWO's commitment-scheme transcript.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct PcsParameters {
+    pub interaction_pow_bits: M31Word,
     pub pow_bits: M31Word,
     pub fri_log_blowup_factor: M31Word,
     pub fri_n_queries: M31Word,
@@ -34,24 +42,31 @@ pub struct PcsParameters {
     pub lifting_log_size: OptionalM31Word,
 }
 
-/// Counts and table sizes that make one proof wire shape fixed.
+/// Counts and per-tree/per-layer sizes that make one proof wire shape fixed.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-pub struct FixedProofShape<const N_TABLES: usize> {
-    pub commitment_count: M31Word,
+pub struct FixedProofShape<const N_TABLES: usize, const N_TREES: usize, const N_FRI_LAYERS: usize> {
+    pub claimed_sum_count: M31Word,
     pub sampled_value_count: M31Word,
     pub queried_value_count: M31Word,
-    pub trace_opening_count: M31Word,
-    pub fri_layer_count: M31Word,
-    pub fri_fold_width: M31Word,
-    pub fri_opening_count: M31Word,
+    pub trace_path_count: M31Word,
+    pub raw_query_count: M31Word,
     pub last_layer_coefficient_count: M31Word,
-    pub max_merkle_depth: M31Word,
     pub table_log_sizes: [M31Word; N_TABLES],
+    pub tree_heights: [M31Word; N_TREES],
+    pub fri_layer_fold_widths: [M31Word; N_FRI_LAYERS],
+    pub fri_layer_tree_heights: [M31Word; N_FRI_LAYERS],
 }
 
 /// Verifier-owned inputs that identify one VM and recursion proof protocol.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-pub struct ProtocolManifest<const VM_TABLES: usize, const RECURSION_TABLES: usize> {
+pub struct ProtocolManifest<
+    const VM_TABLES: usize,
+    const VM_TREES: usize,
+    const VM_FRI_LAYERS: usize,
+    const RECURSION_TABLES: usize,
+    const RECURSION_TREES: usize,
+    const RECURSION_FRI_LAYERS: usize,
+> {
     pub version: ProtocolVersion,
     pub hash_suite: HashSuiteDigest,
     pub vm_preprocessing: VmPreprocessingDigest,
@@ -60,8 +75,9 @@ pub struct ProtocolManifest<const VM_TABLES: usize, const RECURSION_TABLES: usiz
     pub recursion_air_program: RecursionAirProgramDigest,
     pub vm_pcs: PcsParameters,
     pub recursion_pcs: PcsParameters,
-    pub vm_proof_shape: FixedProofShape<VM_TABLES>,
-    pub recursion_proof_shape: FixedProofShape<RECURSION_TABLES>,
+    pub vm_proof_shape: FixedProofShape<VM_TABLES, VM_TREES, VM_FRI_LAYERS>,
+    pub recursion_proof_shape:
+        FixedProofShape<RECURSION_TABLES, RECURSION_TREES, RECURSION_FRI_LAYERS>,
 }
 
 /// Tags in the canonical word encoding.
@@ -82,23 +98,26 @@ pub enum CanonicalTag {
     VmProofShape = 10,
     RecursionProofShape = 11,
     Pcs = 20,
-    PowBits = 21,
-    FriLogBlowupFactor = 22,
-    FriNQueries = 23,
-    FriLogLastLayerDegreeBound = 24,
-    FriFoldStep = 25,
-    LiftingLogSize = 26,
+    InteractionPowBits = 21,
+    PowBits = 22,
+    FriLogBlowupFactor = 23,
+    FriNQueries = 24,
+    FriLogLastLayerDegreeBound = 25,
+    FriFoldStep = 26,
+    LiftingLogSize = 27,
     ProofShape = 40,
     CommitmentCount = 41,
-    SampledValueCount = 42,
-    QueriedValueCount = 43,
-    TraceOpeningCount = 44,
-    FriLayerCount = 45,
-    FriFoldWidth = 46,
-    FriOpeningCount = 47,
+    ClaimedSumCount = 42,
+    SampledValueCount = 43,
+    QueriedValueCount = 44,
+    TracePathCount = 45,
+    RawQueryCount = 46,
+    FriLayerCount = 47,
     LastLayerCoefficientCount = 48,
-    MaxMerkleDepth = 49,
-    TableLogSizes = 50,
+    TableLogSizes = 49,
+    TreeHeights = 50,
+    FriLayerFoldWidths = 51,
+    FriLayerTreeHeights = 52,
 }
 
 impl CanonicalTag {
@@ -125,6 +144,8 @@ impl CanonicalWords for PcsParameters {
     fn append_canonical_words(&self, output: &mut Vec<M31Word>) {
         output.extend([
             CanonicalTag::Pcs.word(),
+            CanonicalTag::InteractionPowBits.word(),
+            self.interaction_pow_bits,
             CanonicalTag::PowBits.word(),
             self.pow_bits,
             CanonicalTag::FriLogBlowupFactor.word(),
@@ -146,41 +167,60 @@ impl CanonicalWords for PcsParameters {
     }
 }
 
-impl<const N_TABLES: usize> CanonicalWords for FixedProofShape<N_TABLES> {
+impl<const N_TABLES: usize, const N_TREES: usize, const N_FRI_LAYERS: usize> CanonicalWords
+    for FixedProofShape<N_TABLES, N_TREES, N_FRI_LAYERS>
+{
     fn append_canonical_words(&self, output: &mut Vec<M31Word>) {
-        let table_count = u32::try_from(N_TABLES)
-            .ok()
-            .and_then(|count| M31Word::try_from(count).ok())
-            .expect("a Rust array length used by the protocol fits in M31");
+        let table_count = array_len_word::<N_TABLES>();
+        let tree_count = array_len_word::<N_TREES>();
+        let fri_layer_count = array_len_word::<N_FRI_LAYERS>();
         output.extend([
             CanonicalTag::ProofShape.word(),
             CanonicalTag::CommitmentCount.word(),
-            self.commitment_count,
+            tree_count,
+            CanonicalTag::ClaimedSumCount.word(),
+            self.claimed_sum_count,
             CanonicalTag::SampledValueCount.word(),
             self.sampled_value_count,
             CanonicalTag::QueriedValueCount.word(),
             self.queried_value_count,
-            CanonicalTag::TraceOpeningCount.word(),
-            self.trace_opening_count,
+            CanonicalTag::TracePathCount.word(),
+            self.trace_path_count,
+            CanonicalTag::RawQueryCount.word(),
+            self.raw_query_count,
             CanonicalTag::FriLayerCount.word(),
-            self.fri_layer_count,
-            CanonicalTag::FriFoldWidth.word(),
-            self.fri_fold_width,
-            CanonicalTag::FriOpeningCount.word(),
-            self.fri_opening_count,
+            fri_layer_count,
             CanonicalTag::LastLayerCoefficientCount.word(),
             self.last_layer_coefficient_count,
-            CanonicalTag::MaxMerkleDepth.word(),
-            self.max_merkle_depth,
             CanonicalTag::TableLogSizes.word(),
             table_count,
         ]);
         output.extend(self.table_log_sizes);
+        output.extend([CanonicalTag::TreeHeights.word(), tree_count]);
+        output.extend(self.tree_heights);
+        output.extend([CanonicalTag::FriLayerFoldWidths.word(), fri_layer_count]);
+        output.extend(self.fri_layer_fold_widths);
+        output.extend([CanonicalTag::FriLayerTreeHeights.word(), fri_layer_count]);
+        output.extend(self.fri_layer_tree_heights);
     }
 }
 
-impl<const VM_TABLES: usize, const RECURSION_TABLES: usize> CanonicalWords
-    for ProtocolManifest<VM_TABLES, RECURSION_TABLES>
+impl<
+    const VM_TABLES: usize,
+    const VM_TREES: usize,
+    const VM_FRI_LAYERS: usize,
+    const RECURSION_TABLES: usize,
+    const RECURSION_TREES: usize,
+    const RECURSION_FRI_LAYERS: usize,
+> CanonicalWords
+    for ProtocolManifest<
+        VM_TABLES,
+        VM_TREES,
+        VM_FRI_LAYERS,
+        RECURSION_TABLES,
+        RECURSION_TREES,
+        RECURSION_FRI_LAYERS,
+    >
 {
     fn append_canonical_words(&self, output: &mut Vec<M31Word>) {
         output.extend([
@@ -229,6 +269,13 @@ fn append_digest(output: &mut Vec<M31Word>, tag: CanonicalTag, digest: &[M31Word
     output.extend_from_slice(digest);
 }
 
+fn array_len_word<const N: usize>() -> M31Word {
+    u32::try_from(N)
+        .ok()
+        .and_then(|count| M31Word::try_from(count).ok())
+        .expect("a Rust array length used by the protocol fits in M31")
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
@@ -237,7 +284,7 @@ mod tests {
 
     use super::*;
 
-    type TestManifest = ProtocolManifest<2, 2>;
+    type TestManifest = ProtocolManifest<2, 2, 2, 2, 2, 2>;
 
     #[derive(Clone, Copy, Debug)]
     enum ManifestField {
@@ -247,38 +294,40 @@ mod tests {
         RecursionPreprocessing,
         VmAirProgram,
         RecursionAirProgram,
+        VmInteractionPowBits,
         VmPowBits,
         VmFriLogBlowupFactor,
         VmFriNQueries,
         VmFriLogLastLayerDegreeBound,
         VmFriFoldStep,
         VmLiftingLogSize,
+        RecursionInteractionPowBits,
         RecursionPowBits,
         RecursionFriLogBlowupFactor,
         RecursionFriNQueries,
         RecursionFriLogLastLayerDegreeBound,
         RecursionFriFoldStep,
         RecursionLiftingLogSize,
-        VmCommitmentCount,
+        VmClaimedSumCount,
         VmSampledValueCount,
         VmQueriedValueCount,
-        VmTraceOpeningCount,
-        VmFriLayerCount,
-        VmFriFoldWidth,
-        VmFriOpeningCount,
+        VmTracePathCount,
+        VmRawQueryCount,
         VmLastLayerCoefficientCount,
-        VmMaxMerkleDepth,
         VmTableLogSizes,
-        RecursionCommitmentCount,
+        VmTreeHeights,
+        VmFriLayerFoldWidths,
+        VmFriLayerTreeHeights,
+        RecursionClaimedSumCount,
         RecursionSampledValueCount,
         RecursionQueriedValueCount,
-        RecursionTraceOpeningCount,
-        RecursionFriLayerCount,
-        RecursionFriFoldWidth,
-        RecursionFriOpeningCount,
+        RecursionTracePathCount,
+        RecursionRawQueryCount,
         RecursionLastLayerCoefficientCount,
-        RecursionMaxMerkleDepth,
         RecursionTableLogSizes,
+        RecursionTreeHeights,
+        RecursionFriLayerFoldWidths,
+        RecursionFriLayerTreeHeights,
     }
 
     fn word(value: u16) -> M31Word {
@@ -300,27 +349,28 @@ mod tests {
 
     fn pcs(seed: u16) -> PcsParameters {
         PcsParameters {
-            pow_bits: word(seed),
-            fri_log_blowup_factor: word(seed + 1),
-            fri_n_queries: word(seed + 2),
-            fri_log_last_layer_degree_bound: word(seed + 3),
-            fri_fold_step: word(seed + 4),
-            lifting_log_size: OptionalM31Word::Some(word(seed + 5)),
+            interaction_pow_bits: word(seed),
+            pow_bits: word(seed + 1),
+            fri_log_blowup_factor: word(seed + 2),
+            fri_n_queries: word(seed + 3),
+            fri_log_last_layer_degree_bound: word(seed + 4),
+            fri_fold_step: word(seed + 5),
+            lifting_log_size: OptionalM31Word::Some(word(seed + 6)),
         }
     }
 
-    fn shape(seed: u16) -> FixedProofShape<2> {
+    fn shape(seed: u16) -> FixedProofShape<2, 2, 2> {
         FixedProofShape {
-            commitment_count: word(seed),
+            claimed_sum_count: word(seed),
             sampled_value_count: word(seed + 1),
             queried_value_count: word(seed + 2),
-            trace_opening_count: word(seed + 3),
-            fri_layer_count: word(seed + 4),
-            fri_fold_width: word(seed + 5),
-            fri_opening_count: word(seed + 6),
-            last_layer_coefficient_count: word(seed + 7),
-            max_merkle_depth: word(seed + 8),
-            table_log_sizes: [word(seed + 9), word(seed + 10)],
+            trace_path_count: word(seed + 3),
+            raw_query_count: word(seed + 4),
+            last_layer_coefficient_count: word(seed + 5),
+            table_log_sizes: [word(seed + 6), word(seed + 7)],
+            tree_heights: [word(seed + 8), word(seed + 9)],
+            fri_layer_fold_widths: [word(seed + 10), word(seed + 11)],
+            fri_layer_tree_heights: [word(seed + 12), word(seed + 13)],
         }
     }
 
@@ -372,6 +422,9 @@ mod tests {
                     value.recursion_air_program.into_digest(),
                 ));
             }
+            ManifestField::VmInteractionPowBits => {
+                value.vm_pcs.interaction_pow_bits = word(500);
+            }
             ManifestField::VmPowBits => value.vm_pcs.pow_bits = word(500),
             ManifestField::VmFriLogBlowupFactor => {
                 value.vm_pcs.fri_log_blowup_factor = word(500);
@@ -383,6 +436,9 @@ mod tests {
             ManifestField::VmFriFoldStep => value.vm_pcs.fri_fold_step = word(500),
             ManifestField::VmLiftingLogSize => {
                 value.vm_pcs.lifting_log_size = OptionalM31Word::None;
+            }
+            ManifestField::RecursionInteractionPowBits => {
+                value.recursion_pcs.interaction_pow_bits = word(500);
             }
             ManifestField::RecursionPowBits => value.recursion_pcs.pow_bits = word(500),
             ManifestField::RecursionFriLogBlowupFactor => {
@@ -400,8 +456,8 @@ mod tests {
             ManifestField::RecursionLiftingLogSize => {
                 value.recursion_pcs.lifting_log_size = OptionalM31Word::None;
             }
-            ManifestField::VmCommitmentCount => {
-                value.vm_proof_shape.commitment_count = word(500);
+            ManifestField::VmClaimedSumCount => {
+                value.vm_proof_shape.claimed_sum_count = word(500);
             }
             ManifestField::VmSampledValueCount => {
                 value.vm_proof_shape.sampled_value_count = word(500);
@@ -409,29 +465,29 @@ mod tests {
             ManifestField::VmQueriedValueCount => {
                 value.vm_proof_shape.queried_value_count = word(500);
             }
-            ManifestField::VmTraceOpeningCount => {
-                value.vm_proof_shape.trace_opening_count = word(500);
+            ManifestField::VmTracePathCount => {
+                value.vm_proof_shape.trace_path_count = word(500);
             }
-            ManifestField::VmFriLayerCount => {
-                value.vm_proof_shape.fri_layer_count = word(500);
-            }
-            ManifestField::VmFriFoldWidth => {
-                value.vm_proof_shape.fri_fold_width = word(500);
-            }
-            ManifestField::VmFriOpeningCount => {
-                value.vm_proof_shape.fri_opening_count = word(500);
+            ManifestField::VmRawQueryCount => {
+                value.vm_proof_shape.raw_query_count = word(500);
             }
             ManifestField::VmLastLayerCoefficientCount => {
                 value.vm_proof_shape.last_layer_coefficient_count = word(500);
             }
-            ManifestField::VmMaxMerkleDepth => {
-                value.vm_proof_shape.max_merkle_depth = word(500);
-            }
             ManifestField::VmTableLogSizes => {
                 value.vm_proof_shape.table_log_sizes[0] = word(500);
             }
-            ManifestField::RecursionCommitmentCount => {
-                value.recursion_proof_shape.commitment_count = word(500);
+            ManifestField::VmTreeHeights => {
+                value.vm_proof_shape.tree_heights[0] = word(500);
+            }
+            ManifestField::VmFriLayerFoldWidths => {
+                value.vm_proof_shape.fri_layer_fold_widths[0] = word(500);
+            }
+            ManifestField::VmFriLayerTreeHeights => {
+                value.vm_proof_shape.fri_layer_tree_heights[0] = word(500);
+            }
+            ManifestField::RecursionClaimedSumCount => {
+                value.recursion_proof_shape.claimed_sum_count = word(500);
             }
             ManifestField::RecursionSampledValueCount => {
                 value.recursion_proof_shape.sampled_value_count = word(500);
@@ -439,26 +495,26 @@ mod tests {
             ManifestField::RecursionQueriedValueCount => {
                 value.recursion_proof_shape.queried_value_count = word(500);
             }
-            ManifestField::RecursionTraceOpeningCount => {
-                value.recursion_proof_shape.trace_opening_count = word(500);
+            ManifestField::RecursionTracePathCount => {
+                value.recursion_proof_shape.trace_path_count = word(500);
             }
-            ManifestField::RecursionFriLayerCount => {
-                value.recursion_proof_shape.fri_layer_count = word(500);
-            }
-            ManifestField::RecursionFriFoldWidth => {
-                value.recursion_proof_shape.fri_fold_width = word(500);
-            }
-            ManifestField::RecursionFriOpeningCount => {
-                value.recursion_proof_shape.fri_opening_count = word(500);
+            ManifestField::RecursionRawQueryCount => {
+                value.recursion_proof_shape.raw_query_count = word(500);
             }
             ManifestField::RecursionLastLayerCoefficientCount => {
                 value.recursion_proof_shape.last_layer_coefficient_count = word(500);
             }
-            ManifestField::RecursionMaxMerkleDepth => {
-                value.recursion_proof_shape.max_merkle_depth = word(500);
-            }
             ManifestField::RecursionTableLogSizes => {
                 value.recursion_proof_shape.table_log_sizes[0] = word(500);
+            }
+            ManifestField::RecursionTreeHeights => {
+                value.recursion_proof_shape.tree_heights[0] = word(500);
+            }
+            ManifestField::RecursionFriLayerFoldWidths => {
+                value.recursion_proof_shape.fri_layer_fold_widths[0] = word(500);
+            }
+            ManifestField::RecursionFriLayerTreeHeights => {
+                value.recursion_proof_shape.fri_layer_tree_heights[0] = word(500);
             }
         }
         value
@@ -493,12 +549,14 @@ mod tests {
     #[case::recursion_preprocessing(ManifestField::RecursionPreprocessing)]
     #[case::vm_air_program(ManifestField::VmAirProgram)]
     #[case::recursion_air_program(ManifestField::RecursionAirProgram)]
+    #[case::vm_interaction_pow_bits(ManifestField::VmInteractionPowBits)]
     #[case::vm_pow_bits(ManifestField::VmPowBits)]
     #[case::vm_fri_log_blowup_factor(ManifestField::VmFriLogBlowupFactor)]
     #[case::vm_fri_n_queries(ManifestField::VmFriNQueries)]
     #[case::vm_fri_log_last_layer_degree_bound(ManifestField::VmFriLogLastLayerDegreeBound)]
     #[case::vm_fri_fold_step(ManifestField::VmFriFoldStep)]
     #[case::vm_lifting_log_size(ManifestField::VmLiftingLogSize)]
+    #[case::recursion_interaction_pow_bits(ManifestField::RecursionInteractionPowBits)]
     #[case::recursion_pow_bits(ManifestField::RecursionPowBits)]
     #[case::recursion_fri_log_blowup_factor(ManifestField::RecursionFriLogBlowupFactor)]
     #[case::recursion_fri_n_queries(ManifestField::RecursionFriNQueries)]
@@ -507,28 +565,28 @@ mod tests {
     )]
     #[case::recursion_fri_fold_step(ManifestField::RecursionFriFoldStep)]
     #[case::recursion_lifting_log_size(ManifestField::RecursionLiftingLogSize)]
-    #[case::vm_commitment_count(ManifestField::VmCommitmentCount)]
+    #[case::vm_claimed_sum_count(ManifestField::VmClaimedSumCount)]
     #[case::vm_sampled_value_count(ManifestField::VmSampledValueCount)]
     #[case::vm_queried_value_count(ManifestField::VmQueriedValueCount)]
-    #[case::vm_trace_opening_count(ManifestField::VmTraceOpeningCount)]
-    #[case::vm_fri_layer_count(ManifestField::VmFriLayerCount)]
-    #[case::vm_fri_fold_width(ManifestField::VmFriFoldWidth)]
-    #[case::vm_fri_opening_count(ManifestField::VmFriOpeningCount)]
+    #[case::vm_trace_path_count(ManifestField::VmTracePathCount)]
+    #[case::vm_raw_query_count(ManifestField::VmRawQueryCount)]
     #[case::vm_last_layer_coefficient_count(ManifestField::VmLastLayerCoefficientCount)]
-    #[case::vm_max_merkle_depth(ManifestField::VmMaxMerkleDepth)]
     #[case::vm_table_log_sizes(ManifestField::VmTableLogSizes)]
-    #[case::recursion_commitment_count(ManifestField::RecursionCommitmentCount)]
+    #[case::vm_tree_heights(ManifestField::VmTreeHeights)]
+    #[case::vm_fri_layer_fold_widths(ManifestField::VmFriLayerFoldWidths)]
+    #[case::vm_fri_layer_tree_heights(ManifestField::VmFriLayerTreeHeights)]
+    #[case::recursion_claimed_sum_count(ManifestField::RecursionClaimedSumCount)]
     #[case::recursion_sampled_value_count(ManifestField::RecursionSampledValueCount)]
     #[case::recursion_queried_value_count(ManifestField::RecursionQueriedValueCount)]
-    #[case::recursion_trace_opening_count(ManifestField::RecursionTraceOpeningCount)]
-    #[case::recursion_fri_layer_count(ManifestField::RecursionFriLayerCount)]
-    #[case::recursion_fri_fold_width(ManifestField::RecursionFriFoldWidth)]
-    #[case::recursion_fri_opening_count(ManifestField::RecursionFriOpeningCount)]
+    #[case::recursion_trace_path_count(ManifestField::RecursionTracePathCount)]
+    #[case::recursion_raw_query_count(ManifestField::RecursionRawQueryCount)]
     #[case::recursion_last_layer_coefficient_count(
         ManifestField::RecursionLastLayerCoefficientCount
     )]
-    #[case::recursion_max_merkle_depth(ManifestField::RecursionMaxMerkleDepth)]
     #[case::recursion_table_log_sizes(ManifestField::RecursionTableLogSizes)]
+    #[case::recursion_tree_heights(ManifestField::RecursionTreeHeights)]
+    #[case::recursion_fri_layer_fold_widths(ManifestField::RecursionFriLayerFoldWidths)]
+    #[case::recursion_fri_layer_tree_heights(ManifestField::RecursionFriLayerTreeHeights)]
     fn every_manifest_field_changes_the_canonical_encoding(#[case] field: ManifestField) {
         let baseline = manifest();
         let changed = change_manifest_field(baseline, field);

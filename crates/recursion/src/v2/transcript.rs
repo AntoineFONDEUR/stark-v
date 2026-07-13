@@ -35,6 +35,35 @@ pub struct PoseidonCall {
     pub output: [M31Word; T],
 }
 
+/// Why one independent sponge session is executed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum HashPurpose {
+    /// Updates the persistent transcript digest with new words.
+    Mix = 1,
+    /// Derives randomness without updating the persistent digest.
+    Draw = 2,
+}
+
+/// One complete sponge session and its exact word stream before padding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HashFrame {
+    pub hash_id: u32,
+    pub first_call_id: u32,
+    pub call_count: u32,
+    pub purpose: HashPurpose,
+    pub words: Vec<M31Word>,
+    pub output: [M31Word; T],
+}
+
+impl HashFrame {
+    pub fn final_call_id(&self) -> Option<u32> {
+        self.call_count
+            .checked_sub(1)
+            .and_then(|offset| self.first_call_id.checked_add(offset))
+    }
+}
+
 /// One nonce check against a transcript-derived M31 word.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PowCheck {
@@ -55,6 +84,8 @@ pub trait TranscriptBackend {
     ) -> Result<[M31Word; T], Self::Error>;
 
     fn verify_pow(&mut self, check: PowCheck) -> Result<(), Self::Error>;
+
+    fn record_hash(&mut self, frame: HashFrame) -> Result<(), Self::Error>;
 }
 
 /// Native Poseidon2 execution and PoW checking for the outer verifier.
@@ -83,12 +114,17 @@ impl TranscriptBackend for NativeTranscriptBackend {
             })
         }
     }
+
+    fn record_hash(&mut self, _frame: HashFrame) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 /// Witness events produced by the AIR-facing transcript backend.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TranscriptTrace {
     pub poseidon_calls: Vec<PoseidonCall>,
+    pub hash_frames: Vec<HashFrame>,
     pub pow_checks: Vec<PowCheck>,
 }
 
@@ -168,6 +204,8 @@ impl TranscriptTrace {
                 .ok_or(TranscriptError::HashStepOverflow)?;
         }
 
+        self.validate_hash_frames(&rows)?;
+
         for check in &self.pow_checks {
             let call = self.poseidon_calls.get(check.call_id as usize).ok_or(
                 TranscriptError::PowDrawCallMissing {
@@ -181,8 +219,110 @@ impl TranscriptTrace {
                     actual: check.word,
                 });
             }
+            let is_final_draw_call = self.hash_frames.iter().any(|frame| {
+                frame.purpose == HashPurpose::Draw && frame.final_call_id() == Some(check.call_id)
+            });
+            if !is_final_draw_call {
+                return Err(TranscriptError::PowDrawFrameMissing {
+                    call_id: check.call_id,
+                });
+            }
         }
         Ok(rows)
+    }
+
+    fn validate_hash_frames(&self, rows: &[SpongeRow]) -> Result<(), TranscriptError> {
+        let mut first_call = 0_usize;
+        for (frame_index, frame) in self.hash_frames.iter().enumerate() {
+            let expected_hash_id = u32::try_from(frame_index)
+                .map_err(|_| TranscriptError::TraceIndexOutOfRange { index: frame_index })?;
+            if frame.hash_id != expected_hash_id {
+                return Err(TranscriptError::TraceFrameHashIdMismatch {
+                    index: frame_index,
+                    expected: expected_hash_id,
+                    actual: frame.hash_id,
+                });
+            }
+            let expected_first_call = u32::try_from(first_call)
+                .map_err(|_| TranscriptError::TraceIndexOutOfRange { index: first_call })?;
+            if frame.first_call_id != expected_first_call {
+                return Err(TranscriptError::TraceFrameFirstCallMismatch {
+                    hash_id: frame.hash_id,
+                    expected: expected_first_call,
+                    actual: frame.first_call_id,
+                });
+            }
+
+            let chunks = hash_chunks(&frame.words);
+            let expected_call_count =
+                u32::try_from(chunks.len()).map_err(|_| TranscriptError::TraceIndexOutOfRange {
+                    index: chunks.len(),
+                })?;
+            if frame.call_count != expected_call_count {
+                return Err(TranscriptError::TraceFrameCallCountMismatch {
+                    hash_id: frame.hash_id,
+                    expected: expected_call_count,
+                    actual: frame.call_count,
+                });
+            }
+            for (step, expected_chunk) in chunks.iter().enumerate() {
+                let row_index = first_call
+                    .checked_add(step)
+                    .ok_or(TranscriptError::TraceIndexOutOfRange { index: usize::MAX })?;
+                let row =
+                    rows.get(row_index)
+                        .ok_or(TranscriptError::TraceFrameCoverageMismatch {
+                            expected: rows.len(),
+                            actual: row_index + 1,
+                        })?;
+                for (word, (&actual, &expected)) in row.chunk.iter().zip(expected_chunk).enumerate()
+                {
+                    if actual != expected {
+                        return Err(TranscriptError::TraceFrameChunkMismatch {
+                            hash_id: frame.hash_id,
+                            step,
+                            word,
+                            expected,
+                            actual,
+                        });
+                    }
+                }
+            }
+            let frame_end = first_call
+                .checked_add(chunks.len())
+                .ok_or(TranscriptError::TraceIndexOutOfRange { index: usize::MAX })?;
+            let final_row_index = frame_end
+                .checked_sub(1)
+                .expect("hash padding always creates at least one chunk");
+            let final_row =
+                rows.get(final_row_index)
+                    .ok_or(TranscriptError::TraceFrameCoverageMismatch {
+                        expected: rows.len(),
+                        actual: frame_end,
+                    })?;
+            if frame.output != final_row.output {
+                return Err(TranscriptError::TraceFrameOutputMismatch {
+                    hash_id: frame.hash_id,
+                });
+            }
+            if frame.purpose == HashPurpose::Draw
+                && (frame.words.len() != RATE + 2
+                    || frame.words.get(RATE + 1).copied()
+                        != Some(M31Word::try_from(DRAW_TAG).expect("draw tag is canonical M31")))
+            {
+                return Err(TranscriptError::TraceDrawFrameMismatch {
+                    hash_id: frame.hash_id,
+                });
+            }
+            first_call = frame_end;
+        }
+        if first_call != rows.len() {
+            return Err(TranscriptError::TraceFrameCoverageMismatch {
+                expected: rows.len(),
+                actual: first_call,
+            });
+        }
+        Ok(())
     }
 
     /// Materializes the checked sessions through the atomic sponge/Poseidon AIR tables.
@@ -269,6 +409,11 @@ impl TranscriptBackend for RecordingTranscriptBackend {
             })
         }
     }
+
+    fn record_hash(&mut self, frame: HashFrame) -> Result<(), Self::Error> {
+        self.trace.hash_frames.push(frame);
+        Ok(())
+    }
 }
 
 /// One transcript state parameterized only by how operations are enforced.
@@ -328,7 +473,7 @@ where
         let mut stream = Vec::with_capacity(RATE + words.len());
         stream.extend_from_slice(self.digest.words());
         stream.extend_from_slice(words);
-        let output = self.hash_stream(&stream)?;
+        let output = self.hash_stream(&stream, HashPurpose::Mix)?;
         self.digest = Digest8::new(output[..RATE].try_into().expect("rate-sized digest"));
         self.n_draws = 0;
         Ok(())
@@ -371,7 +516,7 @@ where
         let mut stream = Vec::with_capacity(RATE + 2);
         stream.extend_from_slice(self.digest.words());
         stream.extend([draw_count, draw_tag]);
-        let output = self.hash_stream(&stream)?;
+        let output = self.hash_stream(&stream, HashPurpose::Draw)?;
         self.n_draws = self
             .n_draws
             .checked_add(1)
@@ -439,33 +584,40 @@ where
         Ok(())
     }
 
-    fn hash_stream(&mut self, words: &[M31Word]) -> Result<[M31Word; T], B::Error> {
+    fn hash_stream(
+        &mut self,
+        words: &[M31Word],
+        purpose: HashPurpose,
+    ) -> Result<[M31Word; T], B::Error> {
         let hash_id = self.next_hash_id;
+        let first_call_id = self.next_call_id;
         self.next_hash_id = self
             .next_hash_id
             .checked_add(1)
             .ok_or(TranscriptError::HashIdOverflow)?;
         let mut state = [M31Word::ZERO; T];
-        let mut filled = 0;
         let mut step = 0_u32;
-        for word in words
-            .iter()
-            .copied()
-            .chain(core::iter::once(M31Word::from(1)))
-        {
-            state[filled] = add_m31_words(state[filled], word);
-            filled += 1;
-            if filled == RATE {
-                state = self.permute(hash_id, step, state)?;
-                step = step
-                    .checked_add(1)
-                    .ok_or(TranscriptError::HashStepOverflow)?;
-                filled = 0;
+        for chunk in hash_chunks(words) {
+            for (slot, word) in state.iter_mut().zip(chunk) {
+                *slot = add_m31_words(*slot, word);
             }
-        }
-        if filled != 0 {
             state = self.permute(hash_id, step, state)?;
+            step = step
+                .checked_add(1)
+                .ok_or(TranscriptError::HashStepOverflow)?;
         }
+        let call_count = self
+            .next_call_id
+            .checked_sub(first_call_id)
+            .expect("call ids increase monotonically within one hash");
+        self.backend.record_hash(HashFrame {
+            hash_id,
+            first_call_id,
+            call_count,
+            purpose,
+            words: words.to_vec(),
+            output: state,
+        })?;
         Ok(state)
     }
 
@@ -489,6 +641,29 @@ where
             input,
         )
     }
+}
+
+fn hash_chunks(words: &[M31Word]) -> Vec<[M31Word; RATE]> {
+    let mut chunks = Vec::new();
+    let mut chunk = [M31Word::ZERO; RATE];
+    let mut filled = 0;
+    for word in words
+        .iter()
+        .copied()
+        .chain(core::iter::once(M31Word::from(1)))
+    {
+        chunk[filled] = word;
+        filled += 1;
+        if filled == RATE {
+            chunks.push(chunk);
+            chunk = [M31Word::ZERO; RATE];
+            filled = 0;
+        }
+    }
+    if filled != 0 {
+        chunks.push(chunk);
+    }
+    chunks
 }
 
 fn add_m31_words(left: M31Word, right: M31Word) -> M31Word {
@@ -549,7 +724,42 @@ pub enum TranscriptError {
         expected: M31Word,
         actual: M31Word,
     },
+    TraceFrameHashIdMismatch {
+        index: usize,
+        expected: u32,
+        actual: u32,
+    },
+    TraceFrameFirstCallMismatch {
+        hash_id: u32,
+        expected: u32,
+        actual: u32,
+    },
+    TraceFrameCallCountMismatch {
+        hash_id: u32,
+        expected: u32,
+        actual: u32,
+    },
+    TraceFrameChunkMismatch {
+        hash_id: u32,
+        step: usize,
+        word: usize,
+        expected: M31Word,
+        actual: M31Word,
+    },
+    TraceFrameOutputMismatch {
+        hash_id: u32,
+    },
+    TraceDrawFrameMismatch {
+        hash_id: u32,
+    },
+    TraceFrameCoverageMismatch {
+        expected: usize,
+        actual: usize,
+    },
     PowDrawCallMissing {
+        call_id: u32,
+    },
+    PowDrawFrameMissing {
         call_id: u32,
     },
     PowDrawWordMismatch {
@@ -623,9 +833,61 @@ impl fmt::Display for TranscriptError {
                 actual.as_u32(),
                 expected.as_u32()
             ),
+            Self::TraceFrameHashIdMismatch {
+                index,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "transcript hash frame at index {index} has id {actual}, expected {expected}"
+            ),
+            Self::TraceFrameFirstCallMismatch {
+                hash_id,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "transcript hash frame {hash_id} starts at call {actual}, expected {expected}"
+            ),
+            Self::TraceFrameCallCountMismatch {
+                hash_id,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "transcript hash frame {hash_id} has {actual} calls, expected {expected}"
+            ),
+            Self::TraceFrameChunkMismatch {
+                hash_id,
+                step,
+                word,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "transcript hash frame {hash_id} step {step} word {word} is {}, expected {}",
+                actual.as_u32(),
+                expected.as_u32()
+            ),
+            Self::TraceFrameOutputMismatch { hash_id } => write!(
+                formatter,
+                "transcript hash frame {hash_id} output does not match its final call"
+            ),
+            Self::TraceDrawFrameMismatch { hash_id } => write!(
+                formatter,
+                "transcript draw frame {hash_id} does not use the fixed digest-counter-tag stream"
+            ),
+            Self::TraceFrameCoverageMismatch { expected, actual } => write!(
+                formatter,
+                "transcript hash frames cover {actual} calls, expected {expected}"
+            ),
             Self::PowDrawCallMissing { call_id } => {
                 write!(formatter, "PoW check references missing call {call_id}")
             }
+            Self::PowDrawFrameMissing { call_id } => write!(
+                formatter,
+                "PoW check references call {call_id}, which is not the final call of a draw frame"
+            ),
             Self::PowDrawWordMismatch {
                 call_id,
                 expected,
@@ -882,6 +1144,98 @@ mod tests {
                 .map(|row| (row.id.hash_id, row.id.step))
                 .collect::<Vec<_>>()),
             Ok(vec![(0, 0), (0, 1), (0, 2), (1, 0), (1, 1)])
+        );
+    }
+
+    #[rstest]
+    fn recorded_hash_frames_bind_purpose_stream_and_call_range() {
+        let mut kernel = TranscriptKernel::<RecordingTranscriptBackend>::default();
+        kernel
+            .absorb_u32s(&[1])
+            .expect("the fixture word is accepted");
+        kernel.draw_block().expect("the draw succeeds");
+        let trace = kernel.into_backend().into_trace();
+        assert_eq!(
+            trace
+                .hash_frames
+                .iter()
+                .map(|frame| (
+                    frame.hash_id,
+                    frame.purpose,
+                    frame.first_call_id,
+                    frame.call_count,
+                    frame.words.len(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, HashPurpose::Mix, 0, 2, 10),
+                (1, HashPurpose::Draw, 2, 2, 10),
+            ]
+        );
+    }
+
+    #[rstest]
+    fn corrupted_hash_frame_stream_is_rejected_before_air_materialization() {
+        let mut kernel = TranscriptKernel::<RecordingTranscriptBackend>::default();
+        kernel
+            .absorb_u32s(&[1])
+            .expect("the fixture word is accepted");
+        let mut trace = kernel.into_backend().into_trace();
+        trace.hash_frames[0].words[8] =
+            add_m31_words(trace.hash_frames[0].words[8], M31Word::from(1));
+        assert!(matches!(
+            trace.sponge_rows(),
+            Err(TranscriptError::TraceFrameChunkMismatch {
+                hash_id: 0,
+                step: 1,
+                word: 0,
+                ..
+            })
+        ));
+    }
+
+    #[rstest]
+    fn unframed_poseidon_call_is_rejected_before_air_materialization() {
+        let mut kernel = TranscriptKernel::<RecordingTranscriptBackend>::default();
+        kernel
+            .absorb_u32s(&[1])
+            .expect("the fixture word is accepted");
+        let mut trace = kernel.into_backend().into_trace();
+        trace.hash_frames.clear();
+        assert_eq!(
+            trace.sponge_rows(),
+            Err(TranscriptError::TraceFrameCoverageMismatch {
+                expected: 2,
+                actual: 0,
+            })
+        );
+    }
+
+    #[rstest]
+    fn pow_check_must_reference_the_final_call_of_a_draw_frame() {
+        let mut reference = Poseidon2M31Channel::default();
+        reference.mix_u32s(&[1, 2, 3]);
+        let nonce = <SimdBackend as GrindOps<Poseidon2M31Channel>>::grind(&reference, 8);
+        let mut kernel = TranscriptKernel::<RecordingTranscriptBackend>::default();
+        kernel
+            .absorb_u32s(&[1, 2, 3])
+            .expect("the fixture words are accepted");
+        kernel
+            .verify_and_absorb_pow(nonce, 8)
+            .expect("the generated nonce satisfies the fixture challenge");
+        let mut trace = kernel.into_backend().into_trace();
+        let draw_frame = trace
+            .hash_frames
+            .last()
+            .expect("PoW ends with a draw frame");
+        trace.pow_checks[0].call_id = draw_frame.first_call_id;
+        trace.pow_checks[0].word =
+            trace.poseidon_calls[draw_frame.first_call_id as usize].output[0];
+        assert_eq!(
+            trace.sponge_rows(),
+            Err(TranscriptError::PowDrawFrameMissing {
+                call_id: draw_frame.first_call_id,
+            })
         );
     }
 

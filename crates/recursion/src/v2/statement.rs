@@ -8,10 +8,24 @@
 use core::fmt;
 use core::num::{NonZeroU32, NonZeroU64};
 
-use air::digest::{IoDigest, MemoryDigest, ProgramDigest, ProtocolId};
+use air::digest::{Digest8, IoDigest, M31Word, MemoryDigest, ProgramDigest, ProtocolId};
+
+use super::protocol::{CanonicalTag, CanonicalWords};
 
 const MAX_SLOT_HEIGHT: u8 = 32;
 const SLOT_BOUND: u64 = 1_u64 << MAX_SLOT_HEIGHT;
+
+pub const MACHINE_STATE_CANONICAL_WORDS: usize = 1 + 2 + 32 * 2 + 8 + 8;
+pub const COMPLETE_EXECUTION_CANONICAL_WORDS: usize =
+    1 + 8 + 8 + 2 * MACHINE_STATE_CANONICAL_WORDS + 8 + 8 + 4;
+pub const JOB_CONTEXT_CANONICAL_WORDS: usize = 1 + COMPLETE_EXECUTION_CANONICAL_WORDS + 2 + 1;
+pub const SLOT_SPAN_CANONICAL_WORDS: usize = 1 + 4 + 1;
+pub const EDGE_CLAIM_CANONICAL_WORDS: usize = 1 + 8;
+pub const EXECUTED_SPAN_CANONICAL_WORDS: usize =
+    1 + 2 + 2 + 4 + 4 + 2 * MACHINE_STATE_CANONICAL_WORDS + 2 * EDGE_CLAIM_CANONICAL_WORDS;
+pub const SPAN_BODY_CANONICAL_WORDS: usize = 1 + EXECUTED_SPAN_CANONICAL_WORDS;
+pub const SPAN_STATEMENT_CANONICAL_WORDS: usize =
+    1 + JOB_CONTEXT_CANONICAL_WORDS + SLOT_SPAN_CANONICAL_WORDS + SPAN_BODY_CANONICAL_WORDS;
 
 /// Complete machine state at one segment boundary.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -583,6 +597,121 @@ fn fold_executed(left: ExecutedSpan, right: ExecutedSpan) -> Result<ExecutedSpan
     )
 }
 
+fn append_raw_u32(output: &mut Vec<M31Word>, value: u32) {
+    output.extend([
+        M31Word::from((value & 0xffff) as u16),
+        M31Word::from((value >> 16) as u16),
+    ]);
+}
+
+fn append_raw_u64(output: &mut Vec<M31Word>, value: u64) {
+    output.extend([
+        M31Word::from((value & 0xffff) as u16),
+        M31Word::from(((value >> 16) & 0xffff) as u16),
+        M31Word::from(((value >> 32) & 0xffff) as u16),
+        M31Word::from((value >> 48) as u16),
+    ]);
+}
+
+fn append_digest(output: &mut Vec<M31Word>, digest: Digest8) {
+    output.extend(digest.into_words());
+}
+
+impl CanonicalWords for MachineState {
+    fn append_canonical_words(&self, output: &mut Vec<M31Word>) {
+        output.push(CanonicalTag::MachineState.word());
+        append_raw_u32(output, self.pc);
+        for register in self.registers {
+            append_raw_u32(output, register);
+        }
+        append_digest(output, self.rw_memory.into_digest());
+        append_digest(output, self.public_io_state.into_digest());
+    }
+}
+
+impl CanonicalWords for CompleteExecutionStatement {
+    fn append_canonical_words(&self, output: &mut Vec<M31Word>) {
+        output.push(CanonicalTag::CompleteExecution.word());
+        append_digest(output, self.protocol.into_digest());
+        append_digest(output, self.program.into_digest());
+        self.initial_state.append_canonical_words(output);
+        self.final_state.append_canonical_words(output);
+        append_digest(output, self.public_input.into_digest());
+        append_digest(output, self.public_output.into_digest());
+        append_raw_u64(output, self.total_cycles.get());
+    }
+}
+
+impl CanonicalWords for JobContext {
+    fn append_canonical_words(&self, output: &mut Vec<M31Word>) {
+        output.push(CanonicalTag::JobContext.word());
+        self.complete.append_canonical_words(output);
+        append_raw_u32(output, self.segment_count.get());
+        output.push(M31Word::from(self.slot_height as u16));
+    }
+}
+
+impl CanonicalWords for SlotSpan {
+    fn append_canonical_words(&self, output: &mut Vec<M31Word>) {
+        output.push(CanonicalTag::SlotSpan.word());
+        append_raw_u64(output, self.first);
+        output.push(M31Word::from(self.height as u16));
+    }
+}
+
+impl CanonicalWords for EdgeClaim {
+    fn append_canonical_words(&self, output: &mut Vec<M31Word>) {
+        match self.digest {
+            None => {
+                output.push(CanonicalTag::AbsentEdge.word());
+                output.extend([M31Word::ZERO; 8]);
+            }
+            Some(digest) => {
+                output.push(CanonicalTag::PresentEdge.word());
+                append_digest(output, digest.into_digest());
+            }
+        }
+    }
+}
+
+impl CanonicalWords for ExecutedSpan {
+    fn append_canonical_words(&self, output: &mut Vec<M31Word>) {
+        output.push(CanonicalTag::ExecutedSpan.word());
+        append_raw_u32(output, self.first_segment);
+        append_raw_u32(output, self.segment_count.get());
+        append_raw_u64(output, self.first_cycle);
+        append_raw_u64(output, self.cycle_count.get());
+        self.entry.append_canonical_words(output);
+        self.exit.append_canonical_words(output);
+        self.input.append_canonical_words(output);
+        self.output.append_canonical_words(output);
+    }
+}
+
+impl CanonicalWords for SpanBody {
+    fn append_canonical_words(&self, output: &mut Vec<M31Word>) {
+        match self.executed {
+            None => {
+                output.push(CanonicalTag::EmptyBody.word());
+                output.extend([M31Word::ZERO; EXECUTED_SPAN_CANONICAL_WORDS]);
+            }
+            Some(span) => {
+                output.push(CanonicalTag::ExecutedBody.word());
+                span.append_canonical_words(output);
+            }
+        }
+    }
+}
+
+impl CanonicalWords for SpanStatement {
+    fn append_canonical_words(&self, output: &mut Vec<M31Word>) {
+        output.push(CanonicalTag::SpanStatement.word());
+        self.job.append_canonical_words(output);
+        self.slots.append_canonical_words(output);
+        self.body.append_canonical_words(output);
+    }
+}
+
 const fn ceil_log2(value: u32) -> u8 {
     (u32::BITS - (value - 1).leading_zeros()) as u8
 }
@@ -647,8 +776,11 @@ mod tests {
     use rstest::rstest;
 
     use air::digest::{Digest8, M31Word};
+    use prover::poseidon2_channel::poseidon2_hash_m31_words;
 
     use super::*;
+
+    const STATEMENT_ENCODING_HASH_DOMAIN: u16 = 0x5354;
 
     fn digest(seed: u16) -> Digest8 {
         Digest8::new([
@@ -739,6 +871,116 @@ mod tests {
         let right = leaf(job, 1, 4, 6, state(1), state(2));
         let folded = SpanStatement::fold(&left, &right).expect("fixture children chain");
         RootStatement::new(folded).expect("fixture root is canonical")
+    }
+
+    #[rstest]
+    fn canonical_statement_variants_have_one_fixed_word_count() {
+        let executed = *two_segment_root().statement();
+        let empty =
+            SpanStatement::empty_leaf(job(3, 12), 3).expect("the final slot is canonical padding");
+        assert_eq!(
+            (
+                executed.canonical_words().len(),
+                empty.canonical_words().len()
+            ),
+            (
+                SPAN_STATEMENT_CANONICAL_WORDS,
+                SPAN_STATEMENT_CANONICAL_WORDS,
+            )
+        );
+    }
+
+    #[rstest]
+    fn canonical_nested_statement_lengths_match_their_layout_constants() {
+        let root = two_segment_root();
+        let statement = root.statement();
+        let span = statement
+            .body()
+            .executed_span()
+            .expect("fixture root is executed");
+        assert_eq!(
+            (
+                statement
+                    .job()
+                    .complete()
+                    .initial_state()
+                    .canonical_words()
+                    .len(),
+                statement.job().complete().canonical_words().len(),
+                statement.job().canonical_words().len(),
+                statement.slots().canonical_words().len(),
+                span.input().canonical_words().len(),
+                span.canonical_words().len(),
+                statement.body().canonical_words().len(),
+            ),
+            (
+                MACHINE_STATE_CANONICAL_WORDS,
+                COMPLETE_EXECUTION_CANONICAL_WORDS,
+                JOB_CONTEXT_CANONICAL_WORDS,
+                SLOT_SPAN_CANONICAL_WORDS,
+                EDGE_CLAIM_CANONICAL_WORDS,
+                EXECUTED_SPAN_CANONICAL_WORDS,
+                SPAN_BODY_CANONICAL_WORDS,
+            )
+        );
+    }
+
+    #[rstest]
+    fn raw_machine_words_do_not_alias_m31_values_in_the_statement_stream() {
+        let registers = [0_u32; 32];
+        let zero = MachineState::new(
+            0,
+            registers,
+            MemoryDigest::from(digest(10)),
+            IoDigest::from(digest(20)),
+        )
+        .expect("zero state is canonical");
+        let modulus = MachineState::new(
+            stwo::core::fields::m31::P,
+            registers,
+            MemoryDigest::from(digest(10)),
+            IoDigest::from(digest(20)),
+        )
+        .expect("raw RV32 pc may equal the M31 modulus");
+        assert_ne!(zero.canonical_words(), modulus.canonical_words());
+    }
+
+    #[rstest]
+    fn absent_edge_has_one_canonical_zero_payload() {
+        let words = EdgeClaim::absent().canonical_words();
+        assert_eq!(
+            (
+                words.len(),
+                words[0],
+                words[1..].iter().all(|word| *word == M31Word::ZERO),
+            ),
+            (
+                EDGE_CLAIM_CANONICAL_WORDS,
+                CanonicalTag::AbsentEdge.word(),
+                true,
+            )
+        );
+    }
+
+    #[rstest]
+    fn canonical_statement_encoding_matches_its_conformance_digest() {
+        let digest = poseidon2_hash_m31_words(
+            &two_segment_root().statement().canonical_words(),
+            M31Word::from(STATEMENT_ENCODING_HASH_DOMAIN),
+        );
+        assert_eq!(
+            digest,
+            Digest8::new([
+                M31Word::try_from(2_071_595_421_u32).expect("fixture word is canonical"),
+                M31Word::try_from(1_009_775_542_u32).expect("fixture word is canonical"),
+                M31Word::try_from(158_433_216_u32).expect("fixture word is canonical"),
+                M31Word::try_from(66_183_187_u32).expect("fixture word is canonical"),
+                M31Word::try_from(1_095_277_275_u32).expect("fixture word is canonical"),
+                M31Word::try_from(2_036_583_477_u32).expect("fixture word is canonical"),
+                M31Word::try_from(727_733_824_u32).expect("fixture word is canonical"),
+                M31Word::try_from(1_581_175_808_u32).expect("fixture word is canonical"),
+            ])
+        );
     }
 
     #[test]

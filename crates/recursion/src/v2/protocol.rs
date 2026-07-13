@@ -544,6 +544,16 @@ pub enum CanonicalTag {
     TreeHeights = 50,
     FriLayerFoldWidths = 51,
     FriLayerTreeHeights = 52,
+    SpanStatement = 60,
+    JobContext = 61,
+    CompleteExecution = 62,
+    MachineState = 63,
+    SlotSpan = 64,
+    EmptyBody = 65,
+    ExecutedBody = 66,
+    ExecutedSpan = 67,
+    AbsentEdge = 68,
+    PresentEdge = 69,
 }
 
 impl CanonicalTag {

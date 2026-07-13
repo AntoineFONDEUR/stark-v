@@ -16,6 +16,8 @@ use stwo::core::fields::qm31::SecureField;
 
 use crate::prover::{ChannelClaim, RecursionTraces};
 
+use super::protocol::CanonicalWords;
+
 const RATE: usize = 8;
 const DRAW_TAG: u32 = 0x4452_4157;
 
@@ -477,6 +479,11 @@ where
         self.digest = Digest8::new(output[..RATE].try_into().expect("rate-sized digest"));
         self.n_draws = 0;
         Ok(())
+    }
+
+    /// Absorbs one typed canonical encoding through the same mix transition.
+    pub fn absorb_canonical(&mut self, value: &impl CanonicalWords) -> Result<(), B::Error> {
+        self.absorb_m31_words(&value.canonical_words())
     }
 
     /// Absorbs unrestricted machine words through an injective 16-bit split.

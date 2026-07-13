@@ -6,10 +6,25 @@
 //! This module defines the format only; it does not select production roots,
 //! proof dimensions, or a verifier implementation.
 
+use core::fmt;
+
 use air::digest::{
-    HashSuiteDigest, M31Word, RecursionAirProgramDigest, RecursionPreprocessingDigest,
+    HashSuiteDigest, M31Word, ProtocolId, RecursionAirProgramDigest, RecursionPreprocessingDigest,
     VmAirProgramDigest, VmPreprocessingDigest,
 };
+use prover::poseidon2_channel::poseidon2_hash_m31_words;
+use stwo::core::fri::FriConfig;
+use stwo::core::pcs::PcsConfig;
+use stwo::core::poly::circle::{MAX_CIRCLE_DOMAIN_LOG_SIZE, MIN_CIRCLE_DOMAIN_LOG_SIZE};
+use stwo::core::vcs_lifted::verifier::LOG_PACKED_LEAF_SIZE;
+
+const PROTOCOL_MANIFEST_HASH_DOMAIN: u16 = 0x5632;
+const MAX_POW_BITS: u32 = 31;
+const MIN_FRI_LOG_BLOWUP: u32 = 1;
+const MAX_FRI_LOG_BLOWUP: u32 = 16;
+const MAX_FRI_LAST_LAYER_LOG_DEGREE: u32 = 10;
+const MAX_FRI_FOLD_STEP: u32 = 4;
+const MAX_FRI_QUERIES: u32 = 256;
 
 /// Version of the recursion protocol statement and manifest encoding.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -42,6 +57,94 @@ pub struct PcsParameters {
     pub lifting_log_size: OptionalM31Word,
 }
 
+impl PcsParameters {
+    /// Checks every value before calling STWO constructors that otherwise panic.
+    pub fn validate(self) -> Result<ValidatedPcsParameters, PcsParameterError> {
+        let interaction_pow_bits = self.interaction_pow_bits.as_u32();
+        if interaction_pow_bits > MAX_POW_BITS {
+            return Err(PcsParameterError::InteractionPowBitsOutOfRange {
+                value: interaction_pow_bits,
+            });
+        }
+        let pow_bits = self.pow_bits.as_u32();
+        if pow_bits > MAX_POW_BITS {
+            return Err(PcsParameterError::PcsPowBitsOutOfRange { value: pow_bits });
+        }
+        let log_blowup_factor = self.fri_log_blowup_factor.as_u32();
+        if !(MIN_FRI_LOG_BLOWUP..=MAX_FRI_LOG_BLOWUP).contains(&log_blowup_factor) {
+            return Err(PcsParameterError::FriLogBlowupOutOfRange {
+                value: log_blowup_factor,
+            });
+        }
+        let n_queries_word = self.fri_n_queries.as_u32();
+        if n_queries_word == 0 {
+            return Err(PcsParameterError::ZeroFriQueries);
+        }
+        if n_queries_word > MAX_FRI_QUERIES {
+            return Err(PcsParameterError::FriQueryCountOutOfRange {
+                value: n_queries_word,
+            });
+        }
+        let n_queries = usize::try_from(n_queries_word).map_err(|_| {
+            PcsParameterError::FriQueryCountOutOfRange {
+                value: n_queries_word,
+            }
+        })?;
+        let log_last_layer_degree_bound = self.fri_log_last_layer_degree_bound.as_u32();
+        if log_last_layer_degree_bound > MAX_FRI_LAST_LAYER_LOG_DEGREE {
+            return Err(PcsParameterError::FriLastLayerLogDegreeOutOfRange {
+                value: log_last_layer_degree_bound,
+            });
+        }
+        let fold_step = self.fri_fold_step.as_u32();
+        if !(1..=MAX_FRI_FOLD_STEP).contains(&fold_step) {
+            return Err(PcsParameterError::FriFoldStepOutOfRange { value: fold_step });
+        }
+        let lifting_log_size = match self.lifting_log_size {
+            OptionalM31Word::None => None,
+            OptionalM31Word::Some(value) => {
+                let value = value.as_u32();
+                if !(MIN_CIRCLE_DOMAIN_LOG_SIZE..=MAX_CIRCLE_DOMAIN_LOG_SIZE).contains(&value) {
+                    return Err(PcsParameterError::LiftingLogSizeOutOfRange { value });
+                }
+                Some(value)
+            }
+        };
+
+        let fri_config = FriConfig::new(
+            log_last_layer_degree_bound,
+            log_blowup_factor,
+            n_queries,
+            fold_step,
+        );
+        Ok(ValidatedPcsParameters {
+            interaction_pow_bits,
+            config: PcsConfig {
+                pow_bits,
+                fri_config,
+                lifting_log_size,
+            },
+        })
+    }
+}
+
+/// PCS values safe to use in STWO and the fixed verifier plan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ValidatedPcsParameters {
+    interaction_pow_bits: u32,
+    config: PcsConfig,
+}
+
+impl ValidatedPcsParameters {
+    pub const fn interaction_pow_bits(self) -> u32 {
+        self.interaction_pow_bits
+    }
+
+    pub const fn config(self) -> PcsConfig {
+        self.config
+    }
+}
+
 /// Counts and per-tree/per-layer sizes that make one proof wire shape fixed.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct FixedProofShape<const N_TABLES: usize, const N_TREES: usize, const N_FRI_LAYERS: usize> {
@@ -55,6 +158,186 @@ pub struct FixedProofShape<const N_TABLES: usize, const N_TREES: usize, const N_
     pub tree_heights: [M31Word; N_TREES],
     pub fri_layer_fold_widths: [M31Word; N_FRI_LAYERS],
     pub fri_layer_tree_heights: [M31Word; N_FRI_LAYERS],
+}
+
+impl<const N_TABLES: usize, const N_TREES: usize, const N_FRI_LAYERS: usize>
+    FixedProofShape<N_TABLES, N_TREES, N_FRI_LAYERS>
+{
+    /// Validates the exact fixed wire geometry implied by one PCS profile.
+    pub fn validate(
+        &self,
+        pcs: ValidatedPcsParameters,
+    ) -> Result<ValidatedProofShape, ProofShapeError> {
+        if N_TABLES == 0 {
+            return Err(ProofShapeError::EmptyTableLayout);
+        }
+        if N_TREES == 0 {
+            return Err(ProofShapeError::EmptyTreeLayout);
+        }
+        validate_nonzero_shape_count("claimed sums", self.claimed_sum_count)?;
+        validate_nonzero_shape_count("sampled values", self.sampled_value_count)?;
+        validate_nonzero_shape_count("queried values", self.queried_value_count)?;
+
+        let config = pcs.config();
+        let n_queries = config.fri_config.n_queries;
+        validate_shape_count("raw queries", n_queries, self.raw_query_count)?;
+        let expected_trace_paths =
+            N_TREES
+                .checked_mul(n_queries)
+                .ok_or(ProofShapeError::ArithmeticOverflow {
+                    field: "trace path count",
+                })?;
+        validate_shape_count("trace paths", expected_trace_paths, self.trace_path_count)?;
+
+        let queried_value_count = shape_word_as_usize("queried values", self.queried_value_count)?;
+        if !queried_value_count.is_multiple_of(n_queries) {
+            return Err(ProofShapeError::QueriedValuesNotPerRawQuery {
+                queried_values: queried_value_count,
+                raw_queries: n_queries,
+            });
+        }
+
+        for (table, log_size) in self.table_log_sizes.iter().enumerate() {
+            validate_log_size("table", table, log_size.as_u32(), false)?;
+        }
+        for (tree, height) in self.tree_heights.iter().enumerate() {
+            validate_log_size("tree", tree, height.as_u32(), true)?;
+        }
+
+        let described_lifting_log_size = self
+            .tree_heights
+            .iter()
+            .map(|height| height.as_u32())
+            .max()
+            .ok_or(ProofShapeError::EmptyTreeLayout)?;
+        let lifting_log_size = config
+            .lifting_log_size
+            .unwrap_or(described_lifting_log_size);
+        validate_log_size("lifting", 0, lifting_log_size, false)?;
+        if config.lifting_log_size.is_some() {
+            for (tree, actual) in self.tree_heights.iter().enumerate() {
+                if actual.as_u32() != lifting_log_size {
+                    return Err(ProofShapeError::TreeHeightMismatch {
+                        tree,
+                        expected: lifting_log_size,
+                        actual: actual.as_u32(),
+                    });
+                }
+            }
+        }
+
+        let log_blowup_factor = config.fri_config.log_blowup_factor;
+        for (table, log_size) in self.table_log_sizes.iter().enumerate() {
+            let committed_log_size = log_size.as_u32().checked_add(log_blowup_factor).ok_or(
+                ProofShapeError::ArithmeticOverflow {
+                    field: "committed table log size",
+                },
+            )?;
+            if committed_log_size > lifting_log_size {
+                return Err(ProofShapeError::TableExceedsLiftingDomain {
+                    table,
+                    table_log_size: log_size.as_u32(),
+                    log_blowup_factor,
+                    lifting_log_size,
+                });
+            }
+        }
+
+        let last_layer_log_degree = config.fri_config.log_last_layer_degree_bound;
+        let fold_step = config.fri_config.fold_step;
+        let invalid_fri_range = |column_log_degree| ProofShapeError::InvalidFriDegreeRange {
+            column_log_degree,
+            last_layer_log_degree,
+            fold_step,
+        };
+        let column_log_degree = lifting_log_size
+            .checked_sub(log_blowup_factor)
+            .ok_or_else(|| invalid_fri_range(0))?;
+        let folds = column_log_degree
+            .checked_sub(last_layer_log_degree)
+            .ok_or_else(|| invalid_fri_range(column_log_degree))?;
+        if folds < fold_step {
+            return Err(invalid_fri_range(column_log_degree));
+        }
+        let expected_fri_layers = folds.div_ceil(fold_step) as usize;
+        if N_FRI_LAYERS != expected_fri_layers {
+            return Err(ProofShapeError::FriLayerCountMismatch {
+                expected: expected_fri_layers,
+                actual: N_FRI_LAYERS,
+            });
+        }
+
+        let expected_last_layer_coefficients = 1_usize.checked_shl(last_layer_log_degree).ok_or(
+            ProofShapeError::ArithmeticOverflow {
+                field: "last-layer coefficient count",
+            },
+        )?;
+        validate_shape_count(
+            "last-layer coefficients",
+            expected_last_layer_coefficients,
+            self.last_layer_coefficient_count,
+        )?;
+
+        let mut remaining_folds = folds;
+        let mut layer_domain_log_size = lifting_log_size;
+        for layer in 0..N_FRI_LAYERS {
+            let layer_fold_step = remaining_folds.min(fold_step);
+            let expected_width =
+                1_u32
+                    .checked_shl(layer_fold_step)
+                    .ok_or(ProofShapeError::ArithmeticOverflow {
+                        field: "FRI fold width",
+                    })?;
+            let actual_width = self.fri_layer_fold_widths[layer].as_u32();
+            if actual_width != expected_width {
+                return Err(ProofShapeError::FriFoldWidthMismatch {
+                    layer,
+                    expected: expected_width,
+                    actual: actual_width,
+                });
+            }
+
+            let packed_leaf_log_size =
+                if layer_fold_step > 1 && layer_domain_log_size >= LOG_PACKED_LEAF_SIZE {
+                    LOG_PACKED_LEAF_SIZE
+                } else {
+                    0
+                };
+            let expected_tree_height = layer_domain_log_size - packed_leaf_log_size;
+            let actual_tree_height = self.fri_layer_tree_heights[layer].as_u32();
+            if actual_tree_height != expected_tree_height {
+                return Err(ProofShapeError::FriTreeHeightMismatch {
+                    layer,
+                    expected: expected_tree_height,
+                    actual: actual_tree_height,
+                });
+            }
+            layer_domain_log_size -= layer_fold_step;
+            remaining_folds -= layer_fold_step;
+        }
+
+        Ok(ValidatedProofShape {
+            lifting_log_size,
+            column_log_degree,
+        })
+    }
+}
+
+/// Domain facts derived only after a proof shape and PCS profile agree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ValidatedProofShape {
+    lifting_log_size: u32,
+    column_log_degree: u32,
+}
+
+impl ValidatedProofShape {
+    pub const fn lifting_log_size(self) -> u32 {
+        self.lifting_log_size
+    }
+
+    pub const fn column_log_degree(self) -> u32 {
+        self.column_log_degree
+    }
 }
 
 /// Verifier-owned inputs that identify one VM and recursion proof protocol.
@@ -78,6 +361,149 @@ pub struct ProtocolManifest<
     pub vm_proof_shape: FixedProofShape<VM_TABLES, VM_TREES, VM_FRI_LAYERS>,
     pub recursion_proof_shape:
         FixedProofShape<RECURSION_TABLES, RECURSION_TREES, RECURSION_FRI_LAYERS>,
+}
+
+impl<
+    const VM_TABLES: usize,
+    const VM_TREES: usize,
+    const VM_FRI_LAYERS: usize,
+    const RECURSION_TABLES: usize,
+    const RECURSION_TREES: usize,
+    const RECURSION_FRI_LAYERS: usize,
+>
+    ProtocolManifest<
+        VM_TABLES,
+        VM_TREES,
+        VM_FRI_LAYERS,
+        RECURSION_TABLES,
+        RECURSION_TREES,
+        RECURSION_FRI_LAYERS,
+    >
+{
+    /// Commits the complete tagged manifest under the V2 identity domain.
+    pub fn protocol_id(&self) -> ProtocolId {
+        ProtocolId::from(poseidon2_hash_m31_words(
+            &self.canonical_words(),
+            M31Word::from(PROTOCOL_MANIFEST_HASH_DOMAIN),
+        ))
+    }
+
+    /// Validates both proof systems before the manifest enters a verifier key.
+    pub fn validate(
+        self,
+    ) -> Result<
+        ValidatedProtocolManifest<
+            VM_TABLES,
+            VM_TREES,
+            VM_FRI_LAYERS,
+            RECURSION_TABLES,
+            RECURSION_TREES,
+            RECURSION_FRI_LAYERS,
+        >,
+        ProtocolManifestError,
+    > {
+        let vm_pcs = self
+            .vm_pcs
+            .validate()
+            .map_err(ProtocolManifestError::VmPcs)?;
+        let recursion_pcs = self
+            .recursion_pcs
+            .validate()
+            .map_err(ProtocolManifestError::RecursionPcs)?;
+        let vm_shape = self
+            .vm_proof_shape
+            .validate(vm_pcs)
+            .map_err(ProtocolManifestError::VmShape)?;
+        let recursion_shape = self
+            .recursion_proof_shape
+            .validate(recursion_pcs)
+            .map_err(ProtocolManifestError::RecursionShape)?;
+        let protocol_id = self.protocol_id();
+        Ok(ValidatedProtocolManifest {
+            manifest: self,
+            protocol_id,
+            vm_pcs,
+            recursion_pcs,
+            vm_shape,
+            recursion_shape,
+        })
+    }
+}
+
+/// A manifest whose PCS constructors and fixed FRI layouts cannot panic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ValidatedProtocolManifest<
+    const VM_TABLES: usize,
+    const VM_TREES: usize,
+    const VM_FRI_LAYERS: usize,
+    const RECURSION_TABLES: usize,
+    const RECURSION_TREES: usize,
+    const RECURSION_FRI_LAYERS: usize,
+> {
+    manifest: ProtocolManifest<
+        VM_TABLES,
+        VM_TREES,
+        VM_FRI_LAYERS,
+        RECURSION_TABLES,
+        RECURSION_TREES,
+        RECURSION_FRI_LAYERS,
+    >,
+    protocol_id: ProtocolId,
+    vm_pcs: ValidatedPcsParameters,
+    recursion_pcs: ValidatedPcsParameters,
+    vm_shape: ValidatedProofShape,
+    recursion_shape: ValidatedProofShape,
+}
+
+impl<
+    const VM_TABLES: usize,
+    const VM_TREES: usize,
+    const VM_FRI_LAYERS: usize,
+    const RECURSION_TABLES: usize,
+    const RECURSION_TREES: usize,
+    const RECURSION_FRI_LAYERS: usize,
+>
+    ValidatedProtocolManifest<
+        VM_TABLES,
+        VM_TREES,
+        VM_FRI_LAYERS,
+        RECURSION_TABLES,
+        RECURSION_TREES,
+        RECURSION_FRI_LAYERS,
+    >
+{
+    pub const fn manifest(
+        &self,
+    ) -> &ProtocolManifest<
+        VM_TABLES,
+        VM_TREES,
+        VM_FRI_LAYERS,
+        RECURSION_TABLES,
+        RECURSION_TREES,
+        RECURSION_FRI_LAYERS,
+    > {
+        &self.manifest
+    }
+
+    pub const fn protocol_id(&self) -> ProtocolId {
+        self.protocol_id
+    }
+
+    pub const fn vm_pcs(&self) -> ValidatedPcsParameters {
+        self.vm_pcs
+    }
+
+    pub const fn recursion_pcs(&self) -> ValidatedPcsParameters {
+        self.recursion_pcs
+    }
+
+    pub const fn vm_shape(&self) -> ValidatedProofShape {
+        self.vm_shape
+    }
+
+    pub const fn recursion_shape(&self) -> ValidatedProofShape {
+        self.recursion_shape
+    }
 }
 
 /// Tags in the canonical word encoding.
@@ -276,6 +702,306 @@ fn array_len_word<const N: usize>() -> M31Word {
         .expect("a Rust array length used by the protocol fits in M31")
 }
 
+fn validate_nonzero_shape_count(
+    field: &'static str,
+    value: M31Word,
+) -> Result<(), ProofShapeError> {
+    if value == M31Word::ZERO {
+        Err(ProofShapeError::ZeroCount { field })
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_shape_count(
+    field: &'static str,
+    expected: usize,
+    actual: M31Word,
+) -> Result<(), ProofShapeError> {
+    let actual = shape_word_as_usize(field, actual)?;
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(ProofShapeError::CountMismatch {
+            field,
+            expected,
+            actual,
+        })
+    }
+}
+
+fn shape_word_as_usize(field: &'static str, value: M31Word) -> Result<usize, ProofShapeError> {
+    usize::try_from(value.as_u32()).map_err(|_| ProofShapeError::CountOutOfRange {
+        field,
+        value: value.as_u32(),
+    })
+}
+
+fn validate_log_size(
+    field: &'static str,
+    index: usize,
+    value: u32,
+    allow_zero: bool,
+) -> Result<(), ProofShapeError> {
+    let minimum = if allow_zero {
+        0
+    } else {
+        MIN_CIRCLE_DOMAIN_LOG_SIZE
+    };
+    if (minimum..=MAX_CIRCLE_DOMAIN_LOG_SIZE).contains(&value) {
+        Ok(())
+    } else {
+        Err(ProofShapeError::LogSizeOutOfRange {
+            field,
+            index,
+            value,
+            minimum,
+            maximum: MAX_CIRCLE_DOMAIN_LOG_SIZE,
+        })
+    }
+}
+
+/// A PCS manifest value that cannot define the supported V2 verifier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PcsParameterError {
+    InteractionPowBitsOutOfRange { value: u32 },
+    PcsPowBitsOutOfRange { value: u32 },
+    FriLogBlowupOutOfRange { value: u32 },
+    ZeroFriQueries,
+    FriQueryCountOutOfRange { value: u32 },
+    FriLastLayerLogDegreeOutOfRange { value: u32 },
+    FriFoldStepOutOfRange { value: u32 },
+    LiftingLogSizeOutOfRange { value: u32 },
+}
+
+impl fmt::Display for PcsParameterError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InteractionPowBitsOutOfRange { value } => {
+                write!(
+                    formatter,
+                    "interaction PoW bits {value} exceed {MAX_POW_BITS}"
+                )
+            }
+            Self::PcsPowBitsOutOfRange { value } => {
+                write!(formatter, "PCS PoW bits {value} exceed {MAX_POW_BITS}")
+            }
+            Self::FriLogBlowupOutOfRange { value } => write!(
+                formatter,
+                "FRI log blowup {value} is outside {MIN_FRI_LOG_BLOWUP}..={MAX_FRI_LOG_BLOWUP}"
+            ),
+            Self::ZeroFriQueries => write!(formatter, "FRI query count is zero"),
+            Self::FriQueryCountOutOfRange { value } => {
+                write!(
+                    formatter,
+                    "FRI query count {value} exceeds the V2 maximum {MAX_FRI_QUERIES}"
+                )
+            }
+            Self::FriLastLayerLogDegreeOutOfRange { value } => write!(
+                formatter,
+                "FRI last-layer log degree {value} exceeds {MAX_FRI_LAST_LAYER_LOG_DEGREE}"
+            ),
+            Self::FriFoldStepOutOfRange { value } => write!(
+                formatter,
+                "FRI fold step {value} is outside 1..={MAX_FRI_FOLD_STEP}"
+            ),
+            Self::LiftingLogSizeOutOfRange { value } => write!(
+                formatter,
+                "lifting log size {value} is outside {MIN_CIRCLE_DOMAIN_LOG_SIZE}..={MAX_CIRCLE_DOMAIN_LOG_SIZE}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PcsParameterError {}
+
+/// An inconsistency between fixed proof arrays and the validated PCS profile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProofShapeError {
+    EmptyTableLayout,
+    EmptyTreeLayout,
+    ZeroCount {
+        field: &'static str,
+    },
+    CountOutOfRange {
+        field: &'static str,
+        value: u32,
+    },
+    CountMismatch {
+        field: &'static str,
+        expected: usize,
+        actual: usize,
+    },
+    ArithmeticOverflow {
+        field: &'static str,
+    },
+    QueriedValuesNotPerRawQuery {
+        queried_values: usize,
+        raw_queries: usize,
+    },
+    LogSizeOutOfRange {
+        field: &'static str,
+        index: usize,
+        value: u32,
+        minimum: u32,
+        maximum: u32,
+    },
+    TreeHeightMismatch {
+        tree: usize,
+        expected: u32,
+        actual: u32,
+    },
+    TableExceedsLiftingDomain {
+        table: usize,
+        table_log_size: u32,
+        log_blowup_factor: u32,
+        lifting_log_size: u32,
+    },
+    InvalidFriDegreeRange {
+        column_log_degree: u32,
+        last_layer_log_degree: u32,
+        fold_step: u32,
+    },
+    FriLayerCountMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    FriFoldWidthMismatch {
+        layer: usize,
+        expected: u32,
+        actual: u32,
+    },
+    FriTreeHeightMismatch {
+        layer: usize,
+        expected: u32,
+        actual: u32,
+    },
+}
+
+impl fmt::Display for ProofShapeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyTableLayout => write!(formatter, "proof shape has no AIR tables"),
+            Self::EmptyTreeLayout => write!(formatter, "proof shape has no commitment trees"),
+            Self::ZeroCount { field } => write!(formatter, "proof-shape {field} count is zero"),
+            Self::CountOutOfRange { field, value } => {
+                write!(
+                    formatter,
+                    "proof-shape {field} count {value} does not fit usize"
+                )
+            }
+            Self::CountMismatch {
+                field,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "proof-shape {field} count is {actual}, expected {expected}"
+            ),
+            Self::ArithmeticOverflow { field } => {
+                write!(formatter, "proof-shape {field} arithmetic overflowed")
+            }
+            Self::QueriedValuesNotPerRawQuery {
+                queried_values,
+                raw_queries,
+            } => write!(
+                formatter,
+                "{queried_values} queried values do not split across {raw_queries} raw queries"
+            ),
+            Self::LogSizeOutOfRange {
+                field,
+                index,
+                value,
+                minimum,
+                maximum,
+            } => write!(
+                formatter,
+                "{field} log size {index} is {value}, expected {minimum}..={maximum}"
+            ),
+            Self::TreeHeightMismatch {
+                tree,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "tree {tree} has height {actual}, lifting config requires {expected}"
+            ),
+            Self::TableExceedsLiftingDomain {
+                table,
+                table_log_size,
+                log_blowup_factor,
+                lifting_log_size,
+            } => write!(
+                formatter,
+                "table {table} log size {table_log_size} plus blowup {log_blowup_factor} exceeds lifting size {lifting_log_size}"
+            ),
+            Self::InvalidFriDegreeRange {
+                column_log_degree,
+                last_layer_log_degree,
+                fold_step,
+            } => write!(
+                formatter,
+                "FRI cannot fold column degree {column_log_degree} to {last_layer_log_degree} with first step {fold_step}"
+            ),
+            Self::FriLayerCountMismatch { expected, actual } => write!(
+                formatter,
+                "proof shape has {actual} FRI layers, expected {expected}"
+            ),
+            Self::FriFoldWidthMismatch {
+                layer,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "FRI layer {layer} has width {actual}, expected {expected}"
+            ),
+            Self::FriTreeHeightMismatch {
+                layer,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "FRI layer {layer} has tree height {actual}, expected {expected}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ProofShapeError {}
+
+/// Identifies which half of a dual VM/recursion manifest is invalid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProtocolManifestError {
+    VmPcs(PcsParameterError),
+    RecursionPcs(PcsParameterError),
+    VmShape(ProofShapeError),
+    RecursionShape(ProofShapeError),
+}
+
+impl fmt::Display for ProtocolManifestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::VmPcs(source) => write!(formatter, "invalid VM PCS profile: {source}"),
+            Self::RecursionPcs(source) => {
+                write!(formatter, "invalid recursion PCS profile: {source}")
+            }
+            Self::VmShape(source) => write!(formatter, "invalid VM proof shape: {source}"),
+            Self::RecursionShape(source) => {
+                write!(formatter, "invalid recursion proof shape: {source}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ProtocolManifestError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::VmPcs(source) | Self::RecursionPcs(source) => Some(source),
+            Self::VmShape(source) | Self::RecursionShape(source) => Some(source),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rstest::rstest;
@@ -386,6 +1112,48 @@ mod tests {
             recursion_pcs: pcs(70),
             vm_proof_shape: shape(80),
             recursion_proof_shape: shape(100),
+        }
+    }
+
+    fn valid_pcs() -> PcsParameters {
+        PcsParameters {
+            interaction_pow_bits: word(8),
+            pow_bits: word(10),
+            fri_log_blowup_factor: word(1),
+            fri_n_queries: word(3),
+            fri_log_last_layer_degree_bound: M31Word::ZERO,
+            fri_fold_step: word(2),
+            lifting_log_size: OptionalM31Word::Some(word(8)),
+        }
+    }
+
+    fn valid_shape() -> FixedProofShape<2, 2, 4> {
+        FixedProofShape {
+            claimed_sum_count: word(1),
+            sampled_value_count: word(4),
+            queried_value_count: word(6),
+            trace_path_count: word(6),
+            raw_query_count: word(3),
+            last_layer_coefficient_count: word(1),
+            table_log_sizes: [word(5), word(6)],
+            tree_heights: [word(8), word(8)],
+            fri_layer_fold_widths: [word(4), word(4), word(4), word(2)],
+            fri_layer_tree_heights: [word(6), word(4), word(2), word(2)],
+        }
+    }
+
+    fn valid_manifest() -> ProtocolManifest<2, 2, 4, 2, 2, 4> {
+        ProtocolManifest {
+            version: ProtocolVersion(word(2)),
+            hash_suite: HashSuiteDigest::from(digest(10)),
+            vm_preprocessing: VmPreprocessingDigest::from(digest(20)),
+            recursion_preprocessing: RecursionPreprocessingDigest::from(digest(30)),
+            vm_air_program: VmAirProgramDigest::from(digest(40)),
+            recursion_air_program: RecursionAirProgramDigest::from(digest(50)),
+            vm_pcs: valid_pcs(),
+            recursion_pcs: valid_pcs(),
+            vm_proof_shape: valid_shape(),
+            recursion_proof_shape: valid_shape(),
         }
     }
 
@@ -542,6 +1310,86 @@ mod tests {
         assert_eq!(manifest().canonical_words(), manifest().canonical_words());
     }
 
+    #[test]
+    fn manifest_protocol_id_is_deterministic() {
+        assert_eq!(manifest().protocol_id(), manifest().protocol_id());
+    }
+
+    #[test]
+    fn manifest_protocol_id_matches_conformance_vector() {
+        assert_eq!(
+            manifest().protocol_id(),
+            ProtocolId::from(
+                Digest8::try_from([
+                    478_045_862,
+                    405_973_984,
+                    209_742_061,
+                    1_668_992_471,
+                    1_869_861_411,
+                    1_958_982_823,
+                    1_848_617_412,
+                    1_055_531_657,
+                ])
+                .expect("the protocol conformance digest words are canonical")
+            )
+        );
+    }
+
+    #[test]
+    fn valid_manifest_constructs_checked_profiles() {
+        let manifest = valid_manifest();
+        assert_eq!(
+            manifest.validate().map(|validated| (
+                validated.protocol_id(),
+                validated.vm_shape().lifting_log_size(),
+                validated.recursion_shape().column_log_degree(),
+            )),
+            Ok((manifest.protocol_id(), 8, 7))
+        );
+    }
+
+    #[test]
+    fn pcs_validation_rejects_an_unsupported_fold_step() {
+        let mut parameters = valid_pcs();
+        parameters.fri_fold_step = word(5);
+        assert_eq!(
+            parameters.validate(),
+            Err(PcsParameterError::FriFoldStepOutOfRange { value: 5 })
+        );
+    }
+
+    #[test]
+    fn manifest_validation_rejects_a_raw_query_count_mismatch() {
+        let mut manifest = valid_manifest();
+        manifest.vm_proof_shape.raw_query_count = word(2);
+        assert_eq!(
+            manifest.validate(),
+            Err(ProtocolManifestError::VmShape(
+                ProofShapeError::CountMismatch {
+                    field: "raw queries",
+                    expected: 3,
+                    actual: 2,
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn manifest_validation_rejects_a_fri_tree_height_mismatch() {
+        let mut manifest = valid_manifest();
+        manifest.recursion_proof_shape.fri_layer_tree_heights[1] = word(5);
+        assert_eq!(
+            manifest.validate(),
+            Err(ProtocolManifestError::RecursionShape(
+                ProofShapeError::FriTreeHeightMismatch {
+                    layer: 1,
+                    expected: 4,
+                    actual: 5,
+                }
+            ))
+        );
+    }
+
     #[rstest]
     #[case::version(ManifestField::Version)]
     #[case::hash_suite(ManifestField::HashSuite)]
@@ -590,6 +1438,9 @@ mod tests {
     fn every_manifest_field_changes_the_canonical_encoding(#[case] field: ManifestField) {
         let baseline = manifest();
         let changed = change_manifest_field(baseline, field);
-        assert_ne!(baseline.canonical_words(), changed.canonical_words());
+        assert!(
+            baseline.canonical_words() != changed.canonical_words()
+                && baseline.protocol_id() != changed.protocol_id()
+        );
     }
 }

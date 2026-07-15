@@ -637,6 +637,11 @@ mod tests {
         TranscriptStateRelations, gen_interaction_trace as gen_state_interaction_trace,
         push_frame_states,
     };
+    use crate::v2::transcript_word_air::{
+        Eval as TranscriptWordEval, TranscriptWordPreprocessed, TranscriptWordRelations,
+        TranscriptWordTable, gen_interaction_trace as gen_word_interaction_trace,
+        push_transcript_words,
+    };
     use crate::v2::wire::{FriLayerWire, FriQueryWire, MerklePathWire, ProofKind};
 
     type TestProof = FixedStarkProofWire<4, 1, 1, 1, 4, 2, 1, 4, 1, 4>;
@@ -645,6 +650,13 @@ mod tests {
     enum FrameStateTamper {
         None,
         InitialDigest,
+        InactiveValue,
+    }
+
+    #[derive(Clone, Copy)]
+    enum WordTamper {
+        None,
+        FixedValue,
         InactiveValue,
     }
 
@@ -889,6 +901,63 @@ mod tests {
         );
     }
 
+    fn assert_word_constraints(kind: ProofKind, tamper: WordTamper) {
+        let vm_plan = plan_for_schema(VerifierSchema::Vm, 1);
+        let recursion_plan = plan_for_schema(VerifierSchema::Recursion, 1);
+        let calls = TranscriptCallPreprocessed::new(&vm_plan, &recursion_plan)
+            .expect("fixture plans occupy their canonical transcript lanes");
+        let preprocessing = TranscriptWordPreprocessed::new(&calls)
+            .expect("trusted call layout has canonical word ownership");
+        let segment = recording_execution_for(&vm_plan, 1);
+        let left = recording_execution_for(&recursion_plan, 1);
+        let right = recording_execution_for(&recursion_plan, 2);
+        let witness = match kind {
+            ProofKind::SegmentLeaf => UniversalTranscriptWitness::Segment(&segment),
+            ProofKind::BinaryNode => UniversalTranscriptWitness::Binary {
+                left: &left,
+                right: &right,
+            },
+            ProofKind::EmptyLeaf => UniversalTranscriptWitness::Empty,
+        };
+        let mut table = TranscriptWordTable::new();
+        push_transcript_words(&mut table, &preprocessing, witness)
+            .expect("validated transcript words materialize");
+        match tamper {
+            WordTamper::None => {}
+            WordTamper::FixedValue | WordTamper::InactiveValue => {
+                table.value[0] = 1;
+            }
+        }
+
+        let binding_relations = TranscriptBindingRelations::dummy();
+        let word_relations = TranscriptWordRelations::dummy();
+        let preprocessed = preprocessing.gen_columns();
+        let trace = table.into_witness();
+        let (interaction, claimed_sum) = gen_word_interaction_trace(
+            &trace,
+            &preprocessed,
+            kind,
+            &binding_relations,
+            &word_relations,
+        );
+        let traces = TreeVec::new(vec![preprocessed, trace, interaction]);
+        let trace_polys = traces.map_cols(|column| column.interpolate());
+        let eval = TranscriptWordEval {
+            log_size: preprocessing.log_size(),
+            proof_kind: kind,
+            binding_relations,
+            word_relations,
+        };
+        assert_constraints_on_polys(
+            &trace_polys,
+            CanonicCoset::new(preprocessing.log_size()),
+            |row| {
+                eval.evaluate(row);
+            },
+            claimed_sum,
+        );
+    }
+
     #[rstest]
     #[case::segment(ProofKind::SegmentLeaf)]
     #[case::binary(ProofKind::BinaryNode)]
@@ -988,6 +1057,67 @@ mod tests {
             .evaluate(ExprEvaluator::new())
             .constraint_degree_bounds();
         assert_eq!((degrees.len(), degrees.into_iter().max()), (31, Some(3)));
+    }
+
+    #[rstest]
+    #[case::segment(ProofKind::SegmentLeaf)]
+    #[case::binary(ProofKind::BinaryNode)]
+    #[case::empty(ProofKind::EmptyLeaf)]
+    fn every_universal_mode_satisfies_the_transcript_word_component(#[case] kind: ProofKind) {
+        assert_word_constraints(kind, WordTamper::None);
+    }
+
+    #[rstest]
+    #[case::segment(ProofKind::SegmentLeaf, 904, 504)]
+    #[case::binary(ProofKind::BinaryNode, 1_808, 1_008)]
+    #[case::empty(ProofKind::EmptyLeaf, 0, 0)]
+    fn proof_kind_activates_only_its_typed_transcript_words(
+        #[case] kind: ProofKind,
+        #[case] expected_words: usize,
+        #[case] expected_payloads: usize,
+    ) {
+        let calls = TranscriptCallPreprocessed::new(
+            &plan_for_schema(VerifierSchema::Vm, 1),
+            &plan_for_schema(VerifierSchema::Recursion, 1),
+        )
+        .expect("fixture plans occupy their canonical transcript lanes");
+        let preprocessing = TranscriptWordPreprocessed::new(&calls)
+            .expect("trusted call layout has canonical word ownership");
+        assert_eq!(
+            (
+                preprocessing.active_word_count(kind),
+                preprocessing.active_payload_count(kind),
+            ),
+            (expected_words, expected_payloads)
+        );
+    }
+
+    #[rstest]
+    #[should_panic]
+    fn fixed_transcript_words_cannot_be_replaced_by_committed_values() {
+        assert_word_constraints(ProofKind::SegmentLeaf, WordTamper::FixedValue);
+    }
+
+    #[rstest]
+    #[should_panic]
+    fn inactive_transcript_word_values_must_be_zero() {
+        assert_word_constraints(ProofKind::EmptyLeaf, WordTamper::InactiveValue);
+    }
+
+    #[rstest]
+    fn transcript_word_constraint_profile_stays_cubic() {
+        use stwo_constraint_framework::expr::ExprEvaluator;
+
+        let eval = TranscriptWordEval {
+            log_size: 4,
+            proof_kind: ProofKind::SegmentLeaf,
+            binding_relations: TranscriptBindingRelations::dummy(),
+            word_relations: TranscriptWordRelations::dummy(),
+        };
+        let degrees = eval
+            .evaluate(ExprEvaluator::new())
+            .constraint_degree_bounds();
+        assert_eq!((degrees.len(), degrees.into_iter().max()), (4, Some(3)));
     }
 
     #[rstest]

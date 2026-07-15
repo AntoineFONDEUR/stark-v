@@ -612,7 +612,9 @@ impl std::error::Error for TranscriptProgramError {}
 #[cfg(test)]
 mod tests {
     use air::digest::{IoDigest, MemoryDigest, ProgramDigest};
+    use prover::poseidon2_channel::Poseidon2M31Channel;
     use rstest::rstest;
+    use stwo::core::channel::Channel;
     use stwo::core::pcs::TreeVec;
     use stwo::core::poly::circle::CanonicCoset;
     use stwo_constraint_framework::{FrameworkEval, assert_constraints_on_polys};
@@ -632,6 +634,11 @@ mod tests {
         gen_interaction_trace as gen_binding_interaction_trace, push_call_bindings,
     };
     use crate::v2::transcript_layout::TranscriptLayout;
+    use crate::v2::transcript_payload_air::{
+        Eval as TranscriptPayloadEval, TranscriptPayloadPreprocessed, TranscriptPayloadTable,
+        VerifierInputRelations, gen_interaction_trace as gen_payload_interaction_trace,
+        push_transcript_payloads,
+    };
     use crate::v2::transcript_state_air::{
         Eval as TranscriptStateEval, TranscriptFrameStateTable, TranscriptStatePreprocessed,
         TranscriptStateRelations, gen_interaction_trace as gen_state_interaction_trace,
@@ -657,6 +664,13 @@ mod tests {
     enum WordTamper {
         None,
         FixedValue,
+        InactiveValue,
+    }
+
+    #[derive(Clone, Copy)]
+    enum PayloadTamper {
+        None,
+        ProtocolConstant,
         InactiveValue,
     }
 
@@ -958,6 +972,103 @@ mod tests {
         );
     }
 
+    fn assert_payload_constraints(kind: ProofKind, tamper: PayloadTamper) {
+        let vm_plan = plan_for_schema(VerifierSchema::Vm, 1);
+        let recursion_plan = plan_for_schema(VerifierSchema::Recursion, 1);
+        let calls = TranscriptCallPreprocessed::new(&vm_plan, &recursion_plan)
+            .expect("fixture plans occupy their canonical transcript lanes");
+        let preprocessing = TranscriptPayloadPreprocessed::new(&calls, ProtocolId::from(digest(9)))
+            .expect("trusted payload slots have canonical semantic sources");
+        let segment = recording_execution_for(&vm_plan, 1);
+        let left = recording_execution_for(&recursion_plan, 1);
+        let right = recording_execution_for(&recursion_plan, 2);
+        let witness = match kind {
+            ProofKind::SegmentLeaf => UniversalTranscriptWitness::Segment(&segment),
+            ProofKind::BinaryNode => UniversalTranscriptWitness::Binary {
+                left: &left,
+                right: &right,
+            },
+            ProofKind::EmptyLeaf => UniversalTranscriptWitness::Empty,
+        };
+        let mut table = TranscriptPayloadTable::new();
+        push_transcript_payloads(&mut table, &preprocessing, witness)
+            .expect("validated transcript payloads materialize");
+        match tamper {
+            PayloadTamper::None => {}
+            PayloadTamper::ProtocolConstant | PayloadTamper::InactiveValue => {
+                table.value[0] = 1;
+            }
+        }
+
+        let word_relations = TranscriptWordRelations::dummy();
+        let input_relations = VerifierInputRelations::dummy();
+        let preprocessed = preprocessing.gen_columns();
+        let trace = table.into_witness();
+        let (interaction, claimed_sum) = gen_payload_interaction_trace(
+            &trace,
+            &preprocessed,
+            kind,
+            &word_relations,
+            &input_relations,
+        );
+        let traces = TreeVec::new(vec![preprocessed, trace, interaction]);
+        let trace_polys = traces.map_cols(|column| column.interpolate());
+        let eval = TranscriptPayloadEval {
+            log_size: preprocessing.log_size(),
+            proof_kind: kind,
+            word_relations,
+            input_relations,
+        };
+        assert_constraints_on_polys(
+            &trace_polys,
+            CanonicCoset::new(preprocessing.log_size()),
+            |row| {
+                eval.evaluate(row);
+            },
+            claimed_sum,
+        );
+    }
+
+    fn payload_bridge_claimed_sum(
+        mut channel: Poseidon2M31Channel,
+    ) -> stwo::core::fields::qm31::QM31 {
+        let vm_plan = plan_for_schema(VerifierSchema::Vm, 1);
+        let recursion_plan = plan_for_schema(VerifierSchema::Recursion, 1);
+        let calls = TranscriptCallPreprocessed::new(&vm_plan, &recursion_plan)
+            .expect("fixture plans occupy their canonical transcript lanes");
+        let word_preprocessing = TranscriptWordPreprocessed::new(&calls)
+            .expect("trusted call layout has canonical word ownership");
+        let payload_preprocessing =
+            TranscriptPayloadPreprocessed::new(&calls, ProtocolId::from(digest(9)))
+                .expect("trusted payload slots have canonical semantic sources");
+        let execution = recording_execution_for(&vm_plan, 1);
+        let witness = UniversalTranscriptWitness::Segment(&execution);
+
+        let mut word_table = TranscriptWordTable::new();
+        push_transcript_words(&mut word_table, &word_preprocessing, witness)
+            .expect("validated transcript words materialize");
+        let mut payload_table = TranscriptPayloadTable::new();
+        push_transcript_payloads(&mut payload_table, &payload_preprocessing, witness)
+            .expect("validated transcript payloads materialize");
+
+        let word_relations = TranscriptWordRelations::draw(&mut channel);
+        let (_, word_sum) = gen_word_interaction_trace(
+            &word_table.into_witness(),
+            &word_preprocessing.gen_columns(),
+            ProofKind::SegmentLeaf,
+            &TranscriptBindingRelations::dummy(),
+            &word_relations,
+        );
+        let (_, payload_sum) = gen_payload_interaction_trace(
+            &payload_table.into_witness(),
+            &payload_preprocessing.gen_columns(),
+            ProofKind::SegmentLeaf,
+            &word_relations,
+            &VerifierInputRelations::dummy(),
+        );
+        word_sum + payload_sum
+    }
+
     #[rstest]
     #[case::segment(ProofKind::SegmentLeaf)]
     #[case::binary(ProofKind::BinaryNode)]
@@ -1118,6 +1229,75 @@ mod tests {
             .evaluate(ExprEvaluator::new())
             .constraint_degree_bounds();
         assert_eq!((degrees.len(), degrees.into_iter().max()), (4, Some(3)));
+    }
+
+    #[rstest]
+    #[case::segment(ProofKind::SegmentLeaf)]
+    #[case::binary(ProofKind::BinaryNode)]
+    #[case::empty(ProofKind::EmptyLeaf)]
+    fn every_universal_mode_satisfies_the_transcript_payload_adapter(#[case] kind: ProofKind) {
+        assert_payload_constraints(kind, PayloadTamper::None);
+    }
+
+    #[rstest]
+    #[case::segment(ProofKind::SegmentLeaf, 504, 472)]
+    #[case::binary(ProofKind::BinaryNode, 1_008, 944)]
+    #[case::empty(ProofKind::EmptyLeaf, 0, 0)]
+    fn proof_kind_activates_only_its_semantic_payload_sources(
+        #[case] kind: ProofKind,
+        #[case] expected_payloads: usize,
+        #[case] expected_inputs: usize,
+    ) {
+        let calls = TranscriptCallPreprocessed::new(
+            &plan_for_schema(VerifierSchema::Vm, 1),
+            &plan_for_schema(VerifierSchema::Recursion, 1),
+        )
+        .expect("fixture plans occupy their canonical transcript lanes");
+        let preprocessing = TranscriptPayloadPreprocessed::new(&calls, ProtocolId::from(digest(9)))
+            .expect("trusted payload slots have canonical semantic sources");
+        assert_eq!(
+            (
+                preprocessing.active_payload_count(kind),
+                preprocessing.active_input_count(kind),
+            ),
+            (expected_payloads, expected_inputs)
+        );
+    }
+
+    #[rstest]
+    #[should_panic]
+    fn protocol_payload_words_are_verifier_owned_constants() {
+        assert_payload_constraints(ProofKind::SegmentLeaf, PayloadTamper::ProtocolConstant);
+    }
+
+    #[rstest]
+    #[should_panic]
+    fn inactive_transcript_payload_values_must_be_zero() {
+        assert_payload_constraints(ProofKind::EmptyLeaf, PayloadTamper::InactiveValue);
+    }
+
+    #[rstest]
+    fn transcript_payload_constraint_profile_stays_cubic() {
+        use stwo_constraint_framework::expr::ExprEvaluator;
+
+        let eval = TranscriptPayloadEval {
+            log_size: 4,
+            proof_kind: ProofKind::SegmentLeaf,
+            word_relations: TranscriptWordRelations::dummy(),
+            input_relations: VerifierInputRelations::dummy(),
+        };
+        let degrees = eval
+            .evaluate(ExprEvaluator::new())
+            .constraint_degree_bounds();
+        assert_eq!((degrees.len(), degrees.into_iter().max()), (4, Some(3)));
+    }
+
+    #[rstest]
+    fn every_typed_payload_tuple_cancels_across_the_word_source_boundary() {
+        let baseline = payload_bridge_claimed_sum(Poseidon2M31Channel::default());
+        let mut changed_channel = Poseidon2M31Channel::default();
+        changed_channel.mix_u32s(&[1]);
+        assert_eq!(payload_bridge_claimed_sum(changed_channel), baseline);
     }
 
     #[rstest]

@@ -151,6 +151,8 @@ struct PreprocessedRow {
 pub struct TranscriptCallPreprocessed {
     log_size: u32,
     rows: Vec<PreprocessedRow>,
+    vm_plan: VerifierControlPlan,
+    recursion_plan: VerifierControlPlan,
     vm_layout: TranscriptLayout,
     recursion_layout: TranscriptLayout,
 }
@@ -217,6 +219,8 @@ impl TranscriptCallPreprocessed {
         Ok(Self {
             log_size,
             rows,
+            vm_plan: vm.clone(),
+            recursion_plan: recursion.clone(),
             vm_layout,
             recursion_layout,
         })
@@ -230,8 +234,16 @@ impl TranscriptCallPreprocessed {
         &self.vm_layout
     }
 
+    pub const fn vm_plan(&self) -> &VerifierControlPlan {
+        &self.vm_plan
+    }
+
     pub const fn recursion_layout(&self) -> &TranscriptLayout {
         &self.recursion_layout
+    }
+
+    pub const fn recursion_plan(&self) -> &VerifierControlPlan {
+        &self.recursion_plan
     }
 
     pub fn active_call_count(&self, kind: ProofKind) -> usize {

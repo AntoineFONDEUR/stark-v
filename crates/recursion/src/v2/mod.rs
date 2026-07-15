@@ -9,6 +9,7 @@ pub mod transcript;
 pub mod transcript_air;
 pub mod transcript_binding_air;
 pub mod transcript_layout;
+pub mod transcript_payload_air;
 pub mod transcript_program;
 pub mod transcript_state_air;
 pub mod transcript_word_air;

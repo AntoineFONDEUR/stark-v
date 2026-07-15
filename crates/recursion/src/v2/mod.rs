@@ -5,6 +5,7 @@ pub mod kernel;
 pub mod pow;
 pub mod protocol;
 pub mod statement;
+pub mod statement_input_air;
 pub mod transcript;
 pub mod transcript_air;
 pub mod transcript_binding_air;

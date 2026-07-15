@@ -9,9 +9,9 @@
 
 use core::fmt;
 
-use air::digest::{Digest8, M31Word, ProtocolId};
+use air::digest::{Digest8, M31Word, ProtocolId, VmPublicClaimDigest};
 
-use super::kernel::{VerifierControlPlan, VerifierStep};
+use super::kernel::{VerifierControlPlan, VerifierSchema, VerifierStep};
 use super::protocol::CanonicalWords;
 use super::statement::SpanStatement;
 use super::transcript::{TranscriptBackend, TranscriptError, TranscriptKernel, encode_u64_words};
@@ -27,6 +27,40 @@ pub enum TranscriptEffect {
     Mix,
     Draw,
     Pow,
+}
+
+/// Schema-specific claim material absorbed before relation challenges.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VerifierPublicClaim {
+    /// A segment leaf keeps the variable-width VM claim private and binds its
+    /// canonical digest into the VM transcript.
+    Vm(VmPublicClaimDigest),
+    /// A recursion proof's complete public claim is already `BindStatement`.
+    Recursion,
+}
+
+impl VerifierPublicClaim {
+    fn validate(self, schema: VerifierSchema) -> Result<(), TranscriptProgramError> {
+        let actual = match self {
+            Self::Vm(_) => VerifierSchema::Vm,
+            Self::Recursion => VerifierSchema::Recursion,
+        };
+        if actual == schema {
+            Ok(())
+        } else {
+            Err(TranscriptProgramError::PublicClaimSchemaMismatch {
+                expected: schema,
+                actual,
+            })
+        }
+    }
+
+    fn words(&self) -> &[M31Word] {
+        match self {
+            Self::Vm(digest) => digest.digest().words(),
+            Self::Recursion => &[],
+        }
+    }
 }
 
 impl TranscriptEffect {
@@ -168,6 +202,7 @@ pub fn execute_fixed_transcript<
     plan: &VerifierControlPlan,
     protocol_id: ProtocolId,
     statement: &SpanStatement,
+    public_claim: VerifierPublicClaim,
     proof: &FixedStarkProofWire<
         N_COMMITMENTS,
         N_CLAIMED_SUMS,
@@ -184,6 +219,7 @@ pub fn execute_fixed_transcript<
 where
     B: TranscriptBackend<Error = TranscriptError>,
 {
+    public_claim.validate(plan.schema())?;
     validate_input_counts(plan, proof)?;
 
     let mut kernel = TranscriptKernel::new(backend);
@@ -198,6 +234,7 @@ where
             step,
             protocol_id,
             statement,
+            &public_claim,
             plan,
             proof,
         )?;
@@ -256,6 +293,7 @@ fn execute_step<
     step: VerifierStep,
     protocol_id: ProtocolId,
     statement: &SpanStatement,
+    public_claim: &VerifierPublicClaim,
     plan: &VerifierControlPlan,
     proof: &FixedStarkProofWire<
         N_COMMITMENTS,
@@ -299,9 +337,7 @@ where
             absorb_operation(kernel, sequence, step, commitment.words())?;
         }
         VerifierStep::AbsorbPublicClaim => {
-            // BindStatement owns the complete common public input. This header
-            // marks the schema-specific claim phase without a second encoding.
-            absorb_operation(kernel, sequence, step, &[])?;
+            absorb_operation(kernel, sequence, step, public_claim.words())?;
         }
         VerifierStep::VerifyAndAbsorbInteractionPow { bits } => {
             absorb_operation(
@@ -531,6 +567,10 @@ pub enum TranscriptProgramError {
         expected: usize,
         actual: usize,
     },
+    PublicClaimSchemaMismatch {
+        expected: VerifierSchema,
+        actual: VerifierSchema,
+    },
     IndexOutOfRange {
         field: &'static str,
         index: u32,
@@ -575,6 +615,10 @@ impl fmt::Display for TranscriptProgramError {
             } => write!(
                 formatter,
                 "transcript expects {expected} {field}, fixed wire has {actual}"
+            ),
+            Self::PublicClaimSchemaMismatch { expected, actual } => write!(
+                formatter,
+                "{expected:?} verifier received a {actual:?} public claim"
             ),
             Self::IndexOutOfRange { field, index, len } => {
                 write!(
@@ -784,6 +828,13 @@ mod tests {
         }
     }
 
+    fn public_claim(plan: &VerifierControlPlan) -> VerifierPublicClaim {
+        match plan.schema() {
+            VerifierSchema::Vm => VerifierPublicClaim::Vm(VmPublicClaimDigest::from(digest(180))),
+            VerifierSchema::Recursion => VerifierPublicClaim::Recursion,
+        }
+    }
+
     fn recording_execution()
     -> VerifierTranscriptExecution<crate::v2::transcript::RecordingTranscriptBackend> {
         recording_execution_for(&plan(1), 1)
@@ -798,6 +849,7 @@ mod tests {
             plan,
             ProtocolId::from(digest(9)),
             &statement(statement_seed),
+            public_claim(plan),
             &proof(),
         )
         .expect("fixture executes the complete typed transcript")
@@ -1078,7 +1130,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::segment(ProofKind::SegmentLeaf, 144)]
+    #[case::segment(ProofKind::SegmentLeaf, 145)]
     #[case::binary(ProofKind::BinaryNode, 288)]
     #[case::empty(ProofKind::EmptyLeaf, 0)]
     fn proof_kind_activates_only_its_transcript_calls(
@@ -1179,7 +1231,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::segment(ProofKind::SegmentLeaf, 904, 504)]
+    #[case::segment(ProofKind::SegmentLeaf, 912, 512)]
     #[case::binary(ProofKind::BinaryNode, 1_808, 1_008)]
     #[case::empty(ProofKind::EmptyLeaf, 0, 0)]
     fn proof_kind_activates_only_its_typed_transcript_words(
@@ -1240,7 +1292,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::segment(ProofKind::SegmentLeaf, 504, 472)]
+    #[case::segment(ProofKind::SegmentLeaf, 512, 480)]
     #[case::binary(ProofKind::BinaryNode, 1_008, 944)]
     #[case::empty(ProofKind::EmptyLeaf, 0, 0)]
     fn proof_kind_activates_only_its_semantic_payload_sources(
@@ -1308,6 +1360,7 @@ mod tests {
             &plan,
             ProtocolId::from(digest(9)),
             &statement(1),
+            public_claim(&plan),
             &proof(),
         )
         .expect("fixture executes the complete typed transcript");
@@ -1361,6 +1414,7 @@ mod tests {
             &plan,
             ProtocolId::from(digest(9)),
             &statement(1),
+            public_claim(&plan),
             &proof(),
         )
         .expect("fixture executes the complete typed transcript");
@@ -1380,7 +1434,7 @@ mod tests {
                 layout.frames().len(),
                 layout.calls().len(),
             ),
-            (22, 31, 144)
+            (22, 31, 145)
         );
     }
 
@@ -1394,6 +1448,7 @@ mod tests {
             &plan,
             ProtocolId::from(digest(9)),
             &statement,
+            public_claim(&plan),
             &proof,
         )
         .expect("native transcript accepts the fixture");
@@ -1402,6 +1457,7 @@ mod tests {
             &plan,
             ProtocolId::from(digest(9)),
             &statement,
+            public_claim(&plan),
             &proof,
         )
         .expect("recording transcript accepts the fixture");
@@ -1428,6 +1484,7 @@ mod tests {
             &plan,
             ProtocolId::from(digest(9)),
             &statement(1),
+            public_claim(&plan),
             &proof,
         )
         .expect("first statement executes");
@@ -1436,9 +1493,34 @@ mod tests {
             &plan,
             ProtocolId::from(digest(9)),
             &statement(2),
+            public_claim(&plan),
             &proof,
         )
         .expect("second statement executes");
+        assert_ne!(first.final_digest(), second.final_digest());
+    }
+
+    #[rstest]
+    fn changing_the_vm_public_claim_changes_the_final_digest() {
+        let plan = plan(1);
+        let first = execute_fixed_transcript(
+            NativeTranscriptBackend,
+            &plan,
+            ProtocolId::from(digest(9)),
+            &statement(1),
+            VerifierPublicClaim::Vm(VmPublicClaimDigest::from(digest(180))),
+            &proof(),
+        )
+        .expect("first VM public claim executes");
+        let second = execute_fixed_transcript(
+            NativeTranscriptBackend,
+            &plan,
+            ProtocolId::from(digest(9)),
+            &statement(1),
+            VerifierPublicClaim::Vm(VmPublicClaimDigest::from(digest(181))),
+            &proof(),
+        )
+        .expect("second VM public claim executes");
         assert_ne!(first.final_digest(), second.final_digest());
     }
 
@@ -1447,14 +1529,14 @@ mod tests {
         assert_eq!(
             recording_execution().final_digest(),
             Digest8::new([
-                canonical(1_263_169_743),
-                canonical(139_866_038),
-                canonical(2_063_857_902),
-                canonical(1_318_105_051),
-                canonical(1_148_619_615),
-                canonical(1_748_000_098),
-                canonical(2_038_110_020),
-                canonical(2_118_719_565),
+                canonical(71_520_153),
+                canonical(254_872_391),
+                canonical(1_352_344_338),
+                canonical(734_162_471),
+                canonical(1_472_453_936),
+                canonical(485_556_251),
+                canonical(1_103_360_662),
+                canonical(1_015_747_588),
             ])
         );
     }
@@ -1484,8 +1566,24 @@ mod tests {
     }
 
     #[rstest]
-    fn public_claim_phase_has_no_second_statement_payload() {
+    fn vm_public_claim_phase_absorbs_one_digest() {
         let execution = recording_execution();
+        let operation = execution
+            .operations()
+            .iter()
+            .find(|operation| operation.step() == VerifierStep::AbsorbPublicClaim)
+            .expect("plan contains the public claim phase");
+        let frame = &execution.backend().trace().hash_frames[operation.first_hash_id() as usize];
+        assert_eq!(
+            frame.words.len(),
+            2 * TRANSCRIPT_HEADER_WORDS + digest(180).words().len()
+        );
+    }
+
+    #[rstest]
+    fn recursion_public_claim_phase_has_no_duplicate_statement_payload() {
+        let plan = plan_for_schema(VerifierSchema::Recursion, 1);
+        let execution = recording_execution_for(&plan, 1);
         let operation = execution
             .operations()
             .iter()
@@ -1496,6 +1594,26 @@ mod tests {
     }
 
     #[rstest]
+    fn public_claim_schema_mismatch_is_rejected_before_execution() {
+        let plan = plan_for_schema(VerifierSchema::Recursion, 1);
+        assert_eq!(
+            execute_fixed_transcript(
+                RecordingTranscriptBackend::default(),
+                &plan,
+                ProtocolId::from(digest(9)),
+                &statement(1),
+                VerifierPublicClaim::Vm(VmPublicClaimDigest::from(digest(180))),
+                &proof(),
+            )
+            .map(|_| ()),
+            Err(TranscriptProgramError::PublicClaimSchemaMismatch {
+                expected: VerifierSchema::Recursion,
+                actual: VerifierSchema::Vm,
+            })
+        );
+    }
+
+    #[rstest]
     fn fixed_wire_count_mismatch_is_rejected_before_transcript_execution() {
         assert_eq!(
             execute_fixed_transcript(
@@ -1503,6 +1621,7 @@ mod tests {
                 &plan(2),
                 ProtocolId::from(digest(9)),
                 &statement(1),
+                VerifierPublicClaim::Vm(VmPublicClaimDigest::from(digest(180))),
                 &proof(),
             )
             .map(|_| ()),

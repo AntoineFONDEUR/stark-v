@@ -393,8 +393,11 @@ fn payload_word_count(
         VerifierStep::AbsorbTraceCommitment { .. } | VerifierStep::AbsorbFriCommitment { .. } => {
             DIGEST_WORDS
         }
-        VerifierStep::AbsorbPublicClaim
-        | VerifierStep::DrawRelationChallenge { .. }
+        VerifierStep::AbsorbPublicClaim => match plan.schema() {
+            super::kernel::VerifierSchema::Vm => DIGEST_WORDS,
+            super::kernel::VerifierSchema::Recursion => 0,
+        },
+        VerifierStep::DrawRelationChallenge { .. }
         | VerifierStep::DrawCompositionRandomness
         | VerifierStep::DrawOodsPoint
         | VerifierStep::DrawDeepRandomness

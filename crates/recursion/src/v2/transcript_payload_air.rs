@@ -29,7 +29,7 @@ use stwo_macros::define_component_tables;
 use super::control_air::{
     LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
 };
-use super::kernel::{VerifierControlPlan, VerifierStep};
+use super::kernel::{VerifierControlPlan, VerifierSchema, VerifierStep};
 use super::protocol::CanonicalWords;
 use super::transcript::{RecordingTranscriptBackend, TranscriptTrace};
 use super::transcript_binding_air::{TranscriptCallPreprocessed, UniversalTranscriptWitness};
@@ -128,6 +128,7 @@ pub enum VerifierInputKind {
     LastLayerCoefficient = 8,
     InteractionPowNonce = 9,
     PcsPowNonce = 10,
+    VmPublicClaimDigest = 11,
 }
 
 impl VerifierInputKind {
@@ -154,6 +155,7 @@ impl PayloadSource {
                 | VerifierInputKind::SampledValue
                 | VerifierInputKind::FriCommitment
                 | VerifierInputKind::LastLayerCoefficient
+                | VerifierInputKind::VmPublicClaimDigest
         )
     }
 }
@@ -465,8 +467,17 @@ fn payload_source(
             require_payload_width("PCS PoW nonce", payload_index, QM31_WORDS)?;
             dynamic(VerifierInputKind::PcsPowNonce, 0, payload_index)
         }
-        VerifierStep::AbsorbPublicClaim
-        | VerifierStep::DrawRelationChallenge { .. }
+        VerifierStep::AbsorbPublicClaim => {
+            if plan.schema() != VerifierSchema::Vm {
+                return Err(TranscriptPayloadError::UnexpectedPayload {
+                    step,
+                    payload_index,
+                });
+            }
+            require_payload_width("VM public claim digest", payload_index, DIGEST_WORDS as u32)?;
+            dynamic(VerifierInputKind::VmPublicClaimDigest, 0, payload_index)
+        }
+        VerifierStep::DrawRelationChallenge { .. }
         | VerifierStep::DrawCompositionRandomness
         | VerifierStep::DrawOodsPoint
         | VerifierStep::DrawDeepRandomness

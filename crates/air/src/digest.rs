@@ -184,6 +184,10 @@ semantic_digest!(
     RecursionAirProgramDigest,
     "Commitment to the fixed recursion AIR evaluation program."
 );
+semantic_digest!(
+    VmPublicClaimDigest,
+    "Commitment to the complete VM public claim hidden inside a recursion leaf."
+);
 
 #[cfg(test)]
 mod tests {
@@ -229,5 +233,13 @@ mod tests {
     #[test]
     fn protocol_and_io_commitments_have_distinct_types() {
         assert_ne!(TypeId::of::<ProtocolId>(), TypeId::of::<IoDigest>());
+    }
+
+    #[test]
+    fn vm_public_claim_and_protocol_commitments_have_distinct_types() {
+        assert_ne!(
+            TypeId::of::<VmPublicClaimDigest>(),
+            TypeId::of::<ProtocolId>()
+        );
     }
 }

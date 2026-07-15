@@ -302,6 +302,7 @@ impl VerifierStep {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifierControlPlan {
     schema: VerifierSchema,
+    pcs: PcsParameters,
     canonical_prefix: Vec<M31Word>,
     steps: Vec<VerifierStep>,
 }
@@ -413,6 +414,7 @@ impl VerifierControlPlan {
         let canonical_prefix = profile_prefix(spec.schema, pcs, shape);
         Ok(Self {
             schema: spec.schema,
+            pcs,
             canonical_prefix,
             steps,
         })
@@ -420,6 +422,11 @@ impl VerifierControlPlan {
 
     pub const fn schema(&self) -> VerifierSchema {
         self.schema
+    }
+
+    /// Returns the checked PCS parameters that generated this control plan.
+    pub const fn pcs_parameters(&self) -> PcsParameters {
+        self.pcs
     }
 
     pub fn steps(&self) -> &[VerifierStep] {

@@ -21,6 +21,23 @@ use super::protocol::CanonicalWords;
 const RATE: usize = 8;
 const DRAW_TAG: u32 = 0x4452_4157;
 
+/// Monotonic coordinates at a boundary between transcript operations.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TranscriptPosition {
+    next_call_id: u32,
+    next_hash_id: u32,
+}
+
+impl TranscriptPosition {
+    pub const fn next_call_id(self) -> u32 {
+        self.next_call_id
+    }
+
+    pub const fn next_hash_id(self) -> u32 {
+        self.next_hash_id
+    }
+}
+
 /// Coordinates one permutation within both the global and per-hash schedules.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PermutationId {
@@ -462,6 +479,14 @@ where
         self.n_draws
     }
 
+    /// Returns the next call and hash identifiers without exposing mutable counters.
+    pub const fn position(&self) -> TranscriptPosition {
+        TranscriptPosition {
+            next_call_id: self.next_call_id,
+            next_hash_id: self.next_hash_id,
+        }
+    }
+
     pub const fn backend(&self) -> &B {
         &self.backend
     }
@@ -497,7 +522,7 @@ where
     }
 
     pub fn absorb_u64(&mut self, value: u64) -> Result<(), B::Error> {
-        self.absorb_u32s(&[value as u32, (value >> 32) as u32])
+        self.absorb_m31_words(&encode_u64_words(value))
     }
 
     pub fn absorb_digest(&mut self, digest: Digest8) -> Result<(), B::Error> {
@@ -566,11 +591,20 @@ where
 
     /// Verifies the nonce challenge and performs its transcript absorption once.
     pub fn verify_and_absorb_pow(&mut self, nonce: u64, bits: u32) -> Result<(), B::Error> {
+        self.absorb_u64(nonce)?;
+        self.verify_pow_from_current_digest(nonce, bits)
+    }
+
+    /// Checks a nonce already absorbed by a typed transcript operation.
+    pub(crate) fn verify_pow_from_current_digest(
+        &mut self,
+        nonce: u64,
+        bits: u32,
+    ) -> Result<(), B::Error> {
         if bits > 31 {
             return Err(TranscriptError::PowBitsOutOfRange { bits }.into());
         }
 
-        self.absorb_u64(nonce)?;
         let nonce_digest = self.digest;
         let word = self.draw_block()?[0];
         let call_id = self
@@ -648,6 +682,14 @@ where
             input,
         )
     }
+}
+
+/// Encodes one unrestricted integer as four little-endian 16-bit M31 limbs.
+pub(crate) fn encode_u64_words(value: u64) -> [M31Word; 4] {
+    core::array::from_fn(|limb| {
+        let value = ((value >> (16 * limb)) & 0xffff) as u16;
+        M31Word::from(value)
+    })
 }
 
 fn hash_chunks(words: &[M31Word]) -> Vec<[M31Word; RATE]> {

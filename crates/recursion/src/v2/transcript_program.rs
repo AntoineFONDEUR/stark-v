@@ -613,16 +613,26 @@ impl std::error::Error for TranscriptProgramError {}
 mod tests {
     use air::digest::{IoDigest, MemoryDigest, ProgramDigest};
     use rstest::rstest;
+    use stwo::core::pcs::TreeVec;
+    use stwo::core::poly::circle::CanonicCoset;
+    use stwo_constraint_framework::{FrameworkEval, assert_constraints_on_polys};
 
     use super::*;
+    use crate::v2::control_air::ControlRelations;
     use crate::v2::kernel::{VerifierProgramSpec, VerifierSchema};
     use crate::v2::protocol::{FixedProofShape, OptionalM31Word, PcsParameters};
     use crate::v2::statement::{
         CompleteExecutionStatement, JobContext, MachineState, SpanStatement,
     };
     use crate::v2::transcript::{NativeTranscriptBackend, RecordingTranscriptBackend};
+    use crate::v2::transcript_air::TranscriptAirRelations;
+    use crate::v2::transcript_binding_air::{
+        Eval as TranscriptBindingEval, TranscriptBindingRelations, TranscriptCallBindingTable,
+        TranscriptCallPreprocessed, UniversalTranscriptWitness,
+        gen_interaction_trace as gen_binding_interaction_trace, push_call_bindings,
+    };
     use crate::v2::transcript_layout::TranscriptLayout;
-    use crate::v2::wire::{FriLayerWire, FriQueryWire, MerklePathWire};
+    use crate::v2::wire::{FriLayerWire, FriQueryWire, MerklePathWire, ProofKind};
 
     type TestProof = FixedStarkProofWire<4, 1, 1, 1, 4, 2, 1, 4, 1, 4>;
 
@@ -669,11 +679,15 @@ mod tests {
         }
     }
 
-    fn plan(claimed_sum_count: u16) -> VerifierControlPlan {
-        let spec = VerifierProgramSpec::new(VerifierSchema::Vm, 1, 1, 1, 1)
+    fn plan_for_schema(schema: VerifierSchema, claimed_sum_count: u16) -> VerifierControlPlan {
+        let spec = VerifierProgramSpec::new(schema, 1, 1, 1, 1)
             .expect("fixture program has every verifier phase");
         VerifierControlPlan::new(spec, pcs(), &shape(claimed_sum_count))
             .expect("fixture geometry matches its PCS profile")
+    }
+
+    fn plan(claimed_sum_count: u16) -> VerifierControlPlan {
+        plan_for_schema(VerifierSchema::Vm, claimed_sum_count)
     }
 
     fn state(seed: u16) -> MachineState {
@@ -734,14 +748,123 @@ mod tests {
 
     fn recording_execution()
     -> VerifierTranscriptExecution<crate::v2::transcript::RecordingTranscriptBackend> {
+        recording_execution_for(&plan(1), 1)
+    }
+
+    fn recording_execution_for(
+        plan: &VerifierControlPlan,
+        statement_seed: u16,
+    ) -> VerifierTranscriptExecution<crate::v2::transcript::RecordingTranscriptBackend> {
         execute_fixed_transcript(
             RecordingTranscriptBackend::default(),
-            &plan(1),
+            plan,
             ProtocolId::from(digest(9)),
-            &statement(1),
+            &statement(statement_seed),
             &proof(),
         )
         .expect("fixture executes the complete typed transcript")
+    }
+
+    fn assert_call_binding_constraints(kind: ProofKind, tamper_enabler: bool) {
+        let vm_plan = plan_for_schema(VerifierSchema::Vm, 1);
+        let recursion_plan = plan_for_schema(VerifierSchema::Recursion, 1);
+        let preprocessing = TranscriptCallPreprocessed::new(&vm_plan, &recursion_plan)
+            .expect("fixture plans occupy their canonical transcript lanes");
+        let segment = recording_execution_for(&vm_plan, 1);
+        let left = recording_execution_for(&recursion_plan, 1);
+        let right = recording_execution_for(&recursion_plan, 2);
+        let witness = match kind {
+            ProofKind::SegmentLeaf => UniversalTranscriptWitness::Segment(&segment),
+            ProofKind::BinaryNode => UniversalTranscriptWitness::Binary {
+                left: &left,
+                right: &right,
+            },
+            ProofKind::EmptyLeaf => UniversalTranscriptWitness::Empty,
+        };
+        let mut table = TranscriptCallBindingTable::new();
+        push_call_bindings(&mut table, &preprocessing, witness)
+            .expect("validated transcript executions materialize");
+        if tamper_enabler {
+            table.enabler[0] = 0;
+        }
+
+        let control_relations = ControlRelations::dummy();
+        let transcript_relations = TranscriptAirRelations::dummy();
+        let binding_relations = TranscriptBindingRelations::dummy();
+        let preprocessed = preprocessing.gen_columns();
+        let trace = table.into_witness();
+        let (interaction, claimed_sum) = gen_binding_interaction_trace(
+            &trace,
+            &preprocessed,
+            kind,
+            &control_relations,
+            &transcript_relations,
+            &binding_relations,
+        );
+        let traces = TreeVec::new(vec![preprocessed, trace, interaction]);
+        let trace_polys = traces.map_cols(|column| column.interpolate());
+        let eval = TranscriptBindingEval {
+            log_size: preprocessing.log_size(),
+            proof_kind: kind,
+            control_relations,
+            transcript_relations,
+            binding_relations,
+        };
+        assert_constraints_on_polys(
+            &trace_polys,
+            CanonicCoset::new(preprocessing.log_size()),
+            |row| {
+                eval.evaluate(row);
+            },
+            claimed_sum,
+        );
+    }
+
+    #[rstest]
+    #[case::segment(ProofKind::SegmentLeaf)]
+    #[case::binary(ProofKind::BinaryNode)]
+    #[case::empty(ProofKind::EmptyLeaf)]
+    fn every_universal_mode_satisfies_the_transcript_call_binding(#[case] kind: ProofKind) {
+        assert_call_binding_constraints(kind, false);
+    }
+
+    #[rstest]
+    #[case::segment(ProofKind::SegmentLeaf, 144)]
+    #[case::binary(ProofKind::BinaryNode, 288)]
+    #[case::empty(ProofKind::EmptyLeaf, 0)]
+    fn proof_kind_activates_only_its_transcript_calls(
+        #[case] kind: ProofKind,
+        #[case] expected: usize,
+    ) {
+        let preprocessing = TranscriptCallPreprocessed::new(
+            &plan_for_schema(VerifierSchema::Vm, 1),
+            &plan_for_schema(VerifierSchema::Recursion, 1),
+        )
+        .expect("fixture plans occupy their canonical transcript lanes");
+        assert_eq!(preprocessing.active_call_count(kind), expected);
+    }
+
+    #[rstest]
+    #[should_panic]
+    fn transcript_call_rows_cannot_disable_trusted_preprocessing() {
+        assert_call_binding_constraints(ProofKind::SegmentLeaf, true);
+    }
+
+    #[rstest]
+    fn transcript_call_binding_constraint_profile_stays_cubic() {
+        use stwo_constraint_framework::expr::ExprEvaluator;
+
+        let eval = TranscriptBindingEval {
+            log_size: 4,
+            proof_kind: ProofKind::SegmentLeaf,
+            control_relations: ControlRelations::dummy(),
+            transcript_relations: TranscriptAirRelations::dummy(),
+            binding_relations: TranscriptBindingRelations::dummy(),
+        };
+        let degrees = eval
+            .evaluate(ExprEvaluator::new())
+            .constraint_degree_bounds();
+        assert_eq!((degrees.len(), degrees.into_iter().max()), (32, Some(3)));
     }
 
     #[rstest]

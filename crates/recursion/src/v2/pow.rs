@@ -23,6 +23,7 @@ use stwo_constraint_framework::{
 use stwo_macros::define_component_tables;
 
 use super::transcript::PowCheck;
+use super::transcript_binding_air::TranscriptBindingRelations;
 
 const M31_BITS: usize = 31;
 
@@ -287,13 +288,12 @@ impl FrameworkEval for Eval {
     }
 }
 
-/// Connects one final draw block and one fixed control step to the arithmetic predicate.
+/// Connects one transcript-owned PoW frame to the arithmetic predicate.
 #[derive(Clone)]
 pub struct FrameEval {
     pub log_size: u32,
     pub pow_relations: PowRelations,
-    pub control_relations: super::control_air::ControlRelations,
-    pub transcript_relations: super::transcript_air::TranscriptAirRelations,
+    pub binding_relations: TranscriptBindingRelations,
 }
 
 impl FrameworkEval for FrameEval {
@@ -310,15 +310,17 @@ impl FrameworkEval for FrameEval {
         for constraint in cols.constraints() {
             eval.add_constraint(constraint);
         }
-        let one = E::F::from(BaseField::from(1));
+        let pow_tag = cols.pow_kind.clone() * BaseField::from(14) - E::F::from(BaseField::from(8));
         eval.add_to_relation(RelationEntry::new(
-            &self.transcript_relations.output,
+            &self.binding_relations.pow_frame,
             -E::EF::from(cols.enabler.clone()),
             &[
                 cols.verifier_id.clone(),
+                cols.sequence.clone(),
+                pow_tag,
                 cols.hash_id.clone(),
                 cols.call_id.clone(),
-                one,
+                cols.bits.clone(),
                 cols.word_0.clone(),
                 cols.word_1.clone(),
                 cols.word_2.clone(),
@@ -327,21 +329,6 @@ impl FrameworkEval for FrameEval {
                 cols.word_5.clone(),
                 cols.word_6.clone(),
                 cols.word_7.clone(),
-            ],
-        ));
-        let pow_tag = cols.pow_kind.clone() * BaseField::from(14) - E::F::from(BaseField::from(8));
-        let zero = E::F::from(BaseField::from(0));
-        eval.add_to_relation(RelationEntry::new(
-            &self.control_relations.step,
-            -E::EF::from(cols.enabler.clone()),
-            &[
-                cols.verifier_id.clone(),
-                cols.sequence.clone(),
-                pow_tag,
-                cols.bits.clone(),
-                zero.clone(),
-                zero.clone(),
-                zero,
             ],
         ));
         eval.add_to_relation(RelationEntry::new(
@@ -390,12 +377,11 @@ pub fn gen_interaction_trace(
     logup_gen.finalize_last()
 }
 
-/// Generates the draw/control/check binding interaction trace.
+/// Generates the transcript-frame/check binding interaction trace.
 pub fn gen_frame_interaction_trace(
     trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     pow_relations: &PowRelations,
-    control_relations: &super::control_air::ControlRelations,
-    transcript_relations: &super::transcript_air::TranscriptAirRelations,
+    binding_relations: &TranscriptBindingRelations,
 ) -> (
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     QM31,
@@ -408,15 +394,20 @@ pub fn gen_frame_interaction_trace(
         .map(|&value| PackedQM31::from(value))
         .collect();
     let neg_enabled: Vec<PackedQM31> = enabled.iter().map(|&value| -value).collect();
-    let one = stwo::prover::backend::simd::m31::PackedM31::broadcast(BaseField::from(1));
-    let is_draw: Vec<_> = (0..cols.enabler.len()).map(|_| one).collect();
-    let output_denom = combine!(
-        transcript_relations.output,
+    let fourteen = stwo::prover::backend::simd::m31::PackedM31::broadcast(BaseField::from(14));
+    let eight = stwo::prover::backend::simd::m31::PackedM31::broadcast(BaseField::from(8));
+    let pow_tag: Vec<_> = (0..cols.enabler.len())
+        .map(|row| cols.pow_kind[row] * fourteen - eight)
+        .collect();
+    let frame_denom = combine!(
+        binding_relations.pow_frame,
         [
             cols.verifier_id,
+            cols.sequence,
+            &pow_tag,
             cols.hash_id,
             cols.call_id,
-            &is_draw,
+            cols.bits,
             cols.word_0,
             cols.word_1,
             cols.word_2,
@@ -425,25 +416,6 @@ pub fn gen_frame_interaction_trace(
             cols.word_5,
             cols.word_6,
             cols.word_7
-        ]
-    );
-    let fourteen = stwo::prover::backend::simd::m31::PackedM31::broadcast(BaseField::from(14));
-    let eight = stwo::prover::backend::simd::m31::PackedM31::broadcast(BaseField::from(8));
-    let pow_tag: Vec<_> = (0..cols.enabler.len())
-        .map(|row| cols.pow_kind[row] * fourteen - eight)
-        .collect();
-    let zero = stwo::prover::backend::simd::m31::PackedM31::broadcast(BaseField::from(0));
-    let zero_column: Vec<_> = (0..cols.enabler.len()).map(|_| zero).collect();
-    let control_denom = combine!(
-        control_relations.step,
-        [
-            cols.verifier_id,
-            cols.sequence,
-            &pow_tag,
-            cols.bits,
-            &zero_column,
-            &zero_column,
-            &zero_column
         ]
     );
     let check_denom = combine!(
@@ -459,12 +431,11 @@ pub fn gen_frame_interaction_trace(
     let mut logup_gen = LogupTraceGenerator::new(log_size);
     write_pair!(
         &neg_enabled,
-        &output_denom,
-        &neg_enabled,
-        &control_denom,
+        &frame_denom,
+        &enabled,
+        &check_denom,
         logup_gen
     );
-    write_col!(&enabled, &check_denom, logup_gen);
     logup_gen.finalize_last()
 }
 
@@ -652,7 +623,6 @@ mod tests {
     use prover::poseidon2_channel::Poseidon2M31Channel;
 
     use super::*;
-    use crate::v2::control_air::ControlRelations;
     use crate::v2::kernel::{VerifierControlPlan, VerifierProgramSpec, VerifierSchema};
     use crate::v2::protocol::{FixedProofShape, OptionalM31Word, PcsParameters};
     use crate::v2::transcript::{RecordingTranscriptBackend, TranscriptKernel, TranscriptTrace};
@@ -746,26 +716,20 @@ mod tests {
 
     fn assert_frame_table_satisfies_constraints(table: PowFrameTable) {
         let pow_relations = PowRelations::dummy();
-        let control_relations = ControlRelations::dummy();
-        let transcript_relations = super::super::transcript_air::TranscriptAirRelations::dummy();
+        let binding_relations = TranscriptBindingRelations::dummy();
         let trace = table.into_witness();
         let log_size = trace
             .first()
             .map(|column| column.domain.log_size())
             .expect("generated table has columns");
-        let (interaction, claimed_sum) = gen_frame_interaction_trace(
-            &trace,
-            &pow_relations,
-            &control_relations,
-            &transcript_relations,
-        );
+        let (interaction, claimed_sum) =
+            gen_frame_interaction_trace(&trace, &pow_relations, &binding_relations);
         let traces = TreeVec::new(vec![vec![], trace, interaction]);
         let trace_polys = traces.map_cols(|column| column.interpolate());
         let eval = FrameEval {
             log_size,
             pow_relations,
-            control_relations,
-            transcript_relations,
+            binding_relations,
         };
         assert_constraints_on_polys(
             &trace_polys,
@@ -892,12 +856,11 @@ mod tests {
         let eval = FrameEval {
             log_size: 4,
             pow_relations: PowRelations::dummy(),
-            control_relations: ControlRelations::dummy(),
-            transcript_relations: super::super::transcript_air::TranscriptAirRelations::dummy(),
+            binding_relations: TranscriptBindingRelations::dummy(),
         };
         let degrees = eval
             .evaluate(ExprEvaluator::new())
             .constraint_degree_bounds();
-        assert_eq!((degrees.len(), degrees.into_iter().max()), (4, Some(3)));
+        assert_eq!((degrees.len(), degrees.into_iter().max()), (3, Some(3)));
     }
 }

@@ -18,7 +18,15 @@ pub mod transcript_program;
 pub mod transcript_state_air;
 pub mod transcript_word_air;
 pub mod vm_public_claim;
+pub mod vm_public_claim_hash_air;
+pub mod vm_public_claim_input_air;
+pub mod vm_public_claim_semantics_circuit;
+pub mod vm_public_claim_semantics_input_air;
+pub mod vm_public_claim_semantics_lowering;
+pub mod vm_public_io_hash_air;
 pub mod wire;
 
 #[cfg(test)]
 pub(crate) mod test_fixtures;
+#[cfg(test)]
+mod vm_leaf_binding_tests;

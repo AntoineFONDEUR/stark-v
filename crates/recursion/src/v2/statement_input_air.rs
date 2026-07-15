@@ -66,6 +66,7 @@ pub const SEGMENT_STATEMENT_SCOPE: u32 = 0;
 pub const LEFT_STATEMENT_SCOPE: u32 = 1;
 pub const RIGHT_STATEMENT_SCOPE: u32 = 2;
 pub const PARENT_STATEMENT_SCOPE: u32 = 3;
+pub const VM_CLAIM_STATEMENT_SCOPE: u32 = 4;
 
 define_component_tables! {
     statement_input: {
@@ -282,7 +283,7 @@ impl FrameworkEval for Eval {
 
         let segment_active = BaseField::from(u32::from(self.proof_kind == ProofKind::SegmentLeaf));
         let binary_active = BaseField::from(u32::from(self.proof_kind == ProofKind::BinaryNode));
-        let active = segment_mask * segment_active + binary_mask * binary_active;
+        let active = segment_mask.clone() * segment_active + binary_mask * binary_active;
         eval.add_constraint((row_mask - active.clone()) * cols.value.clone());
 
         eval.add_to_relation(RelationEntry::new(
@@ -299,7 +300,16 @@ impl FrameworkEval for Eval {
         eval.add_to_relation(RelationEntry::new(
             &self.statement_relations.statement_word,
             E::EF::from(active),
-            &[statement_scope, word_index, cols.value],
+            &[statement_scope, word_index.clone(), cols.value.clone()],
+        ));
+        eval.add_to_relation(RelationEntry::new(
+            &self.statement_relations.statement_word,
+            E::EF::from(segment_mask * segment_active),
+            &[
+                E::F::from(BaseField::from(VM_CLAIM_STATEMENT_SCOPE)),
+                word_index,
+                cols.value,
+            ],
         ));
 
         eval.finalize_logup_in_pairs();
@@ -361,6 +371,15 @@ pub fn gen_interaction_trace(
             cols.value
         ]
     );
+    let vm_claim_scope =
+        vec![PackedM31::broadcast(BaseField::from(VM_CLAIM_STATEMENT_SCOPE)); simd_size];
+    let vm_claim_denom = combine!(
+        statement_relations.statement_word,
+        [vm_claim_scope, pp[WORD_INDEX_COLUMN], cols.value]
+    );
+    let vm_claim_active = (0..simd_size)
+        .map(|row| PackedQM31::from(pp[SEGMENT_MASK_COLUMN][row] * segment_active))
+        .collect::<Vec<_>>();
 
     let mut logup_gen = LogupTraceGenerator::new(log_size);
     write_pair!(
@@ -370,6 +389,7 @@ pub fn gen_interaction_trace(
         &statement_denom,
         logup_gen
     );
+    write_col!(&vm_claim_active, &vm_claim_denom, logup_gen);
     logup_gen.finalize_last()
 }
 
@@ -817,7 +837,10 @@ mod tests {
         let segment =
             statement_scope_terms(&statement, SEGMENT_STATEMENT_SCOPE, &statement_relations)
                 .expect("fixture statement has canonical width");
-        assert_eq!(component + input - segment, QM31::zero());
+        let vm_claim =
+            statement_scope_terms(&statement, VM_CLAIM_STATEMENT_SCOPE, &statement_relations)
+                .expect("fixture statement has canonical width");
+        assert_eq!(component + input - segment - vm_claim, QM31::zero());
     }
 
     #[rstest]
@@ -856,6 +879,6 @@ mod tests {
         let degrees = eval
             .evaluate(ExprEvaluator::new())
             .constraint_degree_bounds();
-        assert_eq!((degrees.len(), degrees.into_iter().max()), (3, Some(3)));
+        assert_eq!((degrees.len(), degrees.into_iter().max()), (4, Some(3)));
     }
 }

@@ -733,6 +733,7 @@ pub fn gen_interaction_trace(
 }
 
 /// Mode-indexed transcript executions accepted by the universal table.
+#[derive(Clone, Copy)]
 pub enum UniversalTranscriptWitness<'a> {
     Segment(&'a VerifierTranscriptExecution<RecordingTranscriptBackend>),
     Binary {

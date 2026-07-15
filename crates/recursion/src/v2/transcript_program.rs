@@ -632,9 +632,21 @@ mod tests {
         gen_interaction_trace as gen_binding_interaction_trace, push_call_bindings,
     };
     use crate::v2::transcript_layout::TranscriptLayout;
+    use crate::v2::transcript_state_air::{
+        Eval as TranscriptStateEval, TranscriptFrameStateTable, TranscriptStatePreprocessed,
+        TranscriptStateRelations, gen_interaction_trace as gen_state_interaction_trace,
+        push_frame_states,
+    };
     use crate::v2::wire::{FriLayerWire, FriQueryWire, MerklePathWire, ProofKind};
 
     type TestProof = FixedStarkProofWire<4, 1, 1, 1, 4, 2, 1, 4, 1, 4>;
+
+    #[derive(Clone, Copy)]
+    enum FrameStateTamper {
+        None,
+        InitialDigest,
+        InactiveValue,
+    }
 
     fn word(value: u16) -> M31Word {
         M31Word::from(value)
@@ -820,6 +832,63 @@ mod tests {
         );
     }
 
+    fn assert_frame_state_constraints(kind: ProofKind, tamper: FrameStateTamper) {
+        let vm_plan = plan_for_schema(VerifierSchema::Vm, 1);
+        let recursion_plan = plan_for_schema(VerifierSchema::Recursion, 1);
+        let calls = TranscriptCallPreprocessed::new(&vm_plan, &recursion_plan)
+            .expect("fixture plans occupy their canonical transcript lanes");
+        let preprocessing = TranscriptStatePreprocessed::new(&calls)
+            .expect("trusted call layout has canonical digest transitions");
+        let segment = recording_execution_for(&vm_plan, 1);
+        let left = recording_execution_for(&recursion_plan, 1);
+        let right = recording_execution_for(&recursion_plan, 2);
+        let witness = match kind {
+            ProofKind::SegmentLeaf => UniversalTranscriptWitness::Segment(&segment),
+            ProofKind::BinaryNode => UniversalTranscriptWitness::Binary {
+                left: &left,
+                right: &right,
+            },
+            ProofKind::EmptyLeaf => UniversalTranscriptWitness::Empty,
+        };
+        let mut table = TranscriptFrameStateTable::new();
+        push_frame_states(&mut table, &preprocessing, witness)
+            .expect("validated transcript frames materialize");
+        match tamper {
+            FrameStateTamper::None => {}
+            FrameStateTamper::InitialDigest | FrameStateTamper::InactiveValue => {
+                table.input_0[0] = 1;
+            }
+        }
+
+        let binding_relations = TranscriptBindingRelations::dummy();
+        let state_relations = TranscriptStateRelations::dummy();
+        let preprocessed = preprocessing.gen_columns();
+        let trace = table.into_witness();
+        let (interaction, claimed_sum) = gen_state_interaction_trace(
+            &trace,
+            &preprocessed,
+            kind,
+            &binding_relations,
+            &state_relations,
+        );
+        let traces = TreeVec::new(vec![preprocessed, trace, interaction]);
+        let trace_polys = traces.map_cols(|column| column.interpolate());
+        let eval = TranscriptStateEval {
+            log_size: preprocessing.log_size(),
+            proof_kind: kind,
+            binding_relations,
+            state_relations,
+        };
+        assert_constraints_on_polys(
+            &trace_polys,
+            CanonicCoset::new(preprocessing.log_size()),
+            |row| {
+                eval.evaluate(row);
+            },
+            claimed_sum,
+        );
+    }
+
     #[rstest]
     #[case::segment(ProofKind::SegmentLeaf)]
     #[case::binary(ProofKind::BinaryNode)]
@@ -865,6 +934,60 @@ mod tests {
             .evaluate(ExprEvaluator::new())
             .constraint_degree_bounds();
         assert_eq!((degrees.len(), degrees.into_iter().max()), (32, Some(3)));
+    }
+
+    #[rstest]
+    #[case::segment(ProofKind::SegmentLeaf)]
+    #[case::binary(ProofKind::BinaryNode)]
+    #[case::empty(ProofKind::EmptyLeaf)]
+    fn every_universal_mode_satisfies_the_transcript_state_chain(#[case] kind: ProofKind) {
+        assert_frame_state_constraints(kind, FrameStateTamper::None);
+    }
+
+    #[rstest]
+    #[case::segment(ProofKind::SegmentLeaf, 31)]
+    #[case::binary(ProofKind::BinaryNode, 62)]
+    #[case::empty(ProofKind::EmptyLeaf, 0)]
+    fn proof_kind_activates_only_its_transcript_frames(
+        #[case] kind: ProofKind,
+        #[case] expected: usize,
+    ) {
+        let calls = TranscriptCallPreprocessed::new(
+            &plan_for_schema(VerifierSchema::Vm, 1),
+            &plan_for_schema(VerifierSchema::Recursion, 1),
+        )
+        .expect("fixture plans occupy their canonical transcript lanes");
+        let preprocessing = TranscriptStatePreprocessed::new(&calls)
+            .expect("trusted call layout has canonical digest transitions");
+        assert_eq!(preprocessing.active_frame_count(kind), expected);
+    }
+
+    #[rstest]
+    #[should_panic]
+    fn first_transcript_digest_must_be_zero() {
+        assert_frame_state_constraints(ProofKind::SegmentLeaf, FrameStateTamper::InitialDigest);
+    }
+
+    #[rstest]
+    #[should_panic]
+    fn inactive_transcript_state_values_must_be_zero() {
+        assert_frame_state_constraints(ProofKind::EmptyLeaf, FrameStateTamper::InactiveValue);
+    }
+
+    #[rstest]
+    fn transcript_state_constraint_profile_stays_cubic() {
+        use stwo_constraint_framework::expr::ExprEvaluator;
+
+        let eval = TranscriptStateEval {
+            log_size: 4,
+            proof_kind: ProofKind::SegmentLeaf,
+            binding_relations: TranscriptBindingRelations::dummy(),
+            state_relations: TranscriptStateRelations::dummy(),
+        };
+        let degrees = eval
+            .evaluate(ExprEvaluator::new())
+            .constraint_degree_bounds();
+        assert_eq!((degrees.len(), degrees.into_iter().max()), (31, Some(3)));
     }
 
     #[rstest]

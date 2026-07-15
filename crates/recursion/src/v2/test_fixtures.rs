@@ -16,7 +16,7 @@ pub(crate) fn state(seed: u32) -> MachineState {
     let mut registers = [0_u32; 32];
     registers[1] = seed;
     MachineState::new(
-        seed * 4,
+        seed.wrapping_mul(4),
         registers,
         MemoryDigest::from(digest(seed as u16 + 10)),
         IoDigest::from(digest(seed as u16 + 20)),

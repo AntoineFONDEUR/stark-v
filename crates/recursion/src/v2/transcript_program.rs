@@ -621,6 +621,7 @@ mod tests {
         CompleteExecutionStatement, JobContext, MachineState, SpanStatement,
     };
     use crate::v2::transcript::{NativeTranscriptBackend, RecordingTranscriptBackend};
+    use crate::v2::transcript_layout::TranscriptLayout;
     use crate::v2::wire::{FriLayerWire, FriQueryWire, MerklePathWire};
 
     type TestProof = FixedStarkProofWire<4, 1, 1, 1, 4, 2, 1, 4, 1, 4>;
@@ -793,6 +794,37 @@ mod tests {
                 .sponge_rows()
                 .map(|rows| rows.len()),
             Ok(execution.backend().trace().poseidon_calls.len())
+        );
+    }
+
+    #[rstest]
+    fn trusted_layout_matches_the_recording_backend() {
+        let plan = plan(1);
+        let execution = execute_fixed_transcript(
+            RecordingTranscriptBackend::default(),
+            &plan,
+            ProtocolId::from(digest(9)),
+            &statement(1),
+            &proof(),
+        )
+        .expect("fixture executes the complete typed transcript");
+        let layout = TranscriptLayout::new(&plan).expect("trusted plan has a finite layout");
+        assert_eq!(
+            layout.validate_execution(execution.operations(), execution.backend().trace()),
+            Ok(())
+        );
+    }
+
+    #[rstest]
+    fn trusted_layout_has_stable_preprocessed_dimensions() {
+        let layout = TranscriptLayout::new(&plan(1)).expect("fixture plan has a finite layout");
+        assert_eq!(
+            (
+                layout.operations().len(),
+                layout.frames().len(),
+                layout.calls().len(),
+            ),
+            (22, 31, 144)
         );
     }
 

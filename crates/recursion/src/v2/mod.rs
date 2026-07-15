@@ -5,6 +5,9 @@ pub mod kernel;
 pub mod pow;
 pub mod protocol;
 pub mod statement;
+pub mod statement_fold_circuit;
+pub mod statement_fold_input_air;
+pub mod statement_fold_lowering;
 pub mod statement_input_air;
 pub mod transcript;
 pub mod transcript_air;
@@ -15,3 +18,6 @@ pub mod transcript_program;
 pub mod transcript_state_air;
 pub mod transcript_word_air;
 pub mod wire;
+
+#[cfg(test)]
+pub(crate) mod test_fixtures;

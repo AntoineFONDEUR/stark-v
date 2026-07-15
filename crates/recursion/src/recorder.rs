@@ -57,6 +57,56 @@ impl Arena {
 
 type SharedArena = Rc<RefCell<Arena>>;
 
+/// Fixed arithmetic circuit whose designated outputs must all be zero.
+#[derive(Debug)]
+pub struct ConstraintCircuit {
+    arena: SharedArena,
+    outputs: Vec<usize>,
+}
+
+impl ConstraintCircuit {
+    pub fn arena(&self) -> core::cell::Ref<'_, Arena> {
+        self.arena.borrow()
+    }
+
+    pub fn outputs(&self) -> &[usize] {
+        &self.outputs
+    }
+}
+
+/// Value-aware builder for fixed zero-constraint circuits.
+#[derive(Debug, Default)]
+pub struct CircuitBuilder {
+    arena: SharedArena,
+    outputs: Vec<usize>,
+}
+
+impl CircuitBuilder {
+    pub fn input(&mut self, value: SecureField) -> (usize, Rec) {
+        let id = self.arena.borrow_mut().push(Op::Input, value);
+        (
+            id,
+            Rec::Node {
+                id,
+                value,
+                arena: self.arena.clone(),
+            },
+        )
+    }
+
+    pub fn constrain_zero(&mut self, constraint: Rec) {
+        let output = constraint.node_id(&self.arena);
+        self.outputs.push(output);
+    }
+
+    pub fn finish(self) -> ConstraintCircuit {
+        ConstraintCircuit {
+            arena: self.arena,
+            outputs: self.outputs,
+        }
+    }
+}
+
 /// A value handle: either a pure constant or a node in the shared arena.
 ///
 /// Constants fold eagerly; any operation touching a node records a new node.
@@ -583,5 +633,19 @@ mod tests {
         // The circuit has inputs and arithmetic: a faithful compilation of
         // the inner constraints, produced by running the same evaluate().
         assert!(arena.nodes.iter().any(|n| matches!(n.op, Op::Mul(_, _))));
+    }
+
+    #[test]
+    fn constraint_builder_keeps_each_zero_check_as_a_distinct_output() {
+        let mut builder = CircuitBuilder::default();
+        let (_, three) = builder.input(SecureField::from(BaseField::from(3)));
+        let (_, four) = builder.input(SecureField::from(BaseField::from(4)));
+        builder.constrain_zero(three + four - Rec::from(BaseField::from(7)));
+        let circuit = builder.finish();
+        let output = circuit.outputs()[0];
+        assert_eq!(
+            (circuit.outputs().len(), circuit.arena().nodes[output].value),
+            (1, SecureField::zero())
+        );
     }
 }

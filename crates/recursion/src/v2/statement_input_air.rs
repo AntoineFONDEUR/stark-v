@@ -2,11 +2,10 @@
 //!
 //! Transcript payloads expose each verified proof's statement as indexed
 //! words. This component consumes those verifier-input tuples and re-emits
-//! them under left, right, or parent statement scopes. Segment proofs route
-//! their sole VM statement directly to the parent scope. Binary proofs route
-//! the two recursive statements to distinct child scopes for the fold AIR.
-//! Public parent words close the final scope through verifier-computed LogUp
-//! terms, so no proof-dependent statement value enters preprocessing.
+//! them under segment, left-child, or right-child scopes. The statement
+//! semantics AIR consumes those private scopes together with parent words
+//! emitted by verifier-computed LogUp terms. No proof-dependent statement
+//! value enters preprocessing.
 
 use core::fmt;
 
@@ -63,9 +62,10 @@ const PREPROCESSED_COLUMN_IDS: [&str; PREPROCESSED_COLUMN_COUNT] = [
     "recursion_v2_statement_input_word_index",
 ];
 
-pub const PARENT_STATEMENT_SCOPE: u32 = 0;
+pub const SEGMENT_STATEMENT_SCOPE: u32 = 0;
 pub const LEFT_STATEMENT_SCOPE: u32 = 1;
 pub const RIGHT_STATEMENT_SCOPE: u32 = 2;
+pub const PARENT_STATEMENT_SCOPE: u32 = 3;
 
 define_component_tables! {
     statement_input: {
@@ -133,7 +133,13 @@ impl StatementInputPreprocessed {
         }
 
         let mut rows = Vec::with_capacity(row_count);
-        append_lane_rows(&mut rows, SEGMENT_VERIFIER_ID, PARENT_STATEMENT_SCOPE, 1, 0)?;
+        append_lane_rows(
+            &mut rows,
+            SEGMENT_VERIFIER_ID,
+            SEGMENT_STATEMENT_SCOPE,
+            1,
+            0,
+        )?;
         append_lane_rows(
             &mut rows,
             LEFT_RECURSION_VERIFIER_ID,
@@ -432,16 +438,12 @@ pub fn push_statement_inputs(
     Ok(())
 }
 
-/// Verifier-owned contribution that consumes every parent statement word.
+/// Verifier-owned contribution that emits every public parent statement word.
 pub fn public_statement_terms(
     statement: &SpanStatement,
     relations: &StatementInputRelations,
 ) -> Result<QM31, StatementInputError> {
-    Ok(-statement_scope_terms(
-        statement,
-        PARENT_STATEMENT_SCOPE,
-        relations,
-    )?)
+    statement_scope_terms(statement, PARENT_STATEMENT_SCOPE, relations)
 }
 
 fn statement_scope_terms(
@@ -801,7 +803,7 @@ mod tests {
     }
 
     #[rstest]
-    fn segment_statement_closes_between_transcript_and_public_parent() {
+    fn segment_statement_closes_into_the_leaf_semantics_scope() {
         let (statement, _) = child_statements();
         let mut channel = Poseidon2M31Channel::default();
         let input_relations = VerifierInputRelations::draw(&mut channel);
@@ -812,9 +814,10 @@ mod tests {
             &statement_relations,
         );
         let input = input_statement_terms(&statement, SEGMENT_VERIFIER_ID, &input_relations);
-        let public = public_statement_terms(&statement, &statement_relations)
-            .expect("fixture parent statement has canonical width");
-        assert_eq!(component + input + public, QM31::zero());
+        let segment =
+            statement_scope_terms(&statement, SEGMENT_STATEMENT_SCOPE, &statement_relations)
+                .expect("fixture statement has canonical width");
+        assert_eq!(component + input - segment, QM31::zero());
     }
 
     #[rstest]

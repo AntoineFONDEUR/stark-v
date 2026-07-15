@@ -78,7 +78,7 @@ pub fn record_from_claim<E: stwo_constraint_framework::FrameworkEval>(
     (recorder.arena, output)
 }
 
-fn limbs(value: SecureField) -> [u32; 4] {
+pub(crate) fn limbs(value: SecureField) -> [u32; 4] {
     let array = value.to_m31_array();
     [array[0].0, array[1].0, array[2].0, array[3].0]
 }
@@ -86,6 +86,11 @@ fn limbs(value: SecureField) -> [u32; 4] {
 /// Use counts: how many times each node is consumed as an operand, plus one
 /// for the output node (publicly consumed).
 fn use_counts(arena: &Arena, output: usize) -> Vec<u32> {
+    use_counts_for_outputs(arena, &[output])
+}
+
+/// Operand multiplicities plus one public consumption for every zero output.
+pub(crate) fn use_counts_for_outputs(arena: &Arena, outputs: &[usize]) -> Vec<u32> {
     let mut uses = vec![0u32; arena.nodes.len()];
     for node in &arena.nodes {
         match node.op {
@@ -97,7 +102,9 @@ fn use_counts(arena: &Arena, output: usize) -> Vec<u32> {
             Op::Input | Op::Const => {}
         }
     }
-    uses[output] += 1;
+    for output in outputs {
+        uses[*output] += 1;
+    }
     uses
 }
 
@@ -110,15 +117,36 @@ pub fn lower_arena(
     inner_log_size: u32,
     inner_claimed_sum: SecureField,
 ) -> CircuitClaim {
-    let uses = use_counts(arena, output);
-    let mut inputs = Vec::new();
+    lower_arena_operations(traces, circuit_id, arena, &[output]);
+    let inputs = arena
+        .nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(id, node)| matches!(node.op, Op::Input).then_some((id as u32, node.value)))
+        .collect();
 
+    CircuitClaim {
+        circuit_id,
+        inputs,
+        inner_log_size,
+        inner_claimed_sum,
+        output: (output as u32, arena.nodes[output].value),
+    }
+}
+
+/// Lowers every arithmetic node for a circuit with one or more public outputs.
+pub(crate) fn lower_arena_operations(
+    traces: &mut RecursionTraces,
+    circuit_id: u32,
+    arena: &Arena,
+    outputs: &[usize],
+) {
+    let uses = use_counts_for_outputs(arena, outputs);
     for (id, node) in arena.nodes.iter().enumerate() {
         let node_id = id as u32;
         let out = limbs(node.value);
         match node.op {
-            Op::Input => inputs.push((node_id, node.value)),
-            Op::Const => {}
+            Op::Input | Op::Const => {}
             Op::Mul(a, b) => {
                 let av = limbs(arena.nodes[a].value);
                 let bv = limbs(arena.nodes[b].value);
@@ -156,14 +184,6 @@ pub fn lower_arena(
                 );
             }
         }
-    }
-
-    CircuitClaim {
-        circuit_id,
-        inputs,
-        inner_log_size,
-        inner_claimed_sum,
-        output: (output as u32, arena.nodes[output].value),
     }
 }
 

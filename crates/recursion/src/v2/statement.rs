@@ -27,6 +27,86 @@ pub const SPAN_BODY_CANONICAL_WORDS: usize = 1 + EXECUTED_SPAN_CANONICAL_WORDS;
 pub const SPAN_STATEMENT_CANONICAL_WORDS: usize =
     1 + JOB_CONTEXT_CANONICAL_WORDS + SLOT_SPAN_CANONICAL_WORDS + SPAN_BODY_CANONICAL_WORDS;
 
+/// Word offsets in [`SpanStatement::canonical_words`].
+pub mod canonical_layout {
+    use super::{
+        JOB_CONTEXT_CANONICAL_WORDS, MACHINE_STATE_CANONICAL_WORDS, SLOT_SPAN_CANONICAL_WORDS,
+        SPAN_STATEMENT_CANONICAL_WORDS,
+    };
+
+    pub const SPAN_TAG: usize = 0;
+    pub const JOB_START: usize = SPAN_TAG + 1;
+    pub const JOB_TAG: usize = JOB_START;
+    pub const COMPLETE_START: usize = JOB_TAG + 1;
+    pub const COMPLETE_TAG: usize = COMPLETE_START;
+    pub const PROTOCOL_START: usize = COMPLETE_TAG + 1;
+    pub const PROGRAM_START: usize = PROTOCOL_START + 8;
+    pub const INITIAL_STATE_START: usize = PROGRAM_START + 8;
+    pub const FINAL_STATE_START: usize = INITIAL_STATE_START + MACHINE_STATE_CANONICAL_WORDS;
+    pub const PUBLIC_INPUT_START: usize = FINAL_STATE_START + MACHINE_STATE_CANONICAL_WORDS;
+    pub const PUBLIC_OUTPUT_START: usize = PUBLIC_INPUT_START + 8;
+    pub const TOTAL_CYCLES_START: usize = PUBLIC_OUTPUT_START + 8;
+    pub const JOB_SEGMENT_COUNT_START: usize = TOTAL_CYCLES_START + 4;
+    pub const JOB_SLOT_HEIGHT: usize = JOB_SEGMENT_COUNT_START + 2;
+
+    pub const SLOT_START: usize = JOB_START + JOB_CONTEXT_CANONICAL_WORDS;
+    pub const SLOT_TAG: usize = SLOT_START;
+    pub const SLOT_NODE_INDEX_START: usize = SLOT_TAG + 1;
+    pub const SLOT_HEIGHT: usize = SLOT_NODE_INDEX_START + 4;
+
+    pub const BODY_START: usize = SLOT_START + SLOT_SPAN_CANONICAL_WORDS;
+    pub const BODY_TAG: usize = BODY_START;
+    pub const EXECUTED_START: usize = BODY_TAG + 1;
+    pub const EXECUTED_TAG: usize = EXECUTED_START;
+    pub const FIRST_SEGMENT_START: usize = EXECUTED_TAG + 1;
+    pub const EXECUTED_SEGMENT_COUNT_START: usize = FIRST_SEGMENT_START + 2;
+    pub const FIRST_CYCLE_START: usize = EXECUTED_SEGMENT_COUNT_START + 2;
+    pub const EXECUTED_CYCLE_COUNT_START: usize = FIRST_CYCLE_START + 4;
+    pub const ENTRY_STATE_START: usize = EXECUTED_CYCLE_COUNT_START + 4;
+    pub const EXIT_STATE_START: usize = ENTRY_STATE_START + MACHINE_STATE_CANONICAL_WORDS;
+    pub const INPUT_EDGE_START: usize = EXIT_STATE_START + MACHINE_STATE_CANONICAL_WORDS;
+    pub const INPUT_EDGE_TAG: usize = INPUT_EDGE_START;
+    pub const INPUT_EDGE_DIGEST_START: usize = INPUT_EDGE_TAG + 1;
+    pub const OUTPUT_EDGE_START: usize = INPUT_EDGE_DIGEST_START + 8;
+    pub const OUTPUT_EDGE_TAG: usize = OUTPUT_EDGE_START;
+    pub const OUTPUT_EDGE_DIGEST_START: usize = OUTPUT_EDGE_TAG + 1;
+
+    pub const MACHINE_STATE_TAG_OFFSET: usize = 0;
+    pub const MACHINE_STATE_PC_START_OFFSET: usize = MACHINE_STATE_TAG_OFFSET + 1;
+    pub const MACHINE_STATE_REGISTERS_START_OFFSET: usize = MACHINE_STATE_PC_START_OFFSET + 2;
+    pub const MACHINE_STATE_RW_DIGEST_START_OFFSET: usize =
+        MACHINE_STATE_REGISTERS_START_OFFSET + 64;
+    pub const MACHINE_STATE_IO_DIGEST_START_OFFSET: usize =
+        MACHINE_STATE_RW_DIGEST_START_OFFSET + 8;
+
+    const MACHINE_STATE_STARTS: [usize; 4] = [
+        INITIAL_STATE_START,
+        FINAL_STATE_START,
+        ENTRY_STATE_START,
+        EXIT_STATE_START,
+    ];
+
+    /// Whether a word is a raw 16-bit limb or a smaller integer field.
+    pub fn is_integer_word(index: usize) -> bool {
+        let in_machine_state = MACHINE_STATE_STARTS.iter().any(|start| {
+            (*start + MACHINE_STATE_PC_START_OFFSET..*start + MACHINE_STATE_RW_DIGEST_START_OFFSET)
+                .contains(&index)
+        });
+        in_machine_state
+            || (TOTAL_CYCLES_START..TOTAL_CYCLES_START + 4).contains(&index)
+            || (JOB_SEGMENT_COUNT_START..JOB_SEGMENT_COUNT_START + 2).contains(&index)
+            || index == JOB_SLOT_HEIGHT
+            || (SLOT_NODE_INDEX_START..SLOT_NODE_INDEX_START + 4).contains(&index)
+            || index == SLOT_HEIGHT
+            || (FIRST_SEGMENT_START..FIRST_SEGMENT_START + 2).contains(&index)
+            || (EXECUTED_SEGMENT_COUNT_START..EXECUTED_SEGMENT_COUNT_START + 2).contains(&index)
+            || (FIRST_CYCLE_START..FIRST_CYCLE_START + 4).contains(&index)
+            || (EXECUTED_CYCLE_COUNT_START..EXECUTED_CYCLE_COUNT_START + 4).contains(&index)
+    }
+
+    const _: () = assert!(OUTPUT_EDGE_DIGEST_START + 8 == SPAN_STATEMENT_CANONICAL_WORDS);
+}
+
 /// Complete machine state at one segment boundary.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct MachineState {
@@ -208,6 +288,11 @@ impl SlotSpan {
 
     pub const fn height(&self) -> u8 {
         self.height
+    }
+
+    /// Position among spans at this height.
+    pub const fn node_index(&self) -> u64 {
+        self.first >> self.height
     }
 
     pub const fn capacity(&self) -> u64 {
@@ -654,7 +739,7 @@ impl CanonicalWords for JobContext {
 impl CanonicalWords for SlotSpan {
     fn append_canonical_words(&self, output: &mut Vec<M31Word>) {
         output.push(CanonicalTag::SlotSpan.word());
-        append_raw_u64(output, self.first);
+        append_raw_u64(output, self.node_index());
         output.push(M31Word::from(self.height as u16));
     }
 }
@@ -922,6 +1007,40 @@ mod tests {
                 EXECUTED_SPAN_CANONICAL_WORDS,
                 SPAN_BODY_CANONICAL_WORDS,
             )
+        );
+    }
+
+    #[rstest]
+    fn slot_span_encoding_uses_the_height_relative_node_index() {
+        let slots = SlotSpan::new(8, 2).expect("fixture span is aligned and bounded");
+        assert_eq!(
+            slots.canonical_words(),
+            vec![
+                CanonicalTag::SlotSpan.word(),
+                M31Word::from(2),
+                M31Word::ZERO,
+                M31Word::ZERO,
+                M31Word::ZERO,
+                M31Word::from(2),
+            ]
+        );
+    }
+
+    #[rstest]
+    fn canonical_layout_classifies_every_raw_integer_word() {
+        let integer_count = (0..SPAN_STATEMENT_CANONICAL_WORDS)
+            .filter(|index| canonical_layout::is_integer_word(*index))
+            .count();
+        assert_eq!(
+            (
+                integer_count,
+                canonical_layout::is_integer_word(canonical_layout::BODY_TAG),
+                canonical_layout::is_integer_word(
+                    canonical_layout::INITIAL_STATE_START
+                        + canonical_layout::MACHINE_STATE_RW_DIGEST_START_OFFSET,
+                ),
+            ),
+            (288, false, false)
         );
     }
 

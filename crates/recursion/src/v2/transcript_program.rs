@@ -654,11 +654,12 @@ impl fmt::Display for TranscriptProgramError {
 impl std::error::Error for TranscriptProgramError {}
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use air::digest::{IoDigest, MemoryDigest, ProgramDigest};
     use prover::poseidon2_channel::Poseidon2M31Channel;
     use rstest::rstest;
     use stwo::core::channel::Channel;
+    use stwo::core::fields::qm31::SecureField;
     use stwo::core::pcs::TreeVec;
     use stwo::core::poly::circle::CanonicCoset;
     use stwo_constraint_framework::{FrameworkEval, assert_constraints_on_polys};
@@ -761,9 +762,27 @@ mod tests {
         }
     }
 
-    fn plan_for_schema(schema: VerifierSchema, claimed_sum_count: u16) -> VerifierControlPlan {
-        let spec = VerifierProgramSpec::new(schema, 1, 1, 1, 1)
-            .expect("fixture program has every verifier phase");
+    pub(crate) fn plan_for_schema(
+        schema: VerifierSchema,
+        claimed_sum_count: u16,
+    ) -> VerifierControlPlan {
+        plan_for_schema_with_counts(schema, claimed_sum_count, 1, 1)
+    }
+
+    pub(crate) fn plan_for_schema_with_counts(
+        schema: VerifierSchema,
+        claimed_sum_count: u16,
+        relation_challenge_count: u32,
+        public_logup_term_count: u32,
+    ) -> VerifierControlPlan {
+        let spec = VerifierProgramSpec::new(
+            schema,
+            relation_challenge_count,
+            public_logup_term_count,
+            1,
+            1,
+        )
+        .expect("fixture program has every verifier phase");
         VerifierControlPlan::new(spec, pcs(), &shape(claimed_sum_count))
             .expect("fixture geometry matches its PCS profile")
     }
@@ -840,17 +859,27 @@ mod tests {
         recording_execution_for(&plan(1), 1)
     }
 
-    fn recording_execution_for(
+    pub(crate) fn recording_execution_for(
         plan: &VerifierControlPlan,
         statement_seed: u16,
     ) -> VerifierTranscriptExecution<crate::v2::transcript::RecordingTranscriptBackend> {
+        recording_execution_for_with_claimed_sum(plan, statement_seed, SecureField::from(qm31(120)))
+    }
+
+    pub(crate) fn recording_execution_for_with_claimed_sum(
+        plan: &VerifierControlPlan,
+        statement_seed: u16,
+        claimed_sum: SecureField,
+    ) -> VerifierTranscriptExecution<crate::v2::transcript::RecordingTranscriptBackend> {
+        let mut proof = proof();
+        proof.claimed_sums[0] = Qm31Wire::from(claimed_sum);
         execute_fixed_transcript(
             RecordingTranscriptBackend::default(),
             plan,
             ProtocolId::from(digest(9)),
             &statement(statement_seed),
             public_claim(plan),
-            &proof(),
+            &proof,
         )
         .expect("fixture executes the complete typed transcript")
     }

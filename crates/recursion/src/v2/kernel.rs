@@ -71,7 +71,6 @@ impl VerifierProgramSpec {
     ) -> Result<Self, VerifierPlanError> {
         for (field, value) in [
             ("relation challenges", relation_challenge_count),
-            ("public LogUp terms", public_logup_term_count),
             ("AIR instructions", air_instruction_count),
             ("relation closures", relation_closure_count),
         ] {
@@ -81,6 +80,17 @@ impl VerifierProgramSpec {
             if value > MAX_PROGRAM_PHASE_COUNT {
                 return Err(VerifierPlanError::ProgramCountOutOfRange { field, value });
             }
+        }
+        if schema == VerifierSchema::Vm && public_logup_term_count == 0 {
+            return Err(VerifierPlanError::ZeroProgramCount {
+                field: "public LogUp terms",
+            });
+        }
+        if public_logup_term_count > MAX_PROGRAM_PHASE_COUNT {
+            return Err(VerifierPlanError::ProgramCountOutOfRange {
+                field: "public LogUp terms",
+                value: public_logup_term_count,
+            });
         }
         Ok(Self {
             schema,
@@ -945,6 +955,21 @@ mod tests {
     fn exact_control_trace_is_accepted() {
         let plan = plan(VerifierSchema::Vm);
         assert_eq!(plan.verify_control_trace(plan.steps()), Ok(()));
+    }
+
+    #[rstest]
+    fn recursion_program_accepts_zero_public_logup_terms() {
+        assert!(VerifierProgramSpec::new(VerifierSchema::Recursion, 3, 0, 7, 4).is_ok());
+    }
+
+    #[rstest]
+    fn vm_program_rejects_zero_public_logup_terms() {
+        assert_eq!(
+            VerifierProgramSpec::new(VerifierSchema::Vm, 3, 0, 7, 4),
+            Err(VerifierPlanError::ZeroProgramCount {
+                field: "public LogUp terms"
+            })
+        );
     }
 
     #[rstest]

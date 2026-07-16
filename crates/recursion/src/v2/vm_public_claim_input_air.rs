@@ -2,9 +2,11 @@
 //!
 //! Verifier preprocessing fixes every word coordinate, tag, capacity, and
 //! range class. Segment leaves expose the same canonical words to the claim
-//! hash and semantic binding circuits through separate scopes. Other proof
-//! modes carry zero values, so the universal recursion AIR keeps one shape
-//! without accepting an unused private claim.
+//! hash, semantic binding, and public-LogUp circuits through separate scopes.
+//! The range-checked bytes are exported independently to the public-LogUp
+//! circuit, avoiding a second unconstrained decomposition. Other proof modes
+//! carry zero values, so the universal recursion AIR keeps one shape without
+//! accepting an unused private claim.
 
 use core::fmt;
 
@@ -68,6 +70,8 @@ const PREPROCESSED_COLUMN_IDS: [&str; PREPROCESSED_COLUMN_COUNT] = [
 pub const VM_CLAIM_SEMANTICS_SCOPE: u32 = 0;
 /// Scope consumed by the Poseidon2 claim-word hash.
 pub const VM_CLAIM_HASH_SCOPE: u32 = 1;
+/// Scope consumed by the VM public-LogUp arithmetic circuit.
+pub const VM_PUBLIC_LOGUP_SCOPE: u32 = 2;
 /// Public-input digest lane in [`VmPublicIoWordRelation`].
 pub const VM_PUBLIC_INPUT_KIND: u32 = 0;
 /// Public-output digest lane in [`VmPublicIoWordRelation`].
@@ -84,6 +88,8 @@ use prover_columns::VmPublicClaimInputColumns;
 
 // One fixed claim word, separated by its only permitted consumer.
 relation!(VmPublicClaimWordRelation, 3);
+// One range-checked byte of a fixed u16 claim word: word, byte index, value.
+relation!(VmPublicClaimByteRelation, 3);
 // One public-IO hash stream word: input/output kind, stream index, and value.
 relation!(VmPublicIoWordRelation, 3);
 
@@ -91,6 +97,7 @@ relation!(VmPublicIoWordRelation, 3);
 #[derive(Clone)]
 pub struct VmPublicClaimInputRelations {
     pub claim_word: VmPublicClaimWordRelation,
+    pub claim_byte: VmPublicClaimByteRelation,
     pub io_word: VmPublicIoWordRelation,
 }
 
@@ -98,6 +105,7 @@ impl VmPublicClaimInputRelations {
     pub fn dummy() -> Self {
         Self {
             claim_word: VmPublicClaimWordRelation::dummy(),
+            claim_byte: VmPublicClaimByteRelation::dummy(),
             io_word: VmPublicIoWordRelation::dummy(),
         }
     }
@@ -105,6 +113,7 @@ impl VmPublicClaimInputRelations {
     pub fn draw(channel: &mut impl Channel) -> Self {
         Self {
             claim_word: VmPublicClaimWordRelation::draw(channel),
+            claim_byte: VmPublicClaimByteRelation::draw(channel),
             io_word: VmPublicIoWordRelation::draw(channel),
         }
     }
@@ -251,7 +260,11 @@ impl FrameworkEval for Eval {
         eval.add_constraint((one.clone() - active_u16.clone()) * cols.low_byte.clone());
         eval.add_constraint((one - active_u16.clone()) * cols.high_byte.clone());
 
-        for scope in [VM_CLAIM_SEMANTICS_SCOPE, VM_CLAIM_HASH_SCOPE] {
+        for scope in [
+            VM_CLAIM_SEMANTICS_SCOPE,
+            VM_CLAIM_HASH_SCOPE,
+            VM_PUBLIC_LOGUP_SCOPE,
+        ] {
             eval.add_to_relation(RelationEntry::new(
                 &self.claim_relations.claim_word,
                 E::EF::from(active.clone()),
@@ -282,8 +295,22 @@ impl FrameworkEval for Eval {
         ));
         eval.add_to_relation(RelationEntry::new(
             &self.vm_relations.range_check_8_8,
-            -E::EF::from(active_u16),
-            &[cols.low_byte, cols.high_byte],
+            -E::EF::from(active_u16.clone()),
+            &[cols.low_byte.clone(), cols.high_byte.clone()],
+        ));
+        eval.add_to_relation(RelationEntry::new(
+            &self.claim_relations.claim_byte,
+            E::EF::from(active_u16.clone()),
+            &[
+                word_index.clone(),
+                E::F::from(BaseField::from(0)),
+                cols.low_byte,
+            ],
+        ));
+        eval.add_to_relation(RelationEntry::new(
+            &self.claim_relations.claim_byte,
+            E::EF::from(active_u16),
+            &[word_index, E::F::from(BaseField::from(1)), cols.high_byte],
         ));
 
         eval.finalize_logup_in_pairs();
@@ -291,7 +318,7 @@ impl FrameworkEval for Eval {
     }
 }
 
-/// Generates the two scoped claim-word producers and u16 lookup consumers.
+/// Generates scoped claim words, public bytes, IO words, and range consumers.
 pub fn gen_interaction_trace(
     trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     preprocessed: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
@@ -328,6 +355,8 @@ pub fn gen_interaction_trace(
     let semantics_scope =
         vec![PackedM31::broadcast(BaseField::from(VM_CLAIM_SEMANTICS_SCOPE)); simd_size];
     let hash_scope = vec![PackedM31::broadcast(BaseField::from(VM_CLAIM_HASH_SCOPE)); simd_size];
+    let public_logup_scope =
+        vec![PackedM31::broadcast(BaseField::from(VM_PUBLIC_LOGUP_SCOPE)); simd_size];
     let semantics_denom = combine!(
         claim_relations.claim_word,
         [semantics_scope, pp[WORD_INDEX_COLUMN], cols.value]
@@ -335,6 +364,10 @@ pub fn gen_interaction_trace(
     let hash_denom = combine!(
         claim_relations.claim_word,
         [hash_scope, pp[WORD_INDEX_COLUMN], cols.value]
+    );
+    let public_logup_denom = combine!(
+        claim_relations.claim_word,
+        [public_logup_scope, pp[WORD_INDEX_COLUMN], cols.value]
     );
     let range_denom = combine!(
         vm_relations.range_check_8_8,
@@ -350,17 +383,40 @@ pub fn gen_interaction_trace(
         claim_relations.io_word,
         [output_kind, pp[OUTPUT_IO_INDEX_COLUMN], cols.value]
     );
+    let low_byte_index = vec![PackedM31::broadcast(BaseField::from(0)); simd_size];
+    let high_byte_index = vec![PackedM31::broadcast(BaseField::from(1)); simd_size];
+    let low_byte_denom = combine!(
+        claim_relations.claim_byte,
+        [pp[WORD_INDEX_COLUMN], low_byte_index, cols.low_byte]
+    );
+    let high_byte_denom = combine!(
+        claim_relations.claim_byte,
+        [pp[WORD_INDEX_COLUMN], high_byte_index, cols.high_byte]
+    );
 
     let mut logup_gen = LogupTraceGenerator::new(log_size);
     write_pair!(&active, &semantics_denom, &active, &hash_denom, logup_gen);
     write_pair!(
+        &active,
+        &public_logup_denom,
         &input_io_active,
         &input_io_denom,
-        &output_io_active,
-        &output_io_denom,
         logup_gen
     );
-    write_col!(&negative_u16, &range_denom, logup_gen);
+    write_pair!(
+        &output_io_active,
+        &output_io_denom,
+        &negative_u16,
+        &range_denom,
+        logup_gen
+    );
+    write_pair!(
+        &active_u16,
+        &low_byte_denom,
+        &active_u16,
+        &high_byte_denom,
+        logup_gen
+    );
     logup_gen.finalize_last()
 }
 

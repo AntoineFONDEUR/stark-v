@@ -3,6 +3,7 @@
 pub mod air_expression_circuit;
 pub mod air_relation_parameters;
 pub mod control_air;
+pub mod fri_merkle_air;
 pub mod kernel;
 pub mod merkle_root_air;
 pub mod oods_circuit;

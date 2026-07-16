@@ -18,6 +18,7 @@ pub mod transcript_payload_air;
 pub mod transcript_program;
 pub mod transcript_state_air;
 pub mod transcript_word_air;
+pub mod verifier_randomness_air;
 pub mod vm_public_claim;
 pub mod vm_public_claim_hash_air;
 pub mod vm_public_claim_input_air;

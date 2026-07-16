@@ -60,7 +60,8 @@ const LIMB_INDEX_COLUMN: usize = 13;
 const CONSTANT_MASK_COLUMN: usize = 14;
 const INPUT_MASK_COLUMN: usize = 15;
 const CONSTANT_COLUMN: usize = 16;
-const PREPROCESSED_COLUMN_COUNT: usize = 17;
+const VM_AIR_CLAIMED_SUM_MASK_COLUMN: usize = 17;
+const PREPROCESSED_COLUMN_COUNT: usize = 18;
 
 const PREPROCESSED_COLUMN_IDS: [&str; PREPROCESSED_COLUMN_COUNT] = [
     "recursion_v2_transcript_payload_row_mask",
@@ -80,6 +81,7 @@ const PREPROCESSED_COLUMN_IDS: [&str; PREPROCESSED_COLUMN_COUNT] = [
     "recursion_v2_transcript_payload_constant_mask",
     "recursion_v2_transcript_payload_input_mask",
     "recursion_v2_transcript_payload_constant",
+    "recursion_v2_transcript_payload_vm_air_claimed_sum_mask",
 ];
 
 define_component_tables! {
@@ -129,6 +131,7 @@ pub enum VerifierInputKind {
     InteractionPowNonce = 9,
     PcsPowNonce = 10,
     VmPublicClaimDigest = 11,
+    VmAirClaimedSum = 12,
 }
 
 impl VerifierInputKind {
@@ -325,6 +328,10 @@ impl TranscriptPayloadPreprocessed {
             columns[CONSTANT_MASK_COLUMN][index] = u32::from(row.source.constant.is_some());
             columns[INPUT_MASK_COLUMN][index] = u32::from(row.source.requires_input_relation());
             columns[CONSTANT_COLUMN][index] = row.source.constant.unwrap_or(M31Word::ZERO).as_u32();
+            columns[VM_AIR_CLAIMED_SUM_MASK_COLUMN][index] = u32::from(
+                row.verifier_id == SEGMENT_VERIFIER_ID
+                    && row.source.kind == VerifierInputKind::ClaimedSum,
+            );
         }
         let domain = CanonicCoset::new(self.log_size).circle_domain();
         columns
@@ -591,6 +598,8 @@ impl FrameworkEval for Eval {
         let constant_mask = eval.get_preprocessed_column(column_ids[CONSTANT_MASK_COLUMN].clone());
         let input_mask = eval.get_preprocessed_column(column_ids[INPUT_MASK_COLUMN].clone());
         let constant = eval.get_preprocessed_column(column_ids[CONSTANT_COLUMN].clone());
+        let vm_air_claimed_sum_mask =
+            eval.get_preprocessed_column(column_ids[VM_AIR_CLAIMED_SUM_MASK_COLUMN].clone());
         eval.add_constraint(cols.enabler.clone() - row_mask.clone());
 
         let segment_active = BaseField::from(u32::from(self.proof_kind == ProofKind::SegmentLeaf));
@@ -602,7 +611,7 @@ impl FrameworkEval for Eval {
 
         eval.add_to_relation(RelationEntry::new(
             &self.word_relations.payload_word,
-            E::EF::from(active),
+            E::EF::from(active.clone()),
             &[
                 verifier_id.clone(),
                 sequence,
@@ -618,7 +627,25 @@ impl FrameworkEval for Eval {
         eval.add_to_relation(RelationEntry::new(
             &self.input_relations.input_word,
             E::EF::from(shared_input),
-            &[verifier_id, source_kind, item_index, limb_index, cols.value],
+            &[
+                verifier_id.clone(),
+                source_kind,
+                item_index.clone(),
+                limb_index.clone(),
+                cols.value.clone(),
+            ],
+        ));
+
+        eval.add_to_relation(RelationEntry::new(
+            &self.input_relations.input_word,
+            E::EF::from(active * vm_air_claimed_sum_mask),
+            &[
+                verifier_id,
+                E::F::from(BaseField::from(VerifierInputKind::VmAirClaimedSum.as_u32())),
+                item_index,
+                limb_index,
+                cols.value,
+            ],
         ));
 
         eval.finalize_logup_in_pairs();
@@ -658,6 +685,9 @@ pub fn gen_interaction_trace(
     let shared_input: Vec<PackedQM31> = (0..simd_size)
         .map(|row| active[row] * PackedQM31::from(pp[INPUT_MASK_COLUMN][row]))
         .collect();
+    let vm_air_claimed_sum: Vec<PackedQM31> = (0..simd_size)
+        .map(|row| active[row] * PackedQM31::from(pp[VM_AIR_CLAIMED_SUM_MASK_COLUMN][row]))
+        .collect();
 
     let payload_denom = combine!(
         word_relations.payload_word,
@@ -683,6 +713,22 @@ pub fn gen_interaction_trace(
             cols.value
         ]
     );
+    let vm_air_claimed_sum_kind = vec![
+        stwo::prover::backend::simd::m31::PackedM31::broadcast(
+            BaseField::from(VerifierInputKind::VmAirClaimedSum.as_u32(),)
+        );
+        simd_size
+    ];
+    let vm_air_claimed_sum_denom = combine!(
+        input_relations.input_word,
+        [
+            pp[VERIFIER_ID_COLUMN],
+            vm_air_claimed_sum_kind,
+            pp[ITEM_INDEX_COLUMN],
+            pp[LIMB_INDEX_COLUMN],
+            cols.value
+        ]
+    );
 
     let mut logup_gen = LogupTraceGenerator::new(log_size);
     write_pair!(
@@ -692,6 +738,7 @@ pub fn gen_interaction_trace(
         &input_denom,
         logup_gen
     );
+    write_col!(&vm_air_claimed_sum, &vm_air_claimed_sum_denom, logup_gen);
     logup_gen.finalize_last()
 }
 

@@ -1370,7 +1370,7 @@ pub(crate) mod tests {
         let degrees = eval
             .evaluate(ExprEvaluator::new())
             .constraint_degree_bounds();
-        assert_eq!((degrees.len(), degrees.into_iter().max()), (4, Some(3)));
+        assert_eq!((degrees.len(), degrees.into_iter().max()), (5, Some(3)));
     }
 
     #[rstest]

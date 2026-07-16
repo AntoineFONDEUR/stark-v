@@ -16,6 +16,13 @@ runtimes:
     - python@3.10.8
 # This is the section where you manage your linters. (https://docs.trunk.io/check/configuration)
 lint:
+  definitions:
+    - name: clippy
+      commands:
+        - name: lint
+          run:
+            cargo clippy --release --message-format json --locked --
+            --cap-lints=warn --no-deps
   ignore:
     - linters: [cspell]
       paths:

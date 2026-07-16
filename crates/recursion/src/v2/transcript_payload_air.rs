@@ -4,7 +4,8 @@
 //! limb coordinate. Protocol and PCS words are constrained directly from
 //! verifier-owned constants. Statement and proof words are exported through
 //! a scoped input relation so later verification gadgets must use the same
-//! values that entered Fiat-Shamir.
+//! values that entered Fiat-Shamir. Fixed relation multiplicities account for
+//! semantic words that feed more than one verifier circuit.
 
 use core::fmt;
 
@@ -58,7 +59,7 @@ const SOURCE_KIND_COLUMN: usize = 11;
 const ITEM_INDEX_COLUMN: usize = 12;
 const LIMB_INDEX_COLUMN: usize = 13;
 const CONSTANT_MASK_COLUMN: usize = 14;
-const INPUT_MASK_COLUMN: usize = 15;
+const INPUT_USE_COUNT_COLUMN: usize = 15;
 const CONSTANT_COLUMN: usize = 16;
 const VM_AIR_CLAIMED_SUM_MASK_COLUMN: usize = 17;
 const PREPROCESSED_COLUMN_COUNT: usize = 18;
@@ -79,7 +80,7 @@ const PREPROCESSED_COLUMN_IDS: [&str; PREPROCESSED_COLUMN_COUNT] = [
     "recursion_v2_transcript_payload_item_index",
     "recursion_v2_transcript_payload_limb_index",
     "recursion_v2_transcript_payload_constant_mask",
-    "recursion_v2_transcript_payload_input_mask",
+    "recursion_v2_transcript_payload_input_use_count",
     "recursion_v2_transcript_payload_constant",
     "recursion_v2_transcript_payload_vm_air_claimed_sum_mask",
 ];
@@ -160,6 +161,25 @@ impl PayloadSource {
                 | VerifierInputKind::LastLayerCoefficient
                 | VerifierInputKind::VmPublicClaimDigest
         )
+    }
+
+    const fn input_relation_use_count(self) -> u32 {
+        match self.kind {
+            // The AIR-composition and DEEP-quotient circuits independently
+            // consume every sampled value authenticated by the transcript.
+            VerifierInputKind::SampledValue => 2,
+            VerifierInputKind::Statement
+            | VerifierInputKind::Commitment
+            | VerifierInputKind::ClaimedSum
+            | VerifierInputKind::FriCommitment
+            | VerifierInputKind::LastLayerCoefficient
+            | VerifierInputKind::VmPublicClaimDigest => 1,
+            VerifierInputKind::Protocol
+            | VerifierInputKind::PcsParameters
+            | VerifierInputKind::InteractionPowNonce
+            | VerifierInputKind::PcsPowNonce
+            | VerifierInputKind::VmAirClaimedSum => 0,
+        }
     }
 }
 
@@ -326,7 +346,7 @@ impl TranscriptPayloadPreprocessed {
             columns[ITEM_INDEX_COLUMN][index] = row.source.item_index;
             columns[LIMB_INDEX_COLUMN][index] = row.source.limb_index;
             columns[CONSTANT_MASK_COLUMN][index] = u32::from(row.source.constant.is_some());
-            columns[INPUT_MASK_COLUMN][index] = u32::from(row.source.requires_input_relation());
+            columns[INPUT_USE_COUNT_COLUMN][index] = row.source.input_relation_use_count();
             columns[CONSTANT_COLUMN][index] = row.source.constant.unwrap_or(M31Word::ZERO).as_u32();
             columns[VM_AIR_CLAIMED_SUM_MASK_COLUMN][index] = u32::from(
                 row.verifier_id == SEGMENT_VERIFIER_ID
@@ -596,7 +616,8 @@ impl FrameworkEval for Eval {
         let item_index = eval.get_preprocessed_column(column_ids[ITEM_INDEX_COLUMN].clone());
         let limb_index = eval.get_preprocessed_column(column_ids[LIMB_INDEX_COLUMN].clone());
         let constant_mask = eval.get_preprocessed_column(column_ids[CONSTANT_MASK_COLUMN].clone());
-        let input_mask = eval.get_preprocessed_column(column_ids[INPUT_MASK_COLUMN].clone());
+        let input_use_count =
+            eval.get_preprocessed_column(column_ids[INPUT_USE_COUNT_COLUMN].clone());
         let constant = eval.get_preprocessed_column(column_ids[CONSTANT_COLUMN].clone());
         let vm_air_claimed_sum_mask =
             eval.get_preprocessed_column(column_ids[VM_AIR_CLAIMED_SUM_MASK_COLUMN].clone());
@@ -605,7 +626,7 @@ impl FrameworkEval for Eval {
         let segment_active = BaseField::from(u32::from(self.proof_kind == ProofKind::SegmentLeaf));
         let binary_active = BaseField::from(u32::from(self.proof_kind == ProofKind::BinaryNode));
         let active = segment_mask * segment_active + binary_mask * binary_active;
-        let shared_input = active.clone() * input_mask;
+        let shared_input = active.clone() * input_use_count;
         eval.add_constraint((row_mask - active.clone()) * cols.value.clone());
         eval.add_constraint(active.clone() * constant_mask * (cols.value.clone() - constant));
 
@@ -683,7 +704,7 @@ pub fn gen_interaction_trace(
         })
         .collect();
     let shared_input: Vec<PackedQM31> = (0..simd_size)
-        .map(|row| active[row] * PackedQM31::from(pp[INPUT_MASK_COLUMN][row]))
+        .map(|row| active[row] * PackedQM31::from(pp[INPUT_USE_COUNT_COLUMN][row]))
         .collect();
     let vm_air_claimed_sum: Vec<PackedQM31> = (0..simd_size)
         .map(|row| active[row] * PackedQM31::from(pp[VM_AIR_CLAIMED_SUM_MASK_COLUMN][row]))
@@ -963,3 +984,19 @@ impl fmt::Display for TranscriptPayloadError {
 }
 
 impl std::error::Error for TranscriptPayloadError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sampled_values_feed_both_composition_and_deep_circuits() {
+        let source = PayloadSource {
+            kind: VerifierInputKind::SampledValue,
+            item_index: 0,
+            limb_index: 0,
+            constant: None,
+        };
+        assert_eq!(source.input_relation_use_count(), 2);
+    }
+}

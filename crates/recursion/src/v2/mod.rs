@@ -7,6 +7,8 @@ pub mod kernel;
 pub mod merkle_root_air;
 pub mod oods_circuit;
 pub mod pcs_deep_circuit;
+pub mod pcs_deep_input_air;
+pub mod pcs_deep_lowering;
 pub mod pow;
 pub mod protocol;
 pub mod query_position_air;

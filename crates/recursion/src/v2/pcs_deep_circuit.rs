@@ -28,7 +28,7 @@ const M31_BITS: usize = M31_CIRCLE_LOG_ORDER as usize;
 const SAFE_OODS_WORDS: [u32; SECURE_EXTENSION_DEGREE] = [17, 29, 43, 71];
 
 /// One verifier-owned input of the fixed DEEP circuit.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum PcsDeepInputSource {
     ActiveSelector,
     SampledValueWord { sample: u32, word: u32 },

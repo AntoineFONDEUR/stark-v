@@ -94,6 +94,8 @@ use prover_columns::{QueryBitsColumns, QueryMappingColumns};
 
 // Canonical query bits: verifier, raw-query index, and all 31 bits.
 relation!(QueryBitsRelation, 33);
+// Individually typed canonical bits consumed by arithmetic verifier circuits.
+relation!(QueryBitValueRelation, 4);
 // Routed position: verifier, purpose, item, raw query, position, and fold offset.
 relation!(QueryPositionRelation, 6);
 
@@ -101,6 +103,7 @@ relation!(QueryPositionRelation, 6);
 #[derive(Clone)]
 pub struct QueryPositionRelations {
     pub bits: QueryBitsRelation,
+    pub bit_value: QueryBitValueRelation,
     pub position: QueryPositionRelation,
 }
 
@@ -108,6 +111,7 @@ impl QueryPositionRelations {
     pub fn dummy() -> Self {
         Self {
             bits: QueryBitsRelation::dummy(),
+            bit_value: QueryBitValueRelation::dummy(),
             position: QueryPositionRelation::dummy(),
         }
     }
@@ -115,6 +119,7 @@ impl QueryPositionRelations {
     pub fn draw(channel: &mut impl stwo::core::channel::Channel) -> Self {
         Self {
             bits: QueryBitsRelation::draw(channel),
+            bit_value: QueryBitValueRelation::draw(channel),
             position: QueryPositionRelation::draw(channel),
         }
     }
@@ -614,6 +619,13 @@ impl FrameworkEval for BitsEval {
         eval.add_constraint((one.clone() - active.clone()) * cols.canonical_inverse.clone());
         let mut reconstructed = E::F::from(BaseField::from(0));
         let mut bit_sum = E::F::from(BaseField::from(0));
+        let mut tuple = vec![verifier_id.clone(), query.clone()];
+        tuple.extend(bits.iter().cloned());
+        eval.add_to_relation(RelationEntry::new(
+            &self.query_relations.bits,
+            E::EF::from(active.clone() * use_count),
+            &tuple,
+        ));
         for (bit, value) in bits.iter().enumerate() {
             eval.add_constraint(value.clone() * (one.clone() - value.clone()));
             eval.add_constraint((one.clone() - active.clone()) * value.clone());
@@ -626,8 +638,11 @@ impl FrameworkEval for BitsEval {
             bit_sum += value.clone();
         }
         eval.add_constraint(cols.word.clone() - reconstructed);
-        let zero_count = active.clone() * E::F::from(BaseField::from(M31_BITS as u32)) - bit_sum;
-        eval.add_constraint(zero_count * cols.canonical_inverse.clone() - active.clone());
+        eval.add_constraint(canonical_inverse_constraint(
+            active.clone(),
+            bit_sum,
+            cols.canonical_inverse.clone(),
+        ));
 
         eval.add_to_relation(RelationEntry::new(
             &self.randomness_relations.word,
@@ -640,16 +655,28 @@ impl FrameworkEval for BitsEval {
                 cols.word.clone(),
             ],
         ));
-        let mut tuple = vec![verifier_id, query];
-        tuple.extend(bits);
-        eval.add_to_relation(RelationEntry::new(
-            &self.query_relations.bits,
-            E::EF::from(active * use_count),
-            &tuple,
-        ));
+        for (bit, value) in bits.iter().enumerate() {
+            eval.add_to_relation(RelationEntry::new(
+                &self.query_relations.bit_value,
+                E::EF::from(active.clone()),
+                &[
+                    verifier_id.clone(),
+                    query.clone(),
+                    E::F::from(BaseField::from(bit as u32)),
+                    value.clone(),
+                ],
+            ));
+        }
         eval.finalize_logup_in_pairs();
         eval
     }
+}
+
+fn canonical_inverse_constraint<F>(active: F, bit_sum: F, inverse: F) -> F
+where
+    F: Clone + From<BaseField> + core::ops::Mul<Output = F> + core::ops::Sub<Output = F>,
+{
+    (active.clone() * F::from(BaseField::from(M31_BITS as u32)) - bit_sum) * inverse - active
 }
 
 /// Consumes canonical bits and emits one typed position per fixed obligation.
@@ -999,6 +1026,23 @@ pub fn gen_bits_interaction_trace(
             query_relations.bits.combine(&tuple)
         })
         .collect::<Vec<PackedQM31>>();
+    let bit_value_denominators = bits
+        .iter()
+        .enumerate()
+        .map(|(bit, values)| {
+            let bit = PackedM31::broadcast(BaseField::from(bit as u32));
+            (0..size)
+                .map(|row| {
+                    query_relations.bit_value.combine(&[
+                        pp[RAW_VERIFIER_ID_COLUMN][row],
+                        pp[RAW_QUERY_COLUMN][row],
+                        bit,
+                        values[row],
+                    ])
+                })
+                .collect::<Vec<PackedQM31>>()
+        })
+        .collect::<Vec<_>>();
     let mut logup = LogupTraceGenerator::new(trace[0].domain.log_size());
     write_pair!(
         &negative_active,
@@ -1007,6 +1051,21 @@ pub fn gen_bits_interaction_trace(
         &bits_denominator,
         logup
     );
+    for pair in bit_value_denominators.chunks(2) {
+        let mut column = logup.new_col();
+        for row in 0..size {
+            if let [first, second] = pair {
+                column.write_frac(
+                    row,
+                    active[row] * (first[row] + second[row]),
+                    first[row] * second[row],
+                );
+            } else {
+                column.write_frac(row, active[row], pair[0][row]);
+            }
+        }
+        column.finalize_col();
+    }
     logup.finalize_last()
 }
 
@@ -1349,43 +1408,13 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
     fn m31_zero_cannot_use_the_all_ones_bit_alias() {
-        let (preprocessing, mut bits, _) = materialize(ProofKind::SegmentLeaf);
-        bits.word[0] = 0;
-        bits.canonical_inverse[0] = 0;
-        bits.bit_0[0] = 1;
-        bits.bit_1[0] = 1;
-        bits.bit_2[0] = 1;
-        bits.bit_3[0] = 1;
-        bits.bit_4[0] = 1;
-        bits.bit_5[0] = 1;
-        bits.bit_6[0] = 1;
-        bits.bit_7[0] = 1;
-        bits.bit_8[0] = 1;
-        bits.bit_9[0] = 1;
-        bits.bit_10[0] = 1;
-        bits.bit_11[0] = 1;
-        bits.bit_12[0] = 1;
-        bits.bit_13[0] = 1;
-        bits.bit_14[0] = 1;
-        bits.bit_15[0] = 1;
-        bits.bit_16[0] = 1;
-        bits.bit_17[0] = 1;
-        bits.bit_18[0] = 1;
-        bits.bit_19[0] = 1;
-        bits.bit_20[0] = 1;
-        bits.bit_21[0] = 1;
-        bits.bit_22[0] = 1;
-        bits.bit_23[0] = 1;
-        bits.bit_24[0] = 1;
-        bits.bit_25[0] = 1;
-        bits.bit_26[0] = 1;
-        bits.bit_27[0] = 1;
-        bits.bit_28[0] = 1;
-        bits.bit_29[0] = 1;
-        bits.bit_30[0] = 1;
-        assert_bits_constraints(ProofKind::SegmentLeaf, &preprocessing, bits);
+        let canonical_constraint = canonical_inverse_constraint(
+            BaseField::from(1),
+            BaseField::from(M31_BITS as u32),
+            BaseField::zero(),
+        );
+        assert!(!canonical_constraint.is_zero());
     }
 
     #[test]
@@ -1449,6 +1478,25 @@ mod tests {
                 ]);
                 sum - denominator.inverse()
             });
-        assert!((bits_sum + mappings_sum + raw_sources + position_consumers).is_zero());
+        let bit_value_consumers = preprocessing
+            .raw_rows
+            .iter()
+            .filter(|row| row.segment_mask == 1)
+            .fold(QM31::zero(), |sum, row| {
+                let word = vm[row.query as usize].as_u32();
+                (0..M31_BITS).fold(sum, |sum, bit| {
+                    let denominator: QM31 = query_relations.bit_value.combine(&[
+                        M31::from(row.verifier_id),
+                        M31::from(row.query),
+                        M31::from(bit),
+                        M31::from((word >> bit) & 1),
+                    ]);
+                    sum - denominator.inverse()
+                })
+            });
+        assert!(
+            (bits_sum + mappings_sum + raw_sources + position_consumers + bit_value_consumers)
+                .is_zero()
+        );
     }
 }

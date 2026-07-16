@@ -54,7 +54,8 @@ const ARG_3_COLUMN: usize = 9;
 const KIND_COLUMN: usize = 10;
 const ITEM_BASE_COLUMN: usize = 11;
 const QUERY_ITEMS_COLUMN: usize = 12;
-const WORD_MASK_START_COLUMN: usize = 13;
+const SEMANTIC_USE_COUNT_COLUMN: usize = 13;
+const WORD_MASK_START_COLUMN: usize = 14;
 const PREPROCESSED_COLUMN_COUNT: usize = WORD_MASK_START_COLUMN + DRAW_WORDS;
 
 const PREPROCESSED_COLUMN_IDS: [&str; PREPROCESSED_COLUMN_COUNT] = [
@@ -71,6 +72,7 @@ const PREPROCESSED_COLUMN_IDS: [&str; PREPROCESSED_COLUMN_COUNT] = [
     "recursion_v2_verifier_randomness_kind",
     "recursion_v2_verifier_randomness_item_base",
     "recursion_v2_verifier_randomness_query_items",
+    "recursion_v2_verifier_randomness_semantic_use_count",
     "recursion_v2_verifier_randomness_word_0_mask",
     "recursion_v2_verifier_randomness_word_1_mask",
     "recursion_v2_verifier_randomness_word_2_mask",
@@ -139,6 +141,20 @@ struct DrawDescriptor {
     item_base: u32,
     query_items: bool,
     word_count: u32,
+}
+
+impl DrawDescriptor {
+    const fn semantic_use_count(self) -> u32 {
+        match self.kind {
+            // The AIR-composition and DEEP-quotient circuits independently
+            // consume the same transcript-derived OODS point.
+            VerifierRandomnessKind::OodsPoint => 2,
+            VerifierRandomnessKind::CompositionRandomness
+            | VerifierRandomnessKind::DeepRandomness
+            | VerifierRandomnessKind::FriAlpha
+            | VerifierRandomnessKind::RawQuery => 1,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -248,6 +264,7 @@ impl VerifierRandomnessPreprocessed {
             columns[KIND_COLUMN][index] = row.descriptor.kind.as_u32();
             columns[ITEM_BASE_COLUMN][index] = row.descriptor.item_base;
             columns[QUERY_ITEMS_COLUMN][index] = u32::from(row.descriptor.query_items);
+            columns[SEMANTIC_USE_COUNT_COLUMN][index] = row.descriptor.semantic_use_count();
             for word in 0..DRAW_WORDS {
                 columns[WORD_MASK_START_COLUMN + word][index] =
                     u32::from(word < row.descriptor.word_count as usize);
@@ -392,6 +409,8 @@ impl FrameworkEval for Eval {
         let kind = eval.get_preprocessed_column(ids[KIND_COLUMN].clone());
         let item_base = eval.get_preprocessed_column(ids[ITEM_BASE_COLUMN].clone());
         let query_items = eval.get_preprocessed_column(ids[QUERY_ITEMS_COLUMN].clone());
+        let semantic_use_count =
+            eval.get_preprocessed_column(ids[SEMANTIC_USE_COUNT_COLUMN].clone());
         let word_masks = core::array::from_fn::<_, DRAW_WORDS, _>(|word| {
             eval.get_preprocessed_column(ids[WORD_MASK_START_COLUMN + word].clone())
         });
@@ -432,7 +451,9 @@ impl FrameworkEval for Eval {
             let semantic_word_index = (one.clone() - query_items.clone()) * word;
             eval.add_to_relation(RelationEntry::new(
                 &self.randomness_relations.word,
-                E::EF::from(active.clone() * word_masks[word_index].clone()),
+                E::EF::from(
+                    active.clone() * semantic_use_count.clone() * word_masks[word_index].clone(),
+                ),
                 &[
                     verifier_id.clone(),
                     kind.clone(),
@@ -525,7 +546,11 @@ pub fn gen_interaction_trace(
     let semantic_numerators = (0..DRAW_WORDS)
         .map(|word| {
             (0..simd_size)
-                .map(|row| active[row] * PackedQM31::from(pp[WORD_MASK_START_COLUMN + word][row]))
+                .map(|row| {
+                    active[row]
+                        * PackedQM31::from(pp[SEMANTIC_USE_COUNT_COLUMN][row])
+                        * PackedQM31::from(pp[WORD_MASK_START_COLUMN + word][row])
+                })
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
@@ -927,7 +952,8 @@ mod tests {
                             M31::from(semantic_word),
                             M31::from(word.as_u32()),
                         ]);
-                        -denominator.inverse()
+                        -QM31::from(M31::from(row.descriptor.semantic_use_count()))
+                            * denominator.inverse()
                     })
             })
             .fold(QM31::zero(), |sum, term| sum + term)
@@ -974,6 +1000,14 @@ mod tests {
             ),
             (6, 6)
         );
+    }
+
+    #[test]
+    fn oods_point_feeds_both_composition_and_deep_circuits() {
+        let descriptor = draw_descriptor(VerifierStep::DrawOodsPoint)
+            .expect("OODS draw is a valid verifier step")
+            .expect("OODS draw exports semantic randomness");
+        assert_eq!(descriptor.semantic_use_count(), 2);
     }
 
     #[rstest]

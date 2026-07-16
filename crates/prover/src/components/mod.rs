@@ -39,8 +39,29 @@ stwo_macros::components! {
 #[cfg(test)]
 mod tests {
     use num_traits::Zero;
+    use stwo::core::fields::m31::BaseField;
+    use stwo::core::fields::qm31::SecureField;
     use stwo_constraint_framework::FrameworkEval;
     use stwo_constraint_framework::expr::ExprEvaluator;
+
+    #[test]
+    fn component_claim_positional_layout_round_trips() {
+        let log_sizes = core::array::from_fn(|index| index as u32 + 4);
+        assert_eq!(
+            super::Claim::from_component_log_sizes(log_sizes).component_log_sizes(),
+            log_sizes
+        );
+    }
+
+    #[test]
+    fn component_claimed_sum_positional_layout_round_trips() {
+        let values =
+            core::array::from_fn(|index| SecureField::from(BaseField::from(index as u32 + 1)));
+        assert_eq!(
+            super::ClaimedSum::from_component_values(values).component_values(),
+            values
+        );
+    }
 
     // One end-to-end proof per opcode guest binary.
     crate::test_bin_e2e!(auipc, auipc);

@@ -13,6 +13,7 @@ pub mod boundary;
 pub mod channel_replay;
 pub mod circle_double;
 pub mod circuit;
+mod dynamic_logup;
 pub mod final_proof;
 pub mod fri_fold;
 pub mod linear_ops;

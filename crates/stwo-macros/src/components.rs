@@ -152,6 +152,7 @@ fn render_trace_components(entries: &[ComponentEntry]) -> TokenStream2 {
         let name = &entry.name;
         let columns_type = format_ident!("{}Columns", to_pascal_case(&name.to_string()));
         let lookups_macro = format_ident!("{}_lookups", name);
+        let dynamic_lookups_macro = format_ident!("{}_dynamic_lookups", name);
         let interaction_macro = format_ident!("{}_interaction", name);
         let register_macro = format_ident!("{}_register_multiplicities", name);
         let doc = format!(
@@ -161,6 +162,9 @@ fn render_trace_components(entries: &[ComponentEntry]) -> TokenStream2 {
             #[doc = #doc]
             pub mod #name {
                 pub mod air {
+                    use air::relation_eval::{
+                        DynamicRelationEvalAtRow, DynamicRelationFrameworkEval,
+                    };
                     use stwo_constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval};
 
                     use crate::relations::Relations;
@@ -189,6 +193,20 @@ fn render_trace_components(entries: &[ComponentEntry]) -> TokenStream2 {
                                 eval.add_constraint(constraint);
                             }
                             air::#lookups_macro!(eval, cols, self.relations);
+                            eval
+                        }
+                    }
+
+                    impl DynamicRelationFrameworkEval for Eval {
+                        fn evaluate_dynamic_relations<E: DynamicRelationEvalAtRow>(
+                            &self,
+                            mut eval: E,
+                        ) -> E {
+                            let cols = #columns_type::from_eval(&mut eval);
+                            for constraint in cols.constraints() {
+                                eval.add_constraint(constraint);
+                            }
+                            air::#dynamic_lookups_macro!(eval, cols);
                             eval
                         }
                     }
@@ -432,6 +450,31 @@ fn render_components(opcodes: Vec<ComponentEntry>, lookups: Vec<Ident>) -> Token
         }
     });
 
+    // Component-level claims are encoded once in the manifest. Keep their
+    // positional representation generated from the same order used by
+    // `Components::new`, `verifiers`, and the composition visitor.
+    let component_count = opcodes.len() + lookups.len();
+    let component_names = opcodes
+        .iter()
+        .map(|component| &component.name)
+        .chain(lookups.iter());
+    let claim_from_component_log_sizes = opcodes.iter().enumerate().map(|(index, component)| {
+        let op = &component.name;
+        quote! { #op: log_sizes[#index], }
+    });
+    let lookup_claim_from_component_log_sizes =
+        lookups.iter().enumerate().map(|(lookup_index, lookup)| {
+            let index = opcodes.len() + lookup_index;
+            quote! { #lookup: log_sizes[#index], }
+        });
+    let claim_component_log_sizes = opcodes.iter().map(|component| {
+        let op = &component.name;
+        quote! { self.#op, }
+    });
+    let lookup_claim_component_log_sizes = lookups.iter().map(|lookup| {
+        quote! { self.#lookup, }
+    });
+
     // Generate ClaimedSum fields
     let claimed_sum_fields = opcodes.iter().map(|component| {
         let op = &component.name;
@@ -463,6 +506,22 @@ fn render_components(opcodes: Vec<ComponentEntry>, lookups: Vec<Ident>) -> Token
         quote! {
             channel.mix_felts(&[self.#lookup]);
         }
+    });
+    let claimed_sum_from_component_values = opcodes.iter().enumerate().map(|(index, component)| {
+        let op = &component.name;
+        quote! { #op: values[#index], }
+    });
+    let lookup_claimed_sum_from_component_values =
+        lookups.iter().enumerate().map(|(lookup_index, lookup)| {
+            let index = opcodes.len() + lookup_index;
+            quote! { #lookup: values[#index], }
+        });
+    let claimed_sum_component_values = opcodes.iter().map(|component| {
+        let op = &component.name;
+        quote! { self.#op, }
+    });
+    let lookup_claimed_sum_component_values = lookups.iter().map(|lookup| {
+        quote! { self.#lookup, }
     });
 
     // Generate Components struct fields
@@ -613,6 +672,13 @@ fn render_components(opcodes: Vec<ComponentEntry>, lookups: Vec<Ident>) -> Token
         quote! { visitor.visit(&self.#op, claimed_sum.#op); }
     });
     let lookup_visit_body = lookups.iter().map(|lookup| {
+        quote! { visitor.visit(&self.#lookup, claimed_sum.#lookup); }
+    });
+    let dynamic_visit_body = opcodes.iter().map(|component| {
+        let op = &component.name;
+        quote! { visitor.visit(&self.#op, claimed_sum.#op); }
+    });
+    let dynamic_lookup_visit_body = lookups.iter().map(|lookup| {
         quote! { visitor.visit(&self.#lookup, claimed_sum.#lookup); }
     });
     let lookup_verifiers = lookups.iter().map(|lookup| {
@@ -808,6 +874,12 @@ fn render_components(opcodes: Vec<ComponentEntry>, lookups: Vec<Ident>) -> Token
             #(#lookup_claim_fields)*
         }
 
+        /// Component order used by claims, claimed sums, and composition evaluation.
+        pub const COMPONENT_COUNT: usize = #component_count;
+        pub const COMPONENT_NAMES: [&str; COMPONENT_COUNT] = [
+            #(stringify!(#component_names),)*
+        ];
+
         impl From<&Traces> for Claim {
             fn from(traces: &Traces) -> Self {
                 Self {
@@ -818,6 +890,20 @@ fn render_components(opcodes: Vec<ComponentEntry>, lookups: Vec<Ident>) -> Token
         }
 
         impl Claim {
+            pub fn from_component_log_sizes(log_sizes: [u32; COMPONENT_COUNT]) -> Self {
+                Self {
+                    #(#claim_from_component_log_sizes)*
+                    #(#lookup_claim_from_component_log_sizes)*
+                }
+            }
+
+            pub fn component_log_sizes(&self) -> [u32; COMPONENT_COUNT] {
+                [
+                    #(#claim_component_log_sizes)*
+                    #(#lookup_claim_component_log_sizes)*
+                ]
+            }
+
             pub fn mix_into(&self, channel: &mut impl stwo::core::channel::Channel) {
                 #(#claim_mix_into_body)*
                 #(#lookup_claim_mix_into_body)*
@@ -845,6 +931,14 @@ fn render_components(opcodes: Vec<ComponentEntry>, lookups: Vec<Ident>) -> Token
             );
         }
 
+        /// Typed visitor for components that expose verifier-supplied relation coefficients.
+        pub trait DynamicRelationComponentVisitor {
+            fn visit<E>(&mut self, component: &stwo_constraint_framework::FrameworkComponent<E>, claimed_sum: QM31)
+            where
+                E: stwo_constraint_framework::FrameworkEval
+                    + air::relation_eval::DynamicRelationFrameworkEval;
+        }
+
         #[derive(Clone, Debug, Serialize, Deserialize)]
         pub struct ClaimedSum {
             #(#claimed_sum_fields)*
@@ -852,6 +946,20 @@ fn render_components(opcodes: Vec<ComponentEntry>, lookups: Vec<Ident>) -> Token
         }
 
         impl ClaimedSum {
+            pub fn from_component_values(values: [QM31; COMPONENT_COUNT]) -> Self {
+                Self {
+                    #(#claimed_sum_from_component_values)*
+                    #(#lookup_claimed_sum_from_component_values)*
+                }
+            }
+
+            pub fn component_values(&self) -> [QM31; COMPONENT_COUNT] {
+                [
+                    #(#claimed_sum_component_values)*
+                    #(#lookup_claimed_sum_component_values)*
+                ]
+            }
+
             pub fn sum(&self) -> QM31 {
                 use num_traits::Zero;
                 let mut total = QM31::zero();
@@ -928,6 +1036,16 @@ fn render_components(opcodes: Vec<ComponentEntry>, lookups: Vec<Ident>) -> Token
                 #(#lookup_visit_body)*
             }
 
+            /// Visit every component through its dynamic-relation evaluator in composition order.
+            pub fn visit_dynamic_relation_components<V: DynamicRelationComponentVisitor>(
+                &self,
+                claimed_sum: &ClaimedSum,
+                visitor: &mut V,
+            ) {
+                #(#dynamic_visit_body)*
+                #(#dynamic_lookup_visit_body)*
+            }
+
             pub fn relation_entries(
                 &self,
                 trace: &stwo::core::pcs::TreeVec<Vec<&Vec<BaseField>>>,
@@ -972,6 +1090,9 @@ fn render_lookup_components(tables: &[Ident]) -> TokenStream2 {
                 //! Lookup multiplicity component for a preprocessed table.
 
                 pub mod air {
+                    use air::relation_eval::{
+                        DynamicRelationEvalAtRow, DynamicRelationFrameworkEval,
+                    };
                     use stwo_constraint_framework::{
                         EvalAtRow, FrameworkComponent, FrameworkEval, RelationEntry,
                     };
@@ -1009,6 +1130,29 @@ fn render_lookup_components(tables: &[Ident]) -> TokenStream2 {
                                 -E::EF::from(multiplicity),
                                 &preprocessed_cols,
                             ));
+
+                            eval.finalize_logup_in_pairs();
+                            eval
+                        }
+                    }
+
+                    impl DynamicRelationFrameworkEval for Eval {
+                        fn evaluate_dynamic_relations<E: DynamicRelationEvalAtRow>(
+                            &self,
+                            mut eval: E,
+                        ) -> E {
+                            let multiplicity = eval.next_trace_mask();
+                            let column_ids = crate::preprocessed::#table::Table::column_ids();
+                            let preprocessed_cols: Vec<E::F> = column_ids
+                                .iter()
+                                .map(|id| eval.get_preprocessed_column(id.clone()))
+                                .collect();
+
+                            eval.add_to_named_relation(
+                                stringify!(#table),
+                                -E::EF::from(multiplicity),
+                                &preprocessed_cols,
+                            );
 
                             eval.finalize_logup_in_pairs();
                             eval

@@ -318,12 +318,44 @@ pub(crate) fn generate_relations(input: &RelationsInput) -> proc_macro2::TokenSt
         quote! { #name: relation_types::#name::draw(channel), }
     });
 
+    // The verifier consumes relation challenges by transcript position. Emit
+    // the registry from the same declarations and in the same order as
+    // `Relations::draw`, so downstream code never duplicates that mapping.
+    let relation_descriptors = relations.iter().chain(preprocessed).map(|relation| {
+        let name = &relation.name;
+        let size = relation.fields.len();
+        quote! {
+            RelationDescriptor {
+                name: stringify!(#name),
+                size: #size,
+            }
+        }
+    });
+    let relation_count = relations.len() + preprocessed.len();
+
     // Generate PreProcessedTrace extensions
     let preprocessed_trace_extends = preprocessed.iter().map(|prep| {
         let name = &prep.name;
         quote! {
             trace.extend(crate::preprocessed::#name::Table::gen_columns());
             ids.extend(crate::preprocessed::#name::Table::column_ids());
+        }
+    });
+    let preprocessed_id_extends = preprocessed.iter().map(|prep| {
+        let name = &prep.name;
+        quote! {
+            ids.extend(crate::preprocessed::#name::Table::column_ids());
+        }
+    });
+    let preprocessed_log_size_extends = preprocessed.iter().map(|prep| {
+        let name = &prep.name;
+        quote! {
+            sizes.extend(
+                std::iter::repeat(
+                    <crate::preprocessed::#name::Table as PreprocessedTable>::LOG_SIZE,
+                )
+                .take(crate::preprocessed::#name::Table::column_ids().len()),
+            );
         }
     });
 
@@ -407,6 +439,13 @@ pub(crate) fn generate_relations(input: &RelationsInput) -> proc_macro2::TokenSt
         #(#toplevel_prep_types)*
 
         // ==================== Relations Struct ====================
+        /// One relation challenge in the exact order consumed by `Relations::draw`.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub struct RelationDescriptor {
+            pub name: &'static str,
+            pub size: usize,
+        }
+
         #[derive(Clone)]
         pub struct Relations {
             #(#relations_struct_fields)*
@@ -414,6 +453,11 @@ pub(crate) fn generate_relations(input: &RelationsInput) -> proc_macro2::TokenSt
         }
 
         impl Relations {
+            /// Fixed relation registry shared by transcript planning and AIR evaluation.
+            pub const DESCRIPTORS: [RelationDescriptor; #relation_count] = [
+                #(#relation_descriptors,)*
+            ];
+
             pub fn dummy() -> Self {
                 Self {
                     #(#relations_dummy_inits)*
@@ -517,6 +561,20 @@ pub(crate) fn generate_relations(input: &RelationsInput) -> proc_macro2::TokenSt
         }
 
         impl PreProcessedTrace {
+            /// Column registry without materializing the potentially large tables.
+            pub fn column_ids() -> Vec<PreProcessedColumnId> {
+                let mut ids = vec![];
+                #(#preprocessed_id_extends)*
+                ids
+            }
+
+            /// Committed log size for each column in `column_ids` order.
+            pub fn column_log_sizes() -> Vec<u32> {
+                let mut sizes = vec![];
+                #(#preprocessed_log_size_extends)*
+                sizes
+            }
+
             pub fn new() -> Self {
                 let mut trace = vec![];
                 let mut ids = vec![];

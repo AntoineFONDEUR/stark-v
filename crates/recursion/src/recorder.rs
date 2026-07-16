@@ -132,7 +132,19 @@ impl Rec {
     fn node_id(&self, arena: &SharedArena) -> usize {
         match self {
             Rec::Const(value) => arena.borrow_mut().push(Op::Const, *value),
-            Rec::Node { id, .. } => *id,
+            Rec::Node {
+                id,
+                arena: node_arena,
+                ..
+            } => {
+                // Node identifiers are local to one arena; accepting a foreign
+                // identifier would silently connect the operation to another node.
+                assert!(
+                    Rc::ptr_eq(node_arena, arena),
+                    "recursion circuit values must belong to the same arena"
+                );
+                *id
+            }
         }
     }
 
@@ -408,64 +420,7 @@ impl EvalAtRow for Recorder {
         v0 + v1 * u_0 + v2 * u_1 + v3 * u_2
     }
 
-    fn write_logup_frac(&mut self, fraction: stwo::core::Fraction<Self::EF, Self::EF>) {
-        if self.logup.fracs.is_empty() {
-            self.logup.is_finalized = false;
-        }
-        self.logup.fracs.push(fraction);
-    }
-
-    /// Same batching semantics as the framework's `logup_proxy!` (which is
-    /// crate-private): per-fraction batch assignments, batches summed in
-    /// order with cumulative-sum columns from the interaction masks, the
-    /// shifted check on the last batch.
-    fn finalize_logup_batched(&mut self, batching: &Vec<usize>) {
-        assert!(!self.logup.is_finalized, "LogupAtRow was already finalized");
-        let fracs = core::mem::take(&mut self.logup.fracs);
-        assert_eq!(
-            batching.len(),
-            fracs.len(),
-            "Batching must be of the same length as the number of entries"
-        );
-        let last_batch = *batching.iter().max().expect("at least one fraction");
-
-        let mut fracs_by_batch: Vec<Vec<stwo::core::Fraction<Self::EF, Self::EF>>> =
-            vec![Vec::new(); last_batch + 1];
-        for (&batch, frac) in batching.iter().zip(fracs.iter()) {
-            fracs_by_batch[batch].push(frac.clone());
-        }
-        assert!(
-            fracs_by_batch.iter().all(|batch| !batch.is_empty()),
-            "Batching must contain all consecutive batches"
-        );
-
-        let mut prev_col_cumsum = <Self::EF as Zero>::zero();
-        for batch in &fracs_by_batch[..last_batch] {
-            let cur_frac: stwo::core::Fraction<Self::EF, Self::EF> = batch.iter().cloned().sum();
-            let [cur_cumsum] = self.next_extension_interaction_mask(self.logup.interaction, [0]);
-            let diff = cur_cumsum.clone() - prev_col_cumsum.clone();
-            prev_col_cumsum = cur_cumsum;
-            self.add_constraint(diff * cur_frac.denominator - cur_frac.numerator);
-        }
-        let cur_frac: stwo::core::Fraction<Self::EF, Self::EF> =
-            fracs_by_batch[last_batch].iter().cloned().sum();
-        let [prev_row_cumsum, cur_cumsum] =
-            self.next_extension_interaction_mask(self.logup.interaction, [-1, 0]);
-        let diff = cur_cumsum - prev_row_cumsum - prev_col_cumsum.clone();
-        let shifted_diff = diff + self.logup.cumsum_shift;
-        self.add_constraint(shifted_diff * cur_frac.denominator - cur_frac.numerator);
-        self.logup.is_finalized = true;
-    }
-
-    fn finalize_logup(&mut self) {
-        let batches = (0..self.logup.fracs.len()).collect();
-        self.finalize_logup_batched(&batches)
-    }
-
-    fn finalize_logup_in_pairs(&mut self) {
-        let batches = (0..self.logup.fracs.len()).map(|n| n / 2).collect();
-        self.finalize_logup_batched(&batches)
-    }
+    crate::dynamic_logup::recursion_logup_proxy!();
 }
 
 #[cfg(test)]
@@ -647,5 +602,15 @@ mod tests {
             (circuit.outputs().len(), circuit.arena().nodes[output].value),
             (1, SecureField::zero())
         );
+    }
+
+    #[test]
+    fn values_from_different_circuit_arenas_are_rejected() {
+        let mut first_builder = CircuitBuilder::default();
+        let mut second_builder = CircuitBuilder::default();
+        let first = first_builder.input(SecureField::one()).1;
+        let second = second_builder.input(SecureField::one()).1;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| first + second));
+        assert!(result.is_err());
     }
 }

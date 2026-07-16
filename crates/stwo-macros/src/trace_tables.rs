@@ -1096,6 +1096,7 @@ pub(crate) fn generate_lookup_macros(
     }
     let columns_struct = column_struct_name(&opcode.name);
     let lookups_macro = format_ident!("{}_lookups", opcode.name);
+    let dynamic_lookups_macro = format_ident!("{}_dynamic_lookups", opcode.name);
     let interaction_macro = format_ident!("{}_interaction", opcode.name);
     let register_macro = format_ident!("{}_register_multiplicities", opcode.name);
     let batch = opcode.lookups.batch;
@@ -1128,6 +1129,24 @@ pub(crate) fn generate_lookup_macros(
                         multiplicity.into(),
                         &values,
                     ));
+                }
+            }
+        })
+        .collect();
+    let dynamic_air_entries: Vec<_> = opcode
+        .lookups
+        .entries
+        .iter()
+        .map(|entry| {
+            let relation = &entry.relation;
+            quote! {
+                {
+                    let (multiplicity, values) = entries.next().expect("lookup entry");
+                    $eval.add_to_named_relation(
+                        stringify!(#relation),
+                        multiplicity.into(),
+                        &values,
+                    );
                 }
             }
         })
@@ -1281,6 +1300,15 @@ pub(crate) fn generate_lookup_macros(
             ($eval:expr, $cols:expr, $relations:expr) => {{
                 let mut entries = $cols.lookup_entries().into_iter();
                 #(#air_entries)*
+                #finalize
+            }};
+        }
+
+        #[macro_export]
+        macro_rules! #dynamic_lookups_macro {
+            ($eval:expr, $cols:expr) => {{
+                let mut entries = $cols.lookup_entries().into_iter();
+                #(#dynamic_air_entries)*
                 #finalize
             }};
         }

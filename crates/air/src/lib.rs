@@ -15,6 +15,7 @@ pub mod digest;
 pub mod instructions;
 pub mod poseidon2;
 pub mod preprocessed;
+pub mod relation_eval;
 
 #[macro_use]
 pub mod trace;

@@ -1,7 +1,10 @@
 //! Versioned foundations for the sound binary recursion protocol.
 
+pub mod air_expression_circuit;
+pub mod air_relation_parameters;
 pub mod control_air;
 pub mod kernel;
+pub mod oods_circuit;
 pub mod pow;
 pub mod protocol;
 pub mod relation_challenge_air;
@@ -19,6 +22,7 @@ pub mod transcript_program;
 pub mod transcript_state_air;
 pub mod transcript_word_air;
 pub mod verifier_randomness_air;
+pub mod vm_air_program;
 pub mod vm_public_claim;
 pub mod vm_public_claim_hash_air;
 pub mod vm_public_claim_input_air;

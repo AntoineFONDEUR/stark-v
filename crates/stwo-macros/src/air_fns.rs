@@ -2246,6 +2246,9 @@ fn generate_embedded_poseidon2_component(function: &LoweredFn, flags: &[Ident]) 
         pub mod component {
             pub mod air {
                 use num_traits::One;
+                use crate::relation_eval::{
+                    DynamicRelationEvalAtRow, DynamicRelationFrameworkEval,
+                };
                 use stwo_constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval, RelationEntry};
 
                 use crate::relations::Relations;
@@ -2309,6 +2312,56 @@ fn generate_embedded_poseidon2_component(function: &LoweredFn, flags: &[Ident]) 
                             (enabler * io).into(),
                             &tuple,
                         ));
+                        eval.finalize_logup_in_pairs();
+                        eval
+                    }
+                }
+
+                impl DynamicRelationFrameworkEval for Eval {
+                    fn evaluate_dynamic_relations<E: DynamicRelationEvalAtRow>(
+                        &self,
+                        mut eval: E,
+                    ) -> E {
+                        let cols = #columns_type::from_eval(&mut eval);
+                        let (constraints, entries) = cols.evaluation();
+                        for constraint in constraints {
+                            eval.add_constraint(constraint);
+                        }
+
+                        let one = E::F::one();
+                        let enabler = cols.enabler.clone();
+                        let wide = cols.wide.clone();
+                        let io = cols.io.clone();
+                        eval.add_constraint(wide.clone() * (one.clone() - wide.clone()));
+                        eval.add_constraint(io.clone() * (one.clone() - io.clone()));
+                        eval.add_constraint(wide.clone() * io.clone());
+
+                        let (_, tuple) = entries
+                            .into_iter()
+                            .next()
+                            .expect("the felt function has one activation tuple");
+                        let (input, output) = tuple.split_at(16);
+
+                        eval.add_to_named_relation(
+                            stringify!(poseidon2),
+                            (-(enabler.clone() * (one.clone() - io.clone()))).into(),
+                            input,
+                        );
+                        eval.add_to_named_relation(
+                            stringify!(poseidon2),
+                            (enabler.clone() * (one.clone() - wide.clone() - io.clone())).into(),
+                            &output[..1],
+                        );
+                        eval.add_to_named_relation(
+                            stringify!(poseidon2),
+                            (enabler.clone() * wide).into(),
+                            &output[..8],
+                        );
+                        eval.add_to_named_relation(
+                            stringify!(poseidon2_io),
+                            (enabler * io).into(),
+                            &tuple,
+                        );
                         eval.finalize_logup_in_pairs();
                         eval
                     }

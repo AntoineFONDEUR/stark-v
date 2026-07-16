@@ -26,6 +26,26 @@ const MAX_FRI_LAST_LAYER_LOG_DEGREE: u32 = 10;
 const MAX_FRI_FOLD_STEP: u32 = 4;
 const MAX_FRI_QUERIES: u32 = 256;
 
+/// Returns the siblings needed above one complete FRI fold subset.
+///
+/// STWO packs four adjacent secure evaluations into each Merkle leaf when a
+/// layer folds more than one bit. The proof wire carries the complete fold
+/// subset, so those leaves and their common subtree are recomputed locally;
+/// only the siblings above that subtree belong in the authentication path.
+pub fn fri_query_path_depth(tree_height: u32, fold_width: u32) -> Option<u32> {
+    if fold_width < 2 || !fold_width.is_power_of_two() {
+        return None;
+    }
+    let fold_step = fold_width.ilog2();
+    let packed_leaf_log_size = if fold_step > 1 {
+        LOG_PACKED_LEAF_SIZE
+    } else {
+        0
+    };
+    let authenticated_subtree_height = fold_step.checked_sub(packed_leaf_log_size)?;
+    tree_height.checked_sub(authenticated_subtree_height)
+}
+
 /// Version of the recursion protocol statement and manifest encoding.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 #[repr(transparent)]
@@ -1019,6 +1039,22 @@ mod tests {
     use air::digest::Digest8;
 
     use super::*;
+
+    #[rstest]
+    #[case::fold_step_one(8, 2, 7)]
+    #[case::fold_step_two(6, 4, 6)]
+    #[case::fold_step_three(6, 8, 5)]
+    #[case::fold_step_four(6, 16, 4)]
+    fn complete_fri_subsets_reduce_the_sibling_path(
+        #[case] tree_height: u32,
+        #[case] fold_width: u32,
+        #[case] expected: u32,
+    ) {
+        assert_eq!(
+            fri_query_path_depth(tree_height, fold_width),
+            Some(expected)
+        );
+    }
 
     type TestManifest = ProtocolManifest<2, 2, 2, 2, 2, 2>;
 

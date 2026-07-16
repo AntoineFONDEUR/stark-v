@@ -27,6 +27,7 @@ pub mod vm_air_composition_control_air;
 pub mod vm_air_composition_input_air;
 pub mod vm_air_composition_lowering;
 pub mod vm_air_program;
+pub mod vm_pcs_layout;
 pub mod vm_public_claim;
 pub mod vm_public_claim_hash_air;
 pub mod vm_public_claim_input_air;

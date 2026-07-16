@@ -47,6 +47,7 @@ pub struct VmAirCompositionInputBinding {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VmAirCompositionProfile {
     component_log_sizes: [u32; VM_AIR_COMPONENT_COUNT],
+    max_log_degree_bound: u32,
     sampled_value_count: u32,
     claimed_sum_count: u32,
     relation_challenge_count: u32,
@@ -56,6 +57,10 @@ pub struct VmAirCompositionProfile {
 impl VmAirCompositionProfile {
     pub const fn component_log_sizes(&self) -> [u32; VM_AIR_COMPONENT_COUNT] {
         self.component_log_sizes
+    }
+
+    pub const fn max_log_degree_bound(&self) -> u32 {
+        self.max_log_degree_bound
     }
 
     pub const fn sampled_value_count(&self) -> u32 {
@@ -183,13 +188,30 @@ pub fn build_vm_air_composition_reference(
     component_log_sizes: [u32; VM_AIR_COMPONENT_COUNT],
 ) -> Result<VmAirCompositionCircuit, VmAirCompositionCircuitError> {
     let program = VmAirProgram::new(component_log_sizes)?;
+    build_vm_air_composition_reference_with_program(component_log_sizes, &program)
+}
+
+/// Builds a reference for a PCS profile with an explicit lifting bound.
+pub fn build_vm_air_composition_reference_with_max_log_degree_bound(
+    component_log_sizes: [u32; VM_AIR_COMPONENT_COUNT],
+    max_log_degree_bound: u32,
+) -> Result<VmAirCompositionCircuit, VmAirCompositionCircuitError> {
+    let program =
+        VmAirProgram::new_with_max_log_degree_bound(component_log_sizes, max_log_degree_bound)?;
+    build_vm_air_composition_reference_with_program(component_log_sizes, &program)
+}
+
+fn build_vm_air_composition_reference_with_program(
+    component_log_sizes: [u32; VM_AIR_COMPONENT_COUNT],
+    program: &VmAirProgram,
+) -> Result<VmAirCompositionCircuit, VmAirCompositionCircuitError> {
     let sampled_values = vec![SecureField::zero(); program.sample_coordinates().len()];
     let claimed_sums = vec![SecureField::zero(); VM_AIR_COMPONENT_COUNT];
     let relation_challenges =
         vec![[M31Word::ZERO; RELATION_CHALLENGE_WORD_COUNT]; Relations::DESCRIPTORS.len()];
     build_with_program(
         component_log_sizes,
-        &program,
+        program,
         VmAirCompositionWitness {
             segment_selector: false,
             sampled_values: &sampled_values,
@@ -207,6 +229,17 @@ pub fn build_vm_air_composition_circuit(
     witness: VmAirCompositionWitness<'_>,
 ) -> Result<VmAirCompositionCircuit, VmAirCompositionCircuitError> {
     let program = VmAirProgram::new(component_log_sizes)?;
+    build_with_program(component_log_sizes, &program, witness)
+}
+
+/// Builds a witness circuit for a PCS profile with an explicit lifting bound.
+pub fn build_vm_air_composition_circuit_with_max_log_degree_bound(
+    component_log_sizes: [u32; VM_AIR_COMPONENT_COUNT],
+    max_log_degree_bound: u32,
+    witness: VmAirCompositionWitness<'_>,
+) -> Result<VmAirCompositionCircuit, VmAirCompositionCircuitError> {
+    let program =
+        VmAirProgram::new_with_max_log_degree_bound(component_log_sizes, max_log_degree_bound)?;
     build_with_program(component_log_sizes, &program, witness)
 }
 
@@ -238,6 +271,7 @@ fn build_with_program(
     }
     let profile = VmAirCompositionProfile {
         component_log_sizes,
+        max_log_degree_bound: program.max_log_degree_bound(),
         sampled_value_count,
         claimed_sum_count: checked_count("claimed sums", VM_AIR_COMPONENT_COUNT)?,
         relation_challenge_count: checked_count(
@@ -509,12 +543,14 @@ mod tests {
                 circuit.profile().claimed_sum_count(),
                 circuit.profile().relation_challenge_count(),
                 circuit.profile().air_instruction_count(),
+                circuit.profile().max_log_degree_bound(),
             ),
             (
                 u32::try_from(program.sample_coordinates().len()).unwrap(),
                 u32::try_from(VM_AIR_COMPONENT_COUNT).unwrap(),
                 u32::try_from(Relations::DESCRIPTORS.len()).unwrap(),
                 u32::try_from(program.air_instruction_count()).unwrap(),
+                program.max_log_degree_bound(),
             )
         );
     }

@@ -14,7 +14,7 @@ use air::digest::{
 use stwo::core::fields::m31::M31;
 use stwo::core::fields::qm31::SecureField;
 
-use super::protocol::{FixedProofShape, ProtocolVersion};
+use super::protocol::{FixedProofShape, ProtocolVersion, fri_query_path_depth};
 use super::statement::{
     CompleteExecutionStatement, EdgeClaim, ExecutedSpan, JobContext, MachineState, SlotSpan,
     SpanBody, SpanStatement, StatementError,
@@ -330,13 +330,30 @@ impl<
         validate_wire_count("trace path layout", expected_trace_paths, N_TRACE_PATHS)?;
 
         let mut described_max_depth = 0;
-        for height in shape
-            .tree_heights
-            .iter()
-            .chain(&shape.fri_layer_tree_heights)
-        {
+        for height in &shape.tree_heights {
             described_max_depth =
                 described_max_depth.max(wire_word_as_usize("maximum Merkle depth", *height)?);
+        }
+        for (layer, (height, width)) in shape
+            .fri_layer_tree_heights
+            .iter()
+            .zip(&shape.fri_layer_fold_widths)
+            .enumerate()
+        {
+            let depth = fri_query_path_depth(height.as_u32(), width.as_u32()).ok_or(
+                WireError::InvalidFriPathGeometry {
+                    layer,
+                    tree_height: height.as_u32(),
+                    fold_width: width.as_u32(),
+                },
+            )?;
+            described_max_depth =
+                described_max_depth.max(usize::try_from(depth).map_err(|_| {
+                    WireError::WireShapeValueOutOfRange {
+                        field: "maximum FRI authentication depth",
+                        value: depth,
+                    }
+                })?);
         }
         validate_wire_count(
             "maximum Merkle depth",
@@ -365,7 +382,7 @@ impl<
             }
         }
 
-        for (layer, ((wire_layer, expected_width), expected_depth)) in self
+        for (layer, ((wire_layer, expected_width), tree_height)) in self
             .fri_layers
             .iter()
             .zip(&shape.fri_layer_fold_widths)
@@ -379,13 +396,21 @@ impl<
                     actual: wire_layer.active_width(),
                 });
             }
+            let expected_depth =
+                fri_query_path_depth(tree_height.as_u32(), expected_width.as_u32()).ok_or(
+                    WireError::InvalidFriPathGeometry {
+                        layer,
+                        tree_height: tree_height.as_u32(),
+                        fold_width: expected_width.as_u32(),
+                    },
+                )?;
             for (query, wire_query) in wire_layer.queries().iter().enumerate() {
                 let actual_depth = wire_query.path().active_depth();
-                if actual_depth != expected_depth.as_u32() {
+                if actual_depth != expected_depth {
                     return Err(WireError::FriPathDepthMismatch {
                         layer,
                         query,
-                        expected: expected_depth.as_u32(),
+                        expected: expected_depth,
                         actual: actual_depth,
                     });
                 }
@@ -1327,6 +1352,11 @@ pub enum WireError {
         expected: u32,
         actual: u32,
     },
+    InvalidFriPathGeometry {
+        layer: usize,
+        tree_height: u32,
+        fold_width: u32,
+    },
     FriPathDepthMismatch {
         layer: usize,
         query: usize,
@@ -1446,6 +1476,14 @@ impl fmt::Display for WireError {
             } => write!(
                 formatter,
                 "FRI layer {layer} has fold width {actual}, manifest requires {expected}"
+            ),
+            Self::InvalidFriPathGeometry {
+                layer,
+                tree_height,
+                fold_width,
+            } => write!(
+                formatter,
+                "FRI layer {layer} cannot authenticate fold width {fold_width} in tree height {tree_height}"
             ),
             Self::FriPathDepthMismatch {
                 layer,
@@ -1667,8 +1705,8 @@ mod tests {
     > {
         let trace_path = MerklePathWire::new(2, [digest(80), digest(81)])
             .expect("the trace path fills the fixed maximum depth");
-        let fri_path = MerklePathWire::new(2, [digest(100), digest(101)])
-            .expect("the FRI path fills the fixed maximum depth");
+        let fri_path = MerklePathWire::new(1, [digest(100), Digest8::ZERO])
+            .expect("the FRI path authenticates above the complete fold pair");
         let query = FriQueryWire::new([qm31(90), qm31(94)], fri_path);
         let layer = FriLayerWire::new(2, digest(110), [query])
             .expect("the FRI query fills the fixed maximum width");
@@ -1743,13 +1781,30 @@ mod tests {
     }
 
     #[rstest]
-    fn fixed_stark_wire_rejects_a_manifest_path_depth_mismatch() {
-        let mut shape = proof_shape();
-        shape.tree_heights = [M31Word::from(1)];
+    fn fixed_stark_wire_rejects_a_trace_path_depth_mismatch() {
+        let mut proof = stark_proof();
+        proof.trace_paths[0] = MerklePathWire::new(1, [digest(80), Digest8::ZERO])
+            .expect("the substituted path fits the maximum wire depth");
         assert_eq!(
-            stark_proof().validate_against_shape(&shape),
+            proof.validate_against_shape(&proof_shape()),
             Err(WireError::MerklePathDepthMismatch {
                 path: 0,
+                expected: 2,
+                actual: 1,
+            })
+        );
+    }
+
+    #[rstest]
+    fn fixed_stark_wire_rejects_a_full_tree_fri_path() {
+        let mut proof = stark_proof();
+        proof.fri_layers[0].queries[0].path = MerklePathWire::new(2, [digest(100), digest(101)])
+            .expect("the substituted path fits the maximum wire depth");
+        assert_eq!(
+            proof.validate_against_shape(&proof_shape()),
+            Err(WireError::FriPathDepthMismatch {
+                layer: 0,
+                query: 0,
                 expected: 1,
                 actual: 2,
             })

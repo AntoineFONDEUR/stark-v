@@ -22,6 +22,7 @@ use stwo::core::fields::m31::BaseField;
 use stwo::core::fields::qm31::{SECURE_EXTENSION_DEGREE, SecureField};
 use stwo::core::pcs::TreeVec;
 use stwo::core::poly::circle::{MAX_CIRCLE_DOMAIN_LOG_SIZE, MIN_CIRCLE_DOMAIN_LOG_SIZE};
+use stwo::core::verifier::COMPOSITION_LOG_SPLIT;
 use stwo_constraint_framework::{
     EvalAtRow, FrameworkComponent, FrameworkEval, INTERACTION_TRACE_IDX, InfoEvaluator,
     PREPROCESSED_TRACE_IDX, TraceLocationAllocator,
@@ -76,6 +77,7 @@ struct UnresolvedSample {
 pub struct VmAirProgram {
     component_log_sizes: [u32; VM_AIR_COMPONENT_COUNT],
     components: Vec<ComponentProgram>,
+    column_log_sizes: TreeVec<Vec<u32>>,
     sample_coordinates: Vec<SampleCoordinate>,
     composition_samples: [usize; COMPOSITION_SAMPLE_COUNT],
     max_log_degree_bound: u32,
@@ -86,6 +88,21 @@ impl VmAirProgram {
     /// Compiles one fixed component-log-size profile into a compact mask map.
     pub fn new(
         component_log_sizes: [u32; VM_AIR_COMPONENT_COUNT],
+    ) -> Result<Self, VmAirProgramError> {
+        Self::build(component_log_sizes, None)
+    }
+
+    /// Compiles a profile for an explicitly lifted PCS degree bound.
+    pub fn new_with_max_log_degree_bound(
+        component_log_sizes: [u32; VM_AIR_COMPONENT_COUNT],
+        max_log_degree_bound: u32,
+    ) -> Result<Self, VmAirProgramError> {
+        Self::build(component_log_sizes, Some(max_log_degree_bound))
+    }
+
+    fn build(
+        component_log_sizes: [u32; VM_AIR_COMPONENT_COUNT],
+        requested_max_log_degree_bound: Option<u32>,
     ) -> Result<Self, VmAirProgramError> {
         for (component, log_size) in component_log_sizes.iter().copied().enumerate() {
             if !(MIN_CIRCLE_DOMAIN_LOG_SIZE..=MAX_CIRCLE_DOMAIN_LOG_SIZE).contains(&log_size) {
@@ -125,7 +142,24 @@ impl VmAirProgram {
             components: components.verifiers(),
             n_preprocessed_columns: preprocessed_ids.len(),
         };
-        let max_log_degree_bound = core_components.composition_log_degree_bound();
+        let composition_log_degree_bound = core_components.composition_log_degree_bound();
+        let minimum_max_log_degree_bound = composition_log_degree_bound
+            .checked_sub(COMPOSITION_LOG_SPLIT)
+            .ok_or(VmAirProgramError::CompositionSplitUnderflow {
+                composition_log_degree_bound,
+            })?;
+        let max_log_degree_bound =
+            requested_max_log_degree_bound.unwrap_or(minimum_max_log_degree_bound);
+        if !(minimum_max_log_degree_bound..=MAX_CIRCLE_DOMAIN_LOG_SIZE)
+            .contains(&max_log_degree_bound)
+        {
+            return Err(VmAirProgramError::MaxLogDegreeBoundOutOfRange {
+                minimum: minimum_max_log_degree_bound,
+                actual: max_log_degree_bound,
+            });
+        }
+        let mut column_log_sizes = core_components.column_log_sizes();
+        column_log_sizes.push(vec![max_log_degree_bound; COMPOSITION_SAMPLE_COUNT]);
         let layout_point = CirclePoint {
             x: SecureField::zero(),
             y: SecureField::one(),
@@ -152,6 +186,7 @@ impl VmAirProgram {
         Ok(Self {
             component_log_sizes,
             components,
+            column_log_sizes,
             sample_coordinates,
             composition_samples,
             max_log_degree_bound,
@@ -161,6 +196,11 @@ impl VmAirProgram {
 
     pub fn sample_coordinates(&self) -> &[SampleCoordinate] {
         &self.sample_coordinates
+    }
+
+    /// Returns every committed column degree in tree-major order.
+    pub const fn column_log_sizes(&self) -> &TreeVec<Vec<u32>> {
+        &self.column_log_sizes
     }
 
     pub const fn max_log_degree_bound(&self) -> u32 {
@@ -811,6 +851,13 @@ pub enum VmAirProgramError {
         actual: u32,
     },
     AirInstructionCountOverflow,
+    CompositionSplitUnderflow {
+        composition_log_degree_bound: u32,
+    },
+    MaxLogDegreeBoundOutOfRange {
+        minimum: u32,
+        actual: u32,
+    },
     SampleCoordinateOutOfRange {
         tree: usize,
         column: usize,
@@ -982,6 +1029,55 @@ mod tests {
                 .map(|coordinate| coordinate.tree)
                 .max(),
             Some(3)
+        );
+    }
+
+    #[test]
+    fn default_degree_bound_matches_stwo_split_composition_geometry() {
+        let log_sizes = component_log_sizes();
+        let claim = Claim::from_component_log_sizes(log_sizes);
+        let components = build_components(&claim, Relations::dummy(), &zero_claimed_sums());
+        let core_components = CoreComponents {
+            components: components.verifiers(),
+            n_preprocessed_columns: PreProcessedTrace::column_ids().len(),
+        };
+        let program = VmAirProgram::new(log_sizes).expect("fixture profile is valid");
+        assert_eq!(
+            program.max_log_degree_bound(),
+            core_components.composition_log_degree_bound() - COMPOSITION_LOG_SPLIT
+        );
+    }
+
+    #[test]
+    fn explicit_lifting_bound_controls_composition_column_degrees() {
+        let baseline = VmAirProgram::new(component_log_sizes()).expect("fixture profile is valid");
+        let lifted = VmAirProgram::new_with_max_log_degree_bound(
+            component_log_sizes(),
+            baseline.max_log_degree_bound() + 1,
+        )
+        .expect("one extra lifting bit is supported");
+        assert_eq!(
+            lifted.column_log_sizes().last(),
+            Some(&vec![
+                baseline.max_log_degree_bound() + 1;
+                COMPOSITION_SAMPLE_COUNT
+            ])
+        );
+    }
+
+    #[test]
+    fn degree_bound_below_the_split_composition_minimum_is_rejected() {
+        let baseline = VmAirProgram::new(component_log_sizes()).expect("fixture profile is valid");
+        assert_eq!(
+            VmAirProgram::new_with_max_log_degree_bound(
+                component_log_sizes(),
+                baseline.max_log_degree_bound() - 1,
+            )
+            .map(|_| ()),
+            Err(VmAirProgramError::MaxLogDegreeBoundOutOfRange {
+                minimum: baseline.max_log_degree_bound(),
+                actual: baseline.max_log_degree_bound() - 1,
+            })
         );
     }
 

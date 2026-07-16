@@ -14,7 +14,7 @@ use prover::poseidon2_channel::poseidon2_hash_m31_words;
 
 use super::protocol::{
     CanonicalWords, FixedProofShape, PcsParameterError, PcsParameters, ProofShapeError,
-    ValidatedProtocolManifest,
+    ValidatedProtocolManifest, fri_query_path_depth,
 };
 
 const VM_PLAN_HASH_DOMAIN: u16 = 0x564d;
@@ -684,8 +684,9 @@ fn append_fri_checks<const N_TABLES: usize, const N_TREES: usize, const N_FRI_LA
 ) -> Result<(), VerifierPlanError> {
     for layer in 0..N_FRI_LAYERS {
         let layer_index = index_u32("FRI layer", layer)?;
-        let depth = shape.fri_layer_tree_heights[layer].as_u32();
         let width = shape.fri_layer_fold_widths[layer].as_u32();
+        let depth = fri_query_path_depth(shape.fri_layer_tree_heights[layer].as_u32(), width)
+            .expect("validated FRI shape has an authentication path depth");
         for query in 0..n_queries {
             let query = index_u32("raw query", query)?;
             steps.extend([

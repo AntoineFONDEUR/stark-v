@@ -255,6 +255,32 @@ impl QueryPositionPreprocessed {
         self.recursion_query_count
     }
 
+    /// Evaluates one trusted semantic route for witness materialization.
+    pub fn evaluate_route(
+        &self,
+        verifier_id: u32,
+        kind: QueryPositionKind,
+        item: u32,
+        query: u32,
+        word: M31Word,
+    ) -> Result<(u32, u32), QueryPositionError> {
+        self.mapping_rows
+            .iter()
+            .find(|row| {
+                row.verifier_id == verifier_id
+                    && row.kind == kind
+                    && row.item == item
+                    && row.query == query
+            })
+            .ok_or(QueryPositionError::RouteMissing {
+                verifier_id,
+                kind,
+                item,
+                query,
+            })?
+            .evaluate(word)
+    }
+
     pub fn raw_column_ids() -> Vec<PreProcessedColumnId> {
         RAW_PREPROCESSED_COLUMN_IDS
             .iter()
@@ -1093,6 +1119,12 @@ pub enum QueryPositionError {
     },
     QueryMissing {
         verifier_id: u32,
+        query: u32,
+    },
+    RouteMissing {
+        verifier_id: u32,
+        kind: QueryPositionKind,
+        item: u32,
         query: u32,
     },
 }

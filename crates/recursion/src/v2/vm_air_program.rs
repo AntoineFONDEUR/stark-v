@@ -17,7 +17,7 @@ use prover::components::{
 use prover::relations::{PreProcessedTrace, RelationDescriptor, Relations};
 use stwo::core::Fraction;
 use stwo::core::air::Components as CoreComponents;
-use stwo::core::circle::CirclePoint;
+use stwo::core::circle::{CirclePoint, CirclePointIndex};
 use stwo::core::fields::m31::BaseField;
 use stwo::core::fields::qm31::{SECURE_EXTENSION_DEGREE, SecureField};
 use stwo::core::pcs::TreeVec;
@@ -79,6 +79,7 @@ pub struct VmAirProgram {
     components: Vec<ComponentProgram>,
     column_log_sizes: TreeVec<Vec<u32>>,
     sample_coordinates: Vec<SampleCoordinate>,
+    sample_point_offsets: Vec<CirclePointIndex>,
     composition_samples: [usize; COMPOSITION_SAMPLE_COUNT],
     max_log_degree_bound: u32,
     air_instruction_count: usize,
@@ -171,6 +172,13 @@ impl VmAirProgram {
         let composition_tree = sample_points.len() - 1;
         let composition_samples =
             core::array::from_fn(|column| sampled_indices[composition_tree][column][0]);
+        let sample_point_offsets = resolve_sample_point_offsets(
+            &collector.components,
+            &sampled_indices,
+            sample_coordinates.len(),
+            composition_samples,
+            max_log_degree_bound,
+        )?;
         let components = collector
             .components
             .into_iter()
@@ -188,6 +196,7 @@ impl VmAirProgram {
             components,
             column_log_sizes,
             sample_coordinates,
+            sample_point_offsets,
             composition_samples,
             max_log_degree_bound,
             air_instruction_count,
@@ -196,6 +205,11 @@ impl VmAirProgram {
 
     pub fn sample_coordinates(&self) -> &[SampleCoordinate] {
         &self.sample_coordinates
+    }
+
+    /// Returns the base-circle shift from OODS for every sampled value.
+    pub fn sample_point_offsets(&self) -> &[CirclePointIndex] {
+        &self.sample_point_offsets
     }
 
     /// Returns every committed column degree in tree-major order.
@@ -443,6 +457,83 @@ fn index_sample_layout<T>(
         indices.push(tree_indices);
     }
     (coordinates, TreeVec::new(indices))
+}
+
+fn resolve_sample_point_offsets(
+    components: &[UnresolvedComponentProgram],
+    sampled_indices: &TreeVec<Vec<Vec<usize>>>,
+    sample_count: usize,
+    composition_samples: [usize; COMPOSITION_SAMPLE_COUNT],
+    max_log_degree_bound: u32,
+) -> Result<Vec<CirclePointIndex>, VmAirProgramError> {
+    let trace_step = stwo::core::poly::circle::CanonicCoset::new(max_log_degree_bound).step_size();
+    let mut offsets: Vec<Option<CirclePointIndex>> = vec![None; sample_count];
+    for (component_index, component) in components.iter().enumerate() {
+        for (interaction, columns) in component.sampled_mask.iter().enumerate() {
+            let component_offsets = component.mask_offsets.get(interaction).ok_or(
+                VmAirProgramError::ComponentMaskInteractionMissing {
+                    component: component_index,
+                    interaction,
+                },
+            )?;
+            if component_offsets.len() != columns.len() {
+                return Err(VmAirProgramError::ComponentMaskColumnCountMismatch {
+                    component: component_index,
+                    interaction,
+                    expected: columns.len(),
+                    actual: component_offsets.len(),
+                });
+            }
+            for (column, (samples, sample_offsets)) in
+                columns.iter().zip(component_offsets).enumerate()
+            {
+                if samples.len() != sample_offsets.len() {
+                    return Err(VmAirProgramError::ComponentMaskPointCountMismatch {
+                        component: component_index,
+                        interaction,
+                        column,
+                        expected: samples.len(),
+                        actual: sample_offsets.len(),
+                    });
+                }
+                for (sample, &offset) in samples.iter().zip(sample_offsets) {
+                    let sample_index =
+                        sampled_index(sampled_indices, sample.tree, sample.column, sample.point)?;
+                    let point_offset = signed_index_multiple(trace_step, offset);
+                    match offsets[sample_index] {
+                        Some(existing) if existing != point_offset => {
+                            return Err(VmAirProgramError::SamplePointOffsetConflict {
+                                sample: sample_index,
+                                expected: existing.0,
+                                actual: point_offset.0,
+                            });
+                        }
+                        Some(_) => {}
+                        None => offsets[sample_index] = Some(point_offset),
+                    }
+                }
+            }
+        }
+    }
+    for sample in composition_samples {
+        offsets[sample] = Some(CirclePointIndex::zero());
+    }
+    offsets
+        .into_iter()
+        .enumerate()
+        .map(|(sample, offset)| {
+            offset.ok_or(VmAirProgramError::SamplePointOffsetMissing { sample })
+        })
+        .collect()
+}
+
+fn signed_index_multiple(step: CirclePointIndex, multiplier: isize) -> CirclePointIndex {
+    let magnitude = step * multiplier.unsigned_abs();
+    if multiplier.is_negative() {
+        -magnitude
+    } else {
+        magnitude
+    }
 }
 
 fn resolve_component(
@@ -891,6 +982,12 @@ pub enum VmAirProgramError {
         interaction: usize,
         column: usize,
     },
+    ComponentMaskColumnCountMismatch {
+        component: usize,
+        interaction: usize,
+        expected: usize,
+        actual: usize,
+    },
     ComponentMaskPointCountMismatch {
         component: usize,
         interaction: usize,
@@ -918,6 +1015,14 @@ pub enum VmAirProgramError {
     },
     DynamicConstraintCountOverflow {
         component: usize,
+    },
+    SamplePointOffsetConflict {
+        sample: usize,
+        expected: usize,
+        actual: usize,
+    },
+    SamplePointOffsetMissing {
+        sample: usize,
     },
     RelationDescriptorMissing {
         name: String,
@@ -1030,6 +1135,43 @@ mod tests {
                 .max(),
             Some(3)
         );
+    }
+
+    #[test]
+    fn sample_point_offsets_match_stwo_mask_geometry() {
+        let log_sizes = component_log_sizes();
+        let claim = Claim::from_component_log_sizes(log_sizes);
+        let components = build_components(&claim, Relations::dummy(), &zero_claimed_sums());
+        let core_components = CoreComponents {
+            components: components.verifiers(),
+            n_preprocessed_columns: PreProcessedTrace::column_ids().len(),
+        };
+        let program = VmAirProgram::new(log_sizes).expect("fixture profile is valid");
+        let seed = SecureField::from_m31_array([
+            M31::from(11),
+            M31::from(13),
+            M31::from(17),
+            M31::from(19),
+        ]);
+        let oods = oods_point_from_seed(Rec::from(seed)).expect("fixture seed maps to the circle");
+        let point = CirclePoint {
+            x: oods.x.value(),
+            y: oods.y.value(),
+        };
+        let mut native = core_components.mask_points(point, program.max_log_degree_bound(), false);
+        native.push(vec![vec![point]; COMPOSITION_SAMPLE_COUNT]);
+        let native = native
+            .iter()
+            .flatten()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        let reconstructed = program
+            .sample_point_offsets()
+            .iter()
+            .map(|offset| point + offset.to_point().into_ef())
+            .collect::<Vec<_>>();
+        assert_eq!(reconstructed, native);
     }
 
     #[test]

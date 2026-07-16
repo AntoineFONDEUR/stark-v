@@ -362,6 +362,7 @@ mod tests {
     use prover::components::{COMPONENT_COUNT, COMPONENT_NAMES};
 
     use super::*;
+    use crate::v2::pcs_deep_circuit::{PcsDeepProfile, build_pcs_deep_reference};
     use crate::v2::protocol::{OptionalM31Word, PcsParameters};
 
     const VM_COLUMN_COUNT: usize = 1_757;
@@ -460,6 +461,33 @@ mod tests {
         assert_eq!(
             layout.queried_value_index(last_tree, last_column, QUERY_COUNT - 1),
             Ok(VM_COLUMN_COUNT * QUERY_COUNT - 1)
+        );
+    }
+
+    #[test]
+    fn generated_vm_deep_profile_uses_the_complete_air_sample_layout() {
+        let program = VmAirProgram::new(component_log_sizes()).expect("fixture program is valid");
+        let layout = VmPcsLayout::new(&program, pcs(), &shape(&program))
+            .expect("generated program and manifest layout agree");
+        let profile = PcsDeepProfile::from_vm(&program, &layout)
+            .expect("generated sample offsets define the DEEP profile");
+        let reference = build_pcs_deep_reference(&profile)
+            .expect("production VM DEEP reference has valid fixed denominators");
+        assert_eq!(
+            (
+                profile.sample_count(),
+                profile.column_count(),
+                profile.lifting_log_size(),
+                profile.query_count(),
+                reference.nonzero_output_count(),
+            ),
+            (
+                program.sample_coordinates().len(),
+                VM_COLUMN_COUNT,
+                layout.lifting_log_size(),
+                QUERY_COUNT,
+                0,
+            )
         );
     }
 

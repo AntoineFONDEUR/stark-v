@@ -194,6 +194,11 @@ impl<const N_TABLES: usize, const N_TREES: usize, const N_FRI_LAYERS: usize>
         if N_TREES == 0 {
             return Err(ProofShapeError::EmptyTreeLayout);
         }
+        // STWO emits no preprocessed query positions when tree zero has height
+        // zero, while the fixed V2 wire carries one trace path per tree/query.
+        if self.tree_heights[0] == M31Word::ZERO {
+            return Err(ProofShapeError::EmptyPreprocessedTreeUnsupported);
+        }
         validate_nonzero_shape_count("claimed sums", self.claimed_sum_count)?;
         validate_nonzero_shape_count("sampled values", self.sampled_value_count)?;
         validate_nonzero_shape_count("queried values", self.queried_value_count)?;
@@ -224,25 +229,31 @@ impl<const N_TABLES: usize, const N_TREES: usize, const N_FRI_LAYERS: usize>
             validate_log_size("tree", tree, height.as_u32(), true)?;
         }
 
+        // STWO defines the FRI lifting domain from the last commitment tree.
+        // Every ordinary trace tree is queried with positions from that domain;
+        // only tree zero has the protocol's dedicated preprocessed-tree remap.
         let described_lifting_log_size = self
             .tree_heights
-            .iter()
-            .map(|height| height.as_u32())
-            .max()
-            .ok_or(ProofShapeError::EmptyTreeLayout)?;
+            .last()
+            .ok_or(ProofShapeError::EmptyTreeLayout)?
+            .as_u32();
         let lifting_log_size = config
             .lifting_log_size
             .unwrap_or(described_lifting_log_size);
         validate_log_size("lifting", 0, lifting_log_size, false)?;
-        if config.lifting_log_size.is_some() {
-            for (tree, actual) in self.tree_heights.iter().enumerate() {
-                if actual.as_u32() != lifting_log_size {
-                    return Err(ProofShapeError::TreeHeightMismatch {
-                        tree,
-                        expected: lifting_log_size,
-                        actual: actual.as_u32(),
-                    });
-                }
+        let first_full_domain_tree = usize::from(config.lifting_log_size.is_none());
+        for (tree, actual) in self
+            .tree_heights
+            .iter()
+            .enumerate()
+            .skip(first_full_domain_tree)
+        {
+            if actual.as_u32() != lifting_log_size {
+                return Err(ProofShapeError::TreeHeightMismatch {
+                    tree,
+                    expected: lifting_log_size,
+                    actual: actual.as_u32(),
+                });
             }
         }
 
@@ -850,6 +861,7 @@ impl std::error::Error for PcsParameterError {}
 pub enum ProofShapeError {
     EmptyTableLayout,
     EmptyTreeLayout,
+    EmptyPreprocessedTreeUnsupported,
     ZeroCount {
         field: &'static str,
     },
@@ -913,6 +925,10 @@ impl fmt::Display for ProofShapeError {
         match self {
             Self::EmptyTableLayout => write!(formatter, "proof shape has no AIR tables"),
             Self::EmptyTreeLayout => write!(formatter, "proof shape has no commitment trees"),
+            Self::EmptyPreprocessedTreeUnsupported => write!(
+                formatter,
+                "the fixed V2 wire cannot represent an empty preprocessed commitment tree"
+            ),
             Self::ZeroCount { field } => write!(formatter, "proof-shape {field} count is zero"),
             Self::CountOutOfRange { field, value } => {
                 write!(
@@ -954,7 +970,7 @@ impl fmt::Display for ProofShapeError {
                 actual,
             } => write!(
                 formatter,
-                "tree {tree} has height {actual}, lifting config requires {expected}"
+                "tree {tree} has height {actual}, lifting domain requires {expected}"
             ),
             Self::TableExceedsLiftingDomain {
                 table,
@@ -1188,6 +1204,21 @@ mod tests {
         }
     }
 
+    fn inferred_lifting_shape() -> FixedProofShape<2, 3, 4> {
+        FixedProofShape {
+            claimed_sum_count: word(1),
+            sampled_value_count: word(4),
+            queried_value_count: word(6),
+            trace_path_count: word(9),
+            raw_query_count: word(3),
+            last_layer_coefficient_count: word(1),
+            table_log_sizes: [word(5), word(6)],
+            tree_heights: [word(6), word(8), word(8)],
+            fri_layer_fold_widths: [word(4), word(4), word(4), word(2)],
+            fri_layer_tree_heights: [word(6), word(4), word(2), word(2)],
+        }
+    }
+
     fn valid_manifest() -> ProtocolManifest<2, 2, 4, 2, 2, 4> {
         ProtocolManifest {
             version: ProtocolVersion(word(2)),
@@ -1401,6 +1432,55 @@ mod tests {
         assert_eq!(
             parameters.validate(),
             Err(PcsParameterError::FriFoldStepOutOfRange { value: 5 })
+        );
+    }
+
+    #[test]
+    fn inferred_lifting_uses_the_last_commitment_tree() {
+        let mut parameters = valid_pcs();
+        parameters.lifting_log_size = OptionalM31Word::None;
+        let parameters = parameters
+            .validate()
+            .expect("fixture PCS parameters are valid");
+        let mut shape = inferred_lifting_shape();
+        shape.tree_heights[0] = word(9);
+        assert_eq!(
+            shape
+                .validate(parameters)
+                .map(|shape| shape.lifting_log_size()),
+            Ok(8)
+        );
+    }
+
+    #[test]
+    fn inferred_lifting_rejects_a_short_non_preprocessed_tree() {
+        let mut parameters = valid_pcs();
+        parameters.lifting_log_size = OptionalM31Word::None;
+        let parameters = parameters
+            .validate()
+            .expect("fixture PCS parameters are valid");
+        let mut shape = inferred_lifting_shape();
+        shape.tree_heights[1] = word(7);
+        assert_eq!(
+            shape.validate(parameters),
+            Err(ProofShapeError::TreeHeightMismatch {
+                tree: 1,
+                expected: 8,
+                actual: 7,
+            })
+        );
+    }
+
+    #[test]
+    fn fixed_shape_rejects_an_empty_preprocessed_tree() {
+        let parameters = valid_pcs()
+            .validate()
+            .expect("fixture PCS parameters are valid");
+        let mut shape = valid_shape();
+        shape.tree_heights[0] = M31Word::ZERO;
+        assert_eq!(
+            shape.validate(parameters),
+            Err(ProofShapeError::EmptyPreprocessedTreeUnsupported)
         );
     }
 

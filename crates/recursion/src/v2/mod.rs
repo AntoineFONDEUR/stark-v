@@ -7,6 +7,7 @@ pub mod kernel;
 pub mod oods_circuit;
 pub mod pow;
 pub mod protocol;
+pub mod query_position_air;
 pub mod relation_challenge_air;
 pub mod statement;
 pub mod statement_input_air;

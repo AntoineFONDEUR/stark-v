@@ -131,6 +131,7 @@ words:
   - rngs
   - rodata
   - roundtrips
+  - rsplit
   - rstest
   - rustc
   - rustflags

@@ -53,6 +53,8 @@ pub mod vm_public_logup_lowering;
 pub mod wire;
 
 #[cfg(test)]
+mod fri_verifier_binding_tests;
+#[cfg(test)]
 pub(crate) mod test_fixtures;
 #[cfg(test)]
 mod vm_leaf_binding_tests;

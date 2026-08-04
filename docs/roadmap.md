@@ -1,171 +1,559 @@
-# Project roadmap
+# Project execution ledger
 
-## How to read the documentation
+This file is the canonical entry point for all unfinished project work. It is
+both the dependency-ordered implementation plan and the progress ledger. Design
+documents explain the target in more depth, but they do not own task status or
+execution order.
 
-The repository keeps current-state documentation and forward designs, but they
-must identify themselves explicitly.
+## How to execute this ledger
 
-| Document                    | Class                                  | Meaning                                                                         |
-| --------------------------- | -------------------------------------- | ------------------------------------------------------------------------------- |
-| `README.md`                 | Current state                          | Supported user-facing behavior and measured commands only                       |
-| `docs/airs.md`              | Current state                          | Active AIR architecture; source remains authoritative for exact constraints     |
-| `docs/recursion.md`         | Current state plus implementation plan | What recursion components exist, what is missing, and the recursion finish line |
-| `docs/felt-air-compiler.md` | Partially implemented design           | Shipped compiler facilities plus the remaining opcode and runner migration      |
-| `docs/precompiles.md`       | Planned feature with prototype         | Tested cross-proof binding primitive; no VM offload yet                         |
-| `docs/syscalls.md`          | Planned feature                        | Proposed syscall and output-journal design; no `ecall` support yet              |
-| `CONTRIBUTING.md`           | Current process                        | Required development and submission workflow                                    |
-| `SECURITY.md`               | Current policy                         | Security scope and private reporting process                                    |
+Status values have one meaning:
 
-A planned document is not stale merely because its feature is absent. It is
-wrong only if it presents the target as implemented, depends on an API that no
-longer exists, or contradicts a current invariant. Historical audits and
-superseded implementation notes belong in version control, not in the active
-documentation set.
+- `[done]`: implementation, focused tests, relevant end-to-end tests,
+  documentation, repository hooks, commit, and push are complete;
+- `[active]`: the only task currently being implemented;
+- `[pending]`: a dependency is unfinished or work has not started;
+- `[blocked]`: work cannot continue without an explicitly recorded external
+  dependency or user decision.
 
-## Architecture rules that gate all feature work
+There must be at most one `[active]` task. Work proceeds by task ID in the order
+below unless a task explicitly lists a different dependency. An agent taking
+over the repository must:
+
+1. read this file and the design documents referenced by the active task;
+2. verify the worktree and current source state rather than trusting prose;
+3. finish the active task without starting a later task;
+4. run focused release-mode tests before broader release-mode tests;
+5. update the task status and evidence in this file;
+6. run `prek run --all-files`, commit, and push the milestone;
+7. mark the next dependency-satisfied task `[active]` in the same handoff.
+
+A task is not done merely because its happy-path test passes. Every new binding
+requires focused malformed-witness or statement-mutation coverage. Commands in
+the evidence log are commands that were actually run; future work must append
+its real commands and results rather than predicted output.
+
+## Non-negotiable architecture gates
 
 - Host continuation and recursive proving remain separate crates and APIs.
 - `recursion` has no version-suffixed module tree or compatibility layer.
-- Every AIR component reachable from the recursion roster is defined through
-  `define_air!` or `define_air_fns!`.
-- No active recursion dependency may use a handwritten `FrameworkEval` or a
+- Every AIR component reachable from a recursive proof uses `define_air!` or
+  `define_air_fns!`, including shared and precompile components.
+- No active recursion dependency contains a handwritten `FrameworkEval` or a
   standalone `define_component_tables!` declaration.
-- AIR constraints, witness filling, column layouts, relation registration,
-  interaction traces, and component claims come from one macro definition.
-- Protocol configuration is trusted and manifest-bound; proof bytes never select
-  verifier phases or shapes.
-- Public verification APIs accept an expected statement and compare it before
-  returning success.
-- Documentation never claims recursion, constant proof size, a precompile,
-  syscall support, or a benchmark result before an end-to-end release-mode test
-  or measurement establishes it.
+- Columns, constraints, witness filling, relation registration, interaction
+  traces, component claims, and composition evaluation derive from the same
+  macro definition.
+- Protocol configuration is trusted and manifest-bound. Proof bytes never choose
+  verifier phases, operation counts, table shapes, or FRI shapes.
+- Public verification accepts the expected statement and protocol and compares
+  both before returning success.
+- No document claims recursion, constant proof size, a precompile, syscall
+  support, or a performance result before a release-mode end-to-end test or
+  checked-in measurement establishes it.
 
-## Dependency-ordered delivery plan
+## Documentation map
 
-### Completed cleanup baseline
+| Document                    | Class                          | Authority                                                                   |
+| --------------------------- | ------------------------------ | --------------------------------------------------------------------------- |
+| `docs/roadmap.md`           | Current execution ledger       | Task order, task status, completion gates, and evidence                     |
+| `README.md`                 | Current state                  | Supported user-facing behavior and measured commands                        |
+| `docs/airs.md`              | Current state                  | Active AIR architecture; source remains authoritative for exact constraints |
+| `docs/recursion.md`         | Current design                 | Recursive statements, verifier architecture, and soundness invariants       |
+| `docs/felt-air-compiler.md` | Partially implemented design   | Compiler facilities and opcode/runner target                                |
+| `docs/precompiles.md`       | Planned feature with prototype | Cross-proof hash binding target                                             |
+| `docs/syscalls.md`          | Planned feature                | Syscall and output-journal target                                           |
+| `CONTRIBUTING.md`           | Current process                | Development and submission workflow                                         |
+| `SECURITY.md`               | Current policy                 | Security scope and private reporting                                        |
 
-The current tree establishes this baseline:
+A planned document is not stale merely because its feature is absent. It is
+wrong if it presents the target as implemented, references an API that no longer
+exists, or contradicts a current invariant. Historical audits and superseded
+implementation notes belong in version control, not in the active documentation
+set.
 
-1. `continuation` is the host-side multi-proof chain: one proof per segment,
-   independent verification, adjacent boundary checks, and linear size.
-2. `recursion` contains only the active universal verifier design; abandoned
-   proof wrappers, aggregation APIs, version suffixes, and stale audit snapshots
-   are absent.
-3. README and current-state docs describe only code that exists. Compiler,
-   precompile, and syscall designs remain as forward plans with explicit
-   implementation status.
-4. Focused and full-workspace release tests plus the repository hooks are green
-   at the cleanup baseline and remain mandatory after further changes.
+## Current checkpoint
 
-### Normalize the AIR implementation model
+- `[done] BASE-001` Establish the cleanup baseline.
+  - Host continuation lives in `crates/continuation` and returns one proof per
+    segment.
+  - `crates/recursion` contains the active universal verifier design without a
+    `v2` namespace or abandoned aggregation wrappers.
+  - Current and planned documentation are explicitly distinguished.
+  - Evidence: commit `54d55fc8`; focused recursion and continuation tests, the
+    full release workspace suite, and repository hooks passed.
 
-1. Inventory the complete recursion dependency graph, not only files in the
-   recursion crate.
-2. Classify each component as generated by `define_air!`, generated by
-   `define_air_fns!`, or legacy/manual.
-3. Extend the macro DSL for any missing mask, relation, interaction, or witness
-   feature before migrating a component that needs it.
-4. Migrate recursion-local control, transcript, statement, public-claim,
-   randomness, query, Merkle, DEEP, FRI, arithmetic, and relation-closure
-   components family by family.
-5. Migrate shared helper components used by recursion if they are still manual.
-6. After each family, run its focused release tests and a relation-closure test
-   before removing the old declaration.
-7. Add a repository check that rejects active recursion code containing
-   `define_component_tables!` or a handwritten `FrameworkEval` implementation.
-8. Delete the legacy component path once the inventory contains only the two
-   accepted macro front ends.
+- `[active] AIR-001` Migrate shared recursion primitives to the macro DSL.
+- `[pending] AIR-002` Migrate trusted recursion control components.
+- `[pending] AIR-003` Migrate recursion transcript components.
+- `[pending] AIR-004` Migrate statement and VM-public-input adapters.
+- `[pending] AIR-005` Migrate recursion PCS and FRI components.
+- `[pending] AIR-006` Enforce zero handwritten recursion AIRs.
+- `[pending] PRO-001` Freeze the first recursive protocol profile.
+- `[pending] REC-001` Adapt a real VM proof to the recursive leaf wire.
+- `[pending] REC-002` Build the universal trace assembler.
+- `[pending] REC-003` Close the segment-leaf branch end to end.
+- `[pending] REC-004` Close the canonical empty-leaf branch.
+- `[pending] REC-005` Implement the outer recursion prover and verifier.
+- `[pending] REC-006` Verify a real recursion proof as a child.
+- `[pending] REC-007` Prove the two-child binary branch.
+- `[pending] REC-008` Build the recursive tree driver.
+- `[pending] REC-009` Expose and bind the application root API.
+- `[pending] REC-010` Demonstrate constant root-proof size.
+- `[pending] PRE-001` Prepare the hash-precompile proof split for production.
+- `[pending] SYS-001` Implement proof-bound syscalls and output journal.
+- `[pending] FELT-001` Complete witness-side felt-function VM access.
+- `[pending] FELT-002` Migrate opcode execution and retire duplicate semantics.
+- `[pending] REL-001` Harden and measure the completed system.
 
-Acceptance gate: generated AIR evaluation and generated witness layouts agree
-for every recursion component, all focused release tests pass, and the source
-guard finds no manual exception.
+## Macro-only recursion migration
 
-### Finish recursive proving
+The live universal roster contains 36 components. `poseidon2` already uses
+`define_air_fns!`, and `range_check_8_8` already uses `define_air!`. The other
+34 source evaluators are migration debt. No `PRO-*` or `REC-*` task may start
+until `AIR-006` is done.
 
-Execute the detailed dependency-ordered list in `docs/recursion.md`: freeze one
-protocol profile, adapt real VM proofs, assemble universal traces, close the VM
-and recursion verifier lanes, implement empty and binary branches, add the outer
-prover/verifier and tree driver, bind the application statement, prove constant
-serialized size, and complete adversarial coverage.
+### `[active] AIR-001` Shared primitives
 
-Acceptance gate: one expected complete-execution statement and one root proof
-are sufficient for verification; descendant proofs are absent; root proof size
-and verifier shape are unchanged across supported segment counts.
+Dependencies: `BASE-001`.
 
-### Prepare hash precompiles for production
+Scope: `qm31_mul`, `qm31_inv`, `linear_ops`, and `merkle_path`.
 
-1. Replace the manual host-side component in the binding prototype with
-   `define_air!` or `define_air_fns!` and retain the existing malformed-pair
-   coverage.
-2. Define a joint transcript that draws the shared relation only after both the
-   VM and hash main traces are committed.
-3. Extract Poseidon2 rows from the VM proof while preserving every
-   `poseidon2_io` emission made by VM components.
-4. Produce a segment artifact containing one VM proof and one Poseidon2 proof,
-   with explicit per-proof shapes and shared claimed sums.
-5. Extend `continuation` to verify both proofs, replay the joint draw, check sum
-   cancellation, and then chain segment statements.
-6. Extend the recursion segment-leaf branch to perform the same two-proof
-   verification and derive exactly one segment statement.
-7. Bind the new artifact and proof shapes in a protocol manifest; do not reuse a
-   protocol identifier from the single-proof layout.
-8. Benchmark the split against the in-proof Poseidon2 component across segment
-   sizes and keep it only where measured cost is acceptable.
+Required work:
 
-Acceptance gate: forged, missing, extra, or reordered permutation tuples fail
-both host continuation and recursive leaf verification; a real root proof can
-verify a segment artifact using the offloaded hash proof.
+1. Express every column, constraint, relation entry, witness row, interaction
+   trace, and component claim through `define_air!` or `define_air_fns!`.
+2. Preserve circuit identifiers, wire multiplicities, Merkle direction and leaf
+   semantics, and all-zero padding behavior.
+3. Extend the macro implementation and its tests when the accepted DSL cannot
+   express a required feature. Do not retain a manual fallback.
+4. Remove the corresponding handwritten `FrameworkEval` implementation and
+   standalone `define_component_tables!` declaration only after equivalence
+   tests pass.
 
-### Implement syscalls and the output journal
+Done when:
 
-1. Follow the proof-first implementation order in `docs/syscalls.md`.
-2. Decode and dispatch `ecall` without publishing any runner-only journal value.
-3. Define every syscall AIR through `define_air!` or `define_air_fns!`.
-4. Prove register binding, Poseidon2 transitions, ordered journal chaining, and
-   public endpoints in the VM proof.
-5. Chain endpoints in `continuation` and map them to
-   `MachineState::public_io_state` in recursion leaves and roots.
-6. Add guest SDK APIs only after invalid syscall IDs, forged words, broken
-   chains, and statement substitution fail end to end.
-7. Bind the changed VM public claim and proof shape in a new protocol manifest.
+- all four components are generated from an accepted macro;
+- existing component and circuit-lowering tests pass in release mode;
+- one focused negative test per component rejects an invalid result or binding;
+- the structural manual-evaluator inventory decreases from 34 to 30;
+- repository hooks pass and the milestone is committed and pushed.
 
-Acceptance gate: an application verifies one public journal digest at the
-recursive root, and no unproved runner value can affect it.
+### `[pending] AIR-002` Trusted controls
 
-### Complete the felt-language and runner migration
+Dependencies: `AIR-001`.
 
-1. Implement witness-side register and memory access resolution for generated
-   felt functions.
-2. Migrate `lui` as the first complete opcode family: generated execution,
-   witness, AIR, relations, and tests; remove its manual runner handler.
-3. Migrate each remaining opcode family separately, starting with simple
-   arithmetic and ending with load/store and division.
-4. Preserve one real guest prove/verify test plus focused malformed-witness
-   tests for every migrated family.
-5. Remove migrated entries from the current `define_air!` trace block and point
-   the component roster at generated embedded components.
-6. Delete obsolete runner handlers and the legacy composition generator after
-   the final family moves.
-7. Re-derive the VM AIR program and recursion protocol profile from the final
-   generated roster.
+Scope: `control`, `vm_public_logup_control`, and `vm_air_composition_control`.
 
-Acceptance gate: opcode semantics, witness generation, and AIR constraints come
-from felt-function definitions; no duplicated per-opcode semantics remain.
+Required work:
 
-### Release hardening
+1. Generate the trusted verifier schedule tables from the same macro source as
+   their witnesses and relation entries.
+2. Keep proof-supplied values unable to shorten, reorder, or replace the trusted
+   schedule.
+3. Preserve proof-kind gating and constrained inactive rows.
 
-1. Run focused unit tests for each change, then previous failures, then the full
-   release-mode workspace suite.
-2. Run all repository hooks and fix every failure without disabling a rule.
-3. Add serialization and conformance vectors for every supported protocol
-   manifest and public proof artifact.
-4. Measure proof size, proving throughput, peak memory, and verification time
-   from checked-in benchmarks.
-5. Perform an adversarial soundness review of transcript binding, statement
-   binding, LogUp closure, proof-shape validation, and all push/pull relation
-   paths.
-6. Update current-state docs from the measured release candidate while keeping
-   unfinished target documents explicitly marked as planned.
+Done when all three components are macro-generated, skipped/reordered control
+steps fail focused tests, the manual inventory is 27, and the milestone is
+tested, committed, and pushed.
 
-The project finish line is reached only when all acceptance gates above hold. A
-planned design document is not itself evidence that its feature works.
+### `[pending] AIR-003` Transcript family
+
+Dependencies: `AIR-002`.
+
+Scope: `transcript_air`, `transcript_binding`, `transcript_state`,
+`transcript_word`, `transcript_payload`, `pow_check`, `pow_frame`,
+`relation_challenge`, and `verifier_randomness`.
+
+Required work:
+
+1. Generate transcript payload ownership, state transitions, word framing,
+   challenge draws, and proof-of-work constraints from macro definitions.
+2. Preserve exact native-verifier absorption order and domain separation.
+3. Test changed, missing, duplicated, and reordered payloads independently.
+
+Done when all nine components are macro-generated, native and AIR transcript
+vectors agree, the manual inventory is 18, and the milestone is tested,
+committed, and pushed.
+
+### `[pending] AIR-004` Statement and VM adapters
+
+Dependencies: `AIR-003`.
+
+Scope: `statement_input`, `statement_semantics_input`, `vm_public_claim_input`,
+`vm_public_claim_hash`, `vm_public_io_hash`, `vm_public_claim_semantics_input`,
+`vm_public_logup_input`, and `vm_air_composition_input`.
+
+Required work:
+
+1. Generate canonical wire decoding, statement hashing, public-claim semantics,
+   public LogUp terms, and VM-composition inputs from macro definitions.
+2. Preserve canonical optional-root encodings and proof-kind-specific statement
+   rules.
+3. Reject every independently mutated public statement field.
+
+Done when all eight components are macro-generated, malformed-wire and
+statement-substitution tests pass, the manual inventory is 10, and the milestone
+is tested, committed, and pushed.
+
+### `[pending] AIR-005` PCS and FRI family
+
+Dependencies: `AIR-004`.
+
+Scope: `query_bits`, `query_mapping`, `merkle_root`, `trace_merkle`,
+`pcs_deep_input`, `fri_merkle_leaf`, `fri_merkle_node`, `fri_merkle_anchor`,
+`fri_verifier_control`, and `fri_verifier_input`.
+
+Required work:
+
+1. Generate query decomposition, position mapping, Merkle authentication, DEEP
+   inputs, FRI control, and FRI input tables from macro definitions.
+2. Preserve fixed proof-shape bounds and trusted control ownership.
+3. Reject incorrect bits, directions, roots, openings, layer widths, and final
+   polynomial values with focused tests.
+
+Done when all ten components are macro-generated, the manual inventory is zero,
+and the milestone is tested, committed, and pushed.
+
+### `[pending] AIR-006` Zero-manual-AIR enforcement
+
+Dependencies: `AIR-005`.
+
+Required work:
+
+1. Inventory the complete dependency graph reachable from every recursive proof
+   branch, including components outside `crates/recursion`.
+2. Add a checked-in structural guard that rejects a handwritten `FrameworkEval`
+   implementation or standalone `define_component_tables!` declaration in that
+   graph.
+3. Remove migration-only macro dependencies, adapters, and comments.
+4. Re-run the complete recursion library tests and full release workspace suite.
+
+Done when the guard reports zero exceptions, every recursive component derives
+AIR and witness behavior from one accepted macro, and the milestone is tested,
+committed, and pushed.
+
+## Recursive root proof
+
+The design and soundness invariants are in `docs/recursion.md`. Tasks below own
+the implementation order and status.
+
+### `[pending] PRO-001` Freeze the protocol profile
+
+Dependencies: `AIR-006`.
+
+Required work:
+
+1. Select VM and recursion PCS parameters, table capacities, query count, proof
+   shapes, and FRI layer capacities for one supported profile.
+2. Derive all manifest fields from the actual component rosters and serialized
+   proof types.
+3. Pin the protocol identifier and every preprocessing-column identifier with
+   conformance vectors.
+4. Bind any later profile change to a different protocol identifier.
+
+Done when native and AIR manifest encodings have the same digest, every field
+mutation changes the identity or fails validation, and the profile is tested,
+committed, and pushed.
+
+### `[pending] REC-001` Real VM-proof adapter
+
+Dependencies: `PRO-001`.
+
+Required work:
+
+1. Convert `prover::Proof<Poseidon2M31Hash>` and authenticated public data into
+   the fixed segment-leaf wire.
+2. Derive the exact height-zero span from the public claim, job context, segment
+   index, and cycle interval.
+3. Reject capacity overflow, non-canonical optional roots, and disagreement
+   between runner metadata and authenticated proof data.
+
+Done when a real proof round-trips and one focused test rejects each malformed
+wire or metadata field.
+
+### `[pending] REC-002` Universal trace assembler
+
+Dependencies: `REC-001`.
+
+Required work:
+
+1. Define one witness container covering all 36 universal components.
+2. Execute the trusted control plan to fill transcript, statement, public-claim,
+   randomness, composition, PCS, FRI, arithmetic, Merkle, Poseidon2, and range
+   tables.
+3. Derive log sizes from populated tables and pad every table with its
+   constrained inactive representation.
+4. Generate every interaction trace and public relation term.
+
+Done when assembling the same verifier input twice produces identical traces,
+claims, log sizes, and preprocessing identifiers and every component accepts the
+assembled witness.
+
+### `[pending] REC-003` Segment-leaf closure
+
+Dependencies: `REC-002`.
+
+Required work:
+
+1. Replay one real VM proof through public-claim semantics, VM AIR composition,
+   authenticated openings, DEEP quotient evaluation, FRI, proof of work, and
+   final-polynomial checks.
+2. Accumulate every verifier-owned public term and enforce zero global LogUp sum
+   over the universal roster.
+3. Bind the authenticated VM claim to exactly one height-zero span.
+
+Done when a valid VM proof satisfies the entire universal AIR and an independent
+mutation in every proof region or omitted control phase fails.
+
+### `[pending] REC-004` Canonical empty leaf
+
+Dependencies: `REC-003`.
+
+Required work:
+
+1. Emit the unique empty-span statement and minimal valid universal witness.
+2. Constrain empty leaves to slots at or beyond the declared segment count and
+   below the fixed tree capacity.
+3. Constrain every inactive wire to zero.
+
+Done when canonical padding verifies and executed-slot empties, out-of-capacity
+slots, and non-zero inactive wires fail.
+
+### `[pending] REC-005` Outer prover and verifier
+
+Dependencies: `REC-004`.
+
+Required work:
+
+1. Preprocess the universal AIR for `PRO-001`.
+2. Define one recursion proof artifact containing the protocol identity, parent
+   statement, component claims, interaction claims, and STWO proof.
+3. Prove and verify the complete roster with the Poseidon2-M31 channel.
+4. Require callers to supply the expected protocol and expected statement.
+
+Done when real segment and empty leaves produce valid recursion proofs and each
+public claim or proof mutation is rejected.
+
+### `[pending] REC-006` Recursion-child closure
+
+Dependencies: `REC-005`.
+
+Required work:
+
+1. Encode the real proof produced by `REC-005` into the recursion-child wire.
+2. Replay its transcript through the trusted recursion control plan and
+   recursion AIR self-program.
+3. Verify claimed sums, composition, authenticated openings, DEEP quotient, FRI,
+   proof of work, and final polynomial inside the universal AIR.
+
+Done when one real recursion proof closes every relation as a child and one
+focused test rejects each mutated statement, commitment, opening, sum, and FRI
+value.
+
+### `[pending] REC-007` Binary node
+
+Dependencies: `REC-006`.
+
+Required work:
+
+1. Materialize independent left and right child-verifier lanes with distinct
+   verifier identifiers.
+2. Prove equal heights, exact slot adjacency, common job identity, machine-state
+   boundary equality, valid edge-claim placement, and the unique parent fold.
+3. Feed the complete binary witness through `REC-005`.
+
+Done when two valid adjacent child proofs produce one verified parent proof and
+swapped, duplicated, gapped, overlapping, or mismatched children fail.
+
+### `[pending] REC-008` Tree driver
+
+Dependencies: `REC-007`.
+
+Required work:
+
+1. Segment a run and prove its VM leaves.
+2. Append canonical empty leaves to the unique minimal power-of-two capacity.
+3. Prove successive binary levels; parallelism is allowed only among independent
+   nodes within one level.
+4. Return one root proof and root statement without descendant proofs.
+
+Done when runs with 1, 2, 3, 4, and 8 executed segments each produce one valid
+root proof with the expected span.
+
+### `[pending] REC-009` Application root API
+
+Dependencies: `REC-008`.
+
+Required work:
+
+1. Accept the expected protocol, program, initial and final machine state,
+   public input, public output, and total cycles.
+2. Verify exactly one root proof and compare every complete-execution statement
+   field before returning success.
+3. Keep all multi-proof host APIs exclusively in `continuation`.
+
+Done when the expected statement verifies and one focused test rejects each
+independently changed statement field.
+
+### `[pending] REC-010` Constant-size demonstration
+
+Dependencies: `REC-009`.
+
+Required work:
+
+1. Serialize roots for every supported segment count under `PRO-001`.
+2. Record root proof bytes and root-verifier operation shape independently from
+   total tree-prover work.
+3. Add a checked-in conformance test for equal serialized sizes and verifier
+   shapes.
+
+Done when every supported count yields exactly one root proof with identical
+serialized size and root-verifier shape.
+
+## Planned VM capabilities
+
+These features remain project goals. They may not change the meaning of a
+completed `PRO-001` profile silently: any changed roster, public claim, or proof
+artifact receives a new manifest identity and repeats affected recursion
+conformance tests.
+
+### `[pending] PRE-001` Hash precompile
+
+Dependencies: `REC-010`.
+
+Design authority: `docs/precompiles.md`.
+
+Required work, in order:
+
+1. Replace the prototype binding tables and handwritten evaluators with
+   `define_air!` or `define_air_fns!` while preserving malformed-pair tests.
+2. Implement the joint post-commitment transcript draw and joint interaction
+   proof of work for VM and Poseidon2 instances.
+3. Produce a standalone Poseidon2 proof carrying its shared-relation sum.
+4. Remove the Poseidon2 component from the VM proof and expose its deficit as a
+   public shared-relation claim.
+5. Define one segment artifact containing the VM proof, hash proof, proof
+   shapes, and shared claimed sums.
+6. Extend `continuation` and the recursive leaf branch to replay the joint draw,
+   verify both proofs, and require exact sum cancellation.
+7. Bind the changed artifact to a new protocol manifest and rerun root
+   conformance tests.
+8. Measure the split against the integrated Poseidon2 component and record the
+   supported profile rather than assuming a performance win.
+
+Done when forged, missing, extra, or reordered permutation tuples fail both host
+continuation and recursive-root verification and the result is tested,
+committed, and pushed.
+
+### `[pending] SYS-001` Syscalls and output journal
+
+Dependencies: `PRE-001`.
+
+Design authority: `docs/syscalls.md`.
+
+Required work, in order:
+
+1. Add `ecall` decoding and internal runner dispatch without exposing an
+   unauthenticated journal value.
+2. Define the COMMIT syscall AIR through `define_air!` or `define_air_fns!`.
+3. Prove standard relation multiplicities and interaction closure for the new
+   table before adding journal logic.
+4. Bind the register value, Poseidon2 transition, ordered journal relation, and
+   public initial/final endpoints.
+5. Add the endpoints to VM public data and the Fiat-Shamir transcript.
+6. Chain endpoints in `continuation` and map them into recursive leaf and root
+   statements under a new protocol identity.
+7. Expose the guest SDK only after VM, continuation, and recursive-root tests
+   reject changed words, broken states, dropped, inserted, and reordered steps.
+
+Done when an application verifies one proof-bound journal digest at the root and
+no runner-only value can affect it.
+
+### `[pending] FELT-001` Witness-side VM access
+
+Dependencies: `SYS-001`.
+
+Design authority: `docs/felt-air-compiler.md`.
+
+Required work:
+
+1. Add generated register read/write and memory read/write abstractions backed
+   by `Tracer::trace_reg_access` and `Tracer::trace_mem_access`.
+2. Generate clock-gap activations and range checks from those access operations.
+3. Preserve write-once witness behavior, gap filling, x0 semantics, and memory
+   roots.
+4. Prove the access layer on a toy generated opcode before migrating production
+   handlers.
+
+Done when generated felt functions can execute and fill real VM access rows and
+focused tests reject stale clocks, incorrect prior values, and illegal writes.
+
+### `[pending] FELT-002` Opcode and runner migration
+
+Dependencies: `FELT-001`.
+
+Required work, in order:
+
+1. Migrate `lui` end to end and delete its handwritten runner semantics.
+2. Migrate `auipc`, `jal`, and `jalr`.
+3. Migrate `base_alu_imm`, `base_alu_reg`, `lt_imm`, `lt_reg`, `branch_eq`, and
+   `branch_lt`.
+4. Migrate `shifts_imm`, `shifts_reg`, `mul`, and `mulh`.
+5. Migrate `load_store`.
+6. Migrate `div` last.
+7. Preserve one real guest prove/verify test plus focused malformed-witness
+   coverage for every family before deleting its old schema and handler.
+8. Delete the obsolete opcode `define_air!` trace block, `components!` support,
+   and `runner/src/ops` only after the last family moves.
+9. Re-derive the VM AIR program and recursion manifest from the final roster and
+   rerun every root conformance test under a new protocol identity.
+
+Done when opcode execution, witness filling, and AIR constraints have one
+felt-function source and no duplicated per-opcode semantics remain.
+
+## Final hardening
+
+### `[pending] REL-001` Security, performance, and release evidence
+
+Dependencies: `FELT-002`.
+
+Required work:
+
+1. Add adversarial tests for non-canonical wires, transcript reordering, omitted
+   relation challenges, wrong Merkle directions, reused paths, altered OODS
+   values, incorrect FRI positions, non-zero relation sums, invalid padding,
+   boundary discontinuities, precompile substitutions, journal forgeries, and
+   root-statement substitution.
+2. Run focused release tests, previous failures, the complete release workspace
+   suite, and all repository hooks without ignored soundness tests.
+3. Measure serialized root proof size, peak memory, leaf throughput, per-level
+   node proving time, and root verification time on each supported profile.
+4. Update current-state documentation from checked-in results and keep any
+   unfinished design explicitly labeled.
+5. Commit and push the release evidence.
+
+Done when one expected complete-execution statement and one constant-size root
+proof verify the final supported execution, all planned capabilities above are
+proof-bound, and every published claim is reproducible.
+
+## Evidence log
+
+Append one entry after each completed task. Include the task ID, date, exact
+commands run, observed test counts or measurements, and the pushed commit.
+
+### `BASE-001` — 2026-08-04
+
+- `cargo test --release -p recursion --lib`: 583 passed.
+- `cargo test --release -p continuation`: 6 unit and 1 integration test passed.
+- `cargo test --release --workspace`: passed in 102.78 seconds.
+- `prek run --all-files`: passed.
+- Commit `54d55fc8` pushed to `origin/chore/scratchpad-cleanups`.
+
+## Project finish line
+
+The project is complete only when all tasks are `[done]`, one application
+statement and one root proof verify the final execution without descendant
+proofs, root proof size is constant across supported segment counts, every AIR
+reachable from recursion uses an accepted macro DSL, and every current-state or
+performance claim is backed by checked-in release evidence.

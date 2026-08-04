@@ -1,7 +1,7 @@
 //! Linear circuit-node component: witness generation and AIR evaluation.
 //!
 //! Each enabled row implements one add/sub/neg node of a recorded
-//! composition circuit (docs/recursion.md, M5): the limb arithmetic is
+//! composition circuit: the limb arithmetic is
 //! constrained in the DSL, the node's structure is discharged against the
 //! public `op_def` claims, operands are consumed and the result emitted
 //! through the `wire` relation with multiplicity equal to the node's use

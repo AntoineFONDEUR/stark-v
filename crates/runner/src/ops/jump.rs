@@ -1,15 +1,15 @@
 //! Jump operations.
 //!
 //! This file contains:
-//! - jal family: jal (airs.md Section 12)
-//! - jalr family: jalr (airs.md Section 11)
+//! - jal family: jal
+//! - jalr family: jalr
 
 use super::utils::imm_to_felt;
 use crate::trace::Tracer;
 use crate::{Cpu, DecodedInst};
 
 // =============================================================================
-// JAL - airs.md Section 12
+// JAL
 // =============================================================================
 
 pub fn jal(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
@@ -23,7 +23,7 @@ pub fn jal(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
 }
 
 // =============================================================================
-// JALR - airs.md Section 11
+// JALR
 // =============================================================================
 
 pub fn jalr(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {

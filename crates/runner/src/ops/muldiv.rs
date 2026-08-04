@@ -1,16 +1,16 @@
 //! Multiply/Divide operations (M extension).
 //!
 //! This file contains:
-//! - mul family: mul (airs.md Section 14)
-//! - mulh family: mulh, mulhsu, mulhu (airs.md Section 15)
-//! - div family: div, divu, rem, remu (airs.md Section 16)
+//! - mul family: mul
+//! - mulh family: mulh, mulhsu, mulhu
+//! - div family: div, divu, rem, remu
 
 use super::utils::{M31_P, m31_inverse};
 use crate::trace::Tracer;
 use crate::{Cpu, DecodedInst};
 
 // =============================================================================
-// MUL - airs.md Section 14
+// MUL
 // =============================================================================
 
 pub fn mul(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
@@ -26,7 +26,7 @@ pub fn mul(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
 }
 
 // =============================================================================
-// MULH (mulh/mulhsu/mulhu) - airs.md Section 15
+// MULH (mulh/mulhsu/mulhu)
 // =============================================================================
 
 /// Helper to compute 64-bit multiplication high word and witness columns
@@ -125,7 +125,7 @@ pub fn mulhu(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
 }
 
 // =============================================================================
-// DIV (div/divu/rem/remu) - airs.md Section 16
+// DIV (div/divu/rem/remu)
 // =============================================================================
 
 /// Compute division witness columns

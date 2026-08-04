@@ -19,9 +19,8 @@ use crate::relations::{INTERACTION_POW_BITS, Relations};
 ///
 /// Returns the channel and commitment scheme advanced to the state right
 /// before `stwo::core::verifier::verify` takes over (composition commitment
-/// and OODS draws). Shared by host verification and the recursion transcript
-/// replay (`crate::recursion`), so the protocol prefix has a single
-/// implementation.
+/// and OODS draws). Keeping this phase explicit lets other verifiers replay
+/// the exact VM transcript prefix without duplicating its order.
 pub fn replay_claim_phase<MC: MerkleChannel>(
     proof: &Proof<MC::H>,
     config: PcsConfig,

@@ -3,15 +3,14 @@
 > **Status: design only.** Nothing in this document is implemented. The VM
 > currently has no `ecall`/syscall support; a guest containing an `ecall`
 > instruction fails to decode (`RunError::InvalidInstruction`). This file
-> records a proposed design and the debugging findings from a prototype so a
-> future implementation can resume cleanly. It deliberately claims no working
-> feature: an unproven capability that looks like a committed output would be
-> worse than no capability at all.
+> records the target design. It deliberately claims no working feature: an
+> unproven capability that looks like a committed output would be worse than no
+> capability at all.
 
 ## Motivation
 
 The fixed output region (`__output_data`) forces two constraints: the output is
-size-bounded, and every output word must be written in the _final_ continuation
+size-bounded, and every output word must be written in the final execution
 segment (the runner enforces this by cutting a segment boundary just before the
 first output store — see `run_segments_impl`). A streamed, digest-anchored
 output would remove both: the guest commits an unbounded sequence of words, the
@@ -36,21 +35,21 @@ so no prover can fake `final`:
    public `final` — no insertions, drops, or reorderings.
 
 Because all three must hold in-AIR before the digest can be exposed, the journal
-must be built proof-first: the digest may only appear on `PublicData` /
-`Boundary` once the AIR enforces it. A runner-level journal with no AIR backing
-must not exist, because its `final` value would look like a commitment while
-being forgeable.
+must be built proof-first: the digest may only appear on VM `PublicData` and the
+recursive `MachineState::public_io_state` once the AIR enforces it. A
+runner-level journal with no AIR backing must not exist, because its `final`
+value would look like a commitment while being forgeable.
 
 ## Proposed in-AIR construction
 
-- **`ecall` trace table** (`define_air!` schema): one row per COMMIT — `clock`,
-  `pc`, the `a0` register read, a per-segment `step` index, the 16-lane `prev`
-  and `next` states. Derived: the permutation input `in = prev + a0-in-rate`
-  (degree 1). Lookups: `program_access`, the `pc`/`clock` `registers_state`
-  transition, the `a0` `memory_access` read, `range_check_20` on the clock gap,
-  an atomic `poseidon2_io(in, next)` binding discharged by the Poseidon2
-  component's `io` rows, and a `journal` chain (consume `journal(step, prev)`,
-  emit `journal(step+1, next)`).
+- **`ecall` trace table** (`define_air!` or `define_air_fns!`): one row per
+  COMMIT — `clock`, `pc`, the `a0` register read, a per-segment `step` index,
+  the 16-lane `prev` and `next` states. Derived: the permutation input
+  `in = prev + a0-in-rate` (degree 1). Lookups: `program_access`, the
+  `pc`/`clock` `registers_state` transition, the `a0` `memory_access` read,
+  `range_check_20` on the clock gap, an atomic `poseidon2_io(in, next)` binding
+  discharged by the Poseidon2 component's `io` rows, and a `journal` chain
+  (consume `journal(step, prev)`, emit `journal(step+1, next)`).
 - **`journal` relation** (arity 17: `step` + 16 lanes): the per-row consume/emit
   telescopes across the segment; endpoints are anchored by public
   `journal(0, initial)` and `journal(n_commits, final)` terms.
@@ -58,23 +57,27 @@ being forgeable.
   permutation is proven by the existing component; `finalize_commitments` must
   append to the Poseidon2 table rather than reset it, so the execution-recorded
   `io` rows survive the Merkle-tree build.
-- **Public data / boundary**: `PublicData` and `Boundary` gain `initial`/`final`
-  journal fields chained across segments alongside pc / regs / memory roots, so
-  the recursion tree root exposes the whole run's digest.
+- **Public data / recursive statement**: VM `PublicData` gains the initial and
+  final journal states. The leaf adapter maps them into
+  `MachineState::public_io_state`, which is already part of every recursive
+  `SpanStatement`, so binary folding proves journal continuity to the root.
 
-## Prototype findings
+## Implementation order
 
-A prototype of the above was built and reverted. Two results are worth keeping:
-
-- The novel parts are sound in isolation: the `journal` chain and its public
-  anchors balance exactly (removing both leaves the global LogUp sum unchanged),
-  and the `poseidon2_io` emit/consume counts match.
-- The blocker is a codegen issue, not the design: wiring a _newly added_
-  `define_air!` trace table left a LogUp imbalance in the standard relations.
-  Isolation pinned the first culprit to `range_check_20` multiplicity
-  registration for the new table (removing that lookup changed the global sum,
-  which means the consume was not matched by a registered preprocessed emit),
-  with a second standard-chain residual behind it. The place to start is how
-  `components!` / `define_air!` generate `register_multiplicities` and the
-  interaction trace for a freshly added trace table — not any journal-specific
-  logic.
+1. Add `ecall` decoding and a runner dispatch interface without exposing any
+   unauthenticated journal value.
+2. Define the COMMIT component through `define_air!` or `define_air_fns!`; no
+   manual `FrameworkEval` component is allowed because the recursion leaf
+   verifier will consume this AIR.
+3. Prove, in a focused release test, that a minimal new table's standard
+   relation multiplicities and interaction trace close before adding journal
+   logic.
+4. Add the Poseidon2 transition and journal-chain relation, with one negative
+   test for a changed word, broken state, dropped step, inserted step, and
+   reordered step.
+5. Bind per-segment journal endpoints into VM `PublicData` and the Fiat-Shamir
+   transcript.
+6. Extend the recursion leaf adapter and statement semantics to map the proven
+   endpoints into `MachineState::public_io_state`.
+7. Expose a guest SDK COMMIT call only after VM proof, continuation, and
+   recursive-root tests all reject forged journal data.

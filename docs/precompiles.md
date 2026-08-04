@@ -1,18 +1,14 @@
-# Hash precompiles: proving Poseidon2 outside the rv32im prover (design)
+# Hash precompiles: proving Poseidon2 outside the RV32IM prover
 
-> **Status:** the cross-proof binding mechanism is implemented and tested in
-> `crates/prover/src/precompile.rs` — two independent stwo proofs sharing one
-> LogUp relation drawn via the two-phase handshake below, whose claimed sums
-> must cancel. Two instances exist side by side: the didactic "square
-> precompile" (`y = x²`, `prove_binding`/`verify_binding`) and the real
-> Poseidon2 binding (`prove_hash_binding`/`verify_hash_binding`) over the
-> 32-word `poseidon2_io` tuple, whose precompile side is the reused stark-v
-> `poseidon2` component itself proving io rows — the exact component the zkVM
-> commits, in its own instance. Eleven tests cover both roundtrips and the
-> soundness failures (unvalidated/unused/forged tuples, forged claimed sum).
-> What remains to actually offload the zkVM is the pipeline switch: the rv32im
-> prover keeps `poseidon2` rows out of its trace and emits `poseidon2_io` tuples
-> instead, proven against a hash-precompile instance via this binding.
+> **Status: planned feature with a tested binding prototype.**
+> `crates/prover/src/precompile.rs` proves the central cross-proof mechanism:
+> two independent STWO proofs share a LogUp relation drawn from both committed
+> traces, and their claimed sums must cancel. It includes a square exemplar and
+> a Poseidon2 exemplar over the 32-word `poseidon2_io` tuple. The VM prover does
+> not yet offload Poseidon2, segment artifacts do not contain a precompile
+> proof, and recursion does not yet verify the pair. The prototype also uses
+> legacy manual component plumbing; production components must be expressed
+> through `define_air!` or `define_air_fns!` before integration.
 
 Goal: take the Poseidon2 table out of the rv32im stwo instance and prove it in
 its own instance, binding the two proofs through their shared LogUp relation.
@@ -32,10 +28,9 @@ execution-independent, committed once, cached on disk, and known to the verifier
 be a fresh per-proof committed tree, not preprocessing — and the verifier would
 still need a reason to believe the pairs are valid permutations.
 
-The codebase already has the right mechanism, and it is the one mechanism used
-everywhere else: a LogUp relation. `poseidon2_io(in_0..in_15, out_0..out_15)`
-(docs/recursion.md, channel-replay design) binds a permutation's ends
-atomically. Inside today's single proof, the poseidon2 component's emissions
+The codebase already has the required relation:
+`poseidon2_io(in_0..in_15, out_0..out_15)` binds a permutation's ends
+atomically. Inside the current VM proof, the Poseidon2 component's emissions
 cancel the merkle/sponge components' consumptions and the total claimed sum is
 zero. Splitting the prover just means the cancellation happens **across two
 proofs**: each proof publishes its (non-zero) claimed sum for the shared
@@ -58,23 +53,25 @@ rv32im prover                      hash prover
                                                 STARK proof B
 ```
 
-Both provers run their (dominant) trace-commitment phase fully in parallel,
-synchronize once to derive the shared relation draw from both commitment roots,
-then finish independently. The verifier — host first, the 2-to-1 aggregation AIR
-later — replays the same draw from the two proofs' commitments and checks
+Both provers can run their trace-commitment phase in parallel, synchronize once
+to derive the shared relation draw from both commitment roots, then finish
+independently. The continuation verifier first, and the recursive verifier once
+implemented, replay the same draw from both proofs' commitments and check
 `claimed_sum_A + claimed_sum_B = 0` for the shared relation (A's own internal
 relations still balance to zero on their own, as do B's).
 
-This is the same trust split the recursion crate already uses
-(`recursion::aggregate`): a node binds two child proofs by checks on their
-public claims; here the bound claim is a relation sum instead of a boundary.
+The recursive verifier must treat the VM proof and precompile proof as one leaf
+artifact: it verifies both proof transcripts and binds their shared relation sum
+before deriving the segment statement.
 
 ## What changes where
 
-1. **air crate**: nothing — the `poseidon2` function and table stay defined by
-   `define_air_fns!` exactly as today. The relation set gains nothing new
-   (`poseidon2_io` is already planned for channel replay).
-2. **hash prover** (new, small): a stwo instance over `Poseidon2Table` alone.
+1. **AIR definitions**: keep the `poseidon2` function and table in
+   `define_air_fns!`; `poseidon2_io` already exists in the VM relation schema.
+   Migrate the prototype's host-side binding table away from
+   `define_component_tables!` and manual `FrameworkEval` before it becomes a
+   production component.
+2. **hash prover**: extract a production STWO instance over `Poseidon2Table`.
    `define_air_fns!` already generates standalone `prove_air_fns` /
    `verify_air_fns` for its tables (see `stwo-macros/tests/air_fns.rs`); this
    needs the channel-handshake variant of that path plus a public claim carrying
@@ -83,20 +80,19 @@ public claims; here the bound claim is a relation sum instead of a boundary.
    successor); its `poseidon2`/`poseidon2_io` relation deficit becomes a public
    claim instead of an in-proof cancellation. `InteractionClaim` gains the
    per-shared-relation sum.
-4. **binder**: extend `verify_segments` and (in-AIR) the aggregation node with
-   the cross-proof sum check and the shared-draw replay.
+4. **binders**: extend `continuation::verify_segments` and the segment-leaf
+   recursion branch with the cross-proof sum check and shared-draw replay.
 5. **SDK/proof format**: a segment artifact becomes
-   `(rv32im proof, hash proof)`; `Boundary` chaining is untouched.
+   `(RV32IM proof, hash proof)`; recursive statement folding remains over the
+   segment's `SpanStatement`.
 
 ## What it buys
 
-- The poseidon2 component is by far the widest in the composition (16-lane state
-  across 8 external + 14 internal rounds); removing it cuts the rv32im
-  instance's committed column count and its max log-size pressure.
-- The hash workload (memory commitment trees, and after M4 the proof-tree paths
-  and channel replay) is bursty and embarrassingly parallel: a dedicated
-  instance can be sized and parallelized independently — including proving while
-  the rv32im instance is still committing.
+- Separating Poseidon2 removes its 16-lane, 8-external-round, 14-internal-round
+  permutation trace from the VM proof. Whether the second proof's fixed cost is
+  a net performance win remains unmeasured.
+- A dedicated hash instance can be sized independently and can overlap work with
+  the VM instance once the joint-transcript synchronization is defined.
 - Each additional hash precompile is the same shape: a relation, a
   `define_air_fns!` table, a prover instance, one sum check in the binder. A
   guest-visible precompile call (ecall) reduces to emitting the relation from a
@@ -112,8 +108,8 @@ public claims; here the bound claim is a relation sum instead of a boundary.
   with two instances the PoW must cover the joint transcript (one grind over
   `mix(root_a, root_b)` shared by both).
 - **Lifting/log-size mismatch**: the two instances have independent trace sizes
-  and PCS configs; the sum check is config-agnostic, but the aggregation AIR's
-  replay components must handle two distinct transcript shapes.
+  and PCS configs; the sum check is config-agnostic, but the recursive
+  verifier's replay components must handle two distinct transcript shapes.
 - **Cost crossover**: for tiny segments the fixed cost of a second proof
   (commitments, FRI) may exceed the column savings; the segment size at which
   the split wins needs the fibonacci-style benchmark treatment.

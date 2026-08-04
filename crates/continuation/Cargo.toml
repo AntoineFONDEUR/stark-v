@@ -1,0 +1,20 @@
+[package]
+name = "continuation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Host-side proving and verification for chained stark-v segment proofs"
+
+[dependencies]
+prover.workspace = true
+rayon.workspace = true
+runner.workspace = true
+stwo.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+test-log.workspace = true
+
+[features]
+parallel = ["prover/parallel"]
+default = []

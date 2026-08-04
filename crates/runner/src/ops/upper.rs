@@ -1,15 +1,15 @@
 //! Upper immediate operations.
 //!
 //! This file contains:
-//! - lui family: lui (airs.md Section 9)
-//! - auipc family: auipc (airs.md Section 10)
+//! - lui family: lui
+//! - auipc family: auipc
 
 use super::utils::imm_to_felt;
 use crate::trace::Tracer;
 use crate::{Cpu, DecodedInst};
 
 // =============================================================================
-// LUI - airs.md Section 9
+// LUI
 // =============================================================================
 
 pub fn lui(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
@@ -31,7 +31,7 @@ pub fn lui(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
 }
 
 // =============================================================================
-// AUIPC - airs.md Section 10
+// AUIPC
 // =============================================================================
 
 pub fn auipc(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {

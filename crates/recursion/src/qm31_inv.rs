@@ -44,7 +44,7 @@ impl FrameworkEval for Eval {
             eval.add_constraint(constraint);
         }
         // Circuit wiring: rows with in_circuit set implement one Inverse
-        // node of a recorded composition circuit (docs/recursion.md, M5).
+        // node of a recorded composition circuit.
         eval.add_to_relation(RelationEntry::new(
             &self.recursion_relations.op_def,
             -E::EF::from(cols.in_circuit.clone()),

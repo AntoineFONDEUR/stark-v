@@ -24,8 +24,8 @@ git submodule under `external/`.
 ```bash
 git clone --recursive https://github.com/starkware-libs/stark-v.git
 cd stark-v
-cargo build --workspace
-cargo test --workspace
+cargo build --release --workspace
+cargo test --release --workspace
 ```
 
 If you cloned without `--recursive`:
@@ -51,9 +51,9 @@ disabling the rule.
 ## Coding guidelines
 
 - **Tests.** New code needs unit tests for the logic it introduces. For
-  cross-cutting changes, add an integration test under `crates/prover/tests/`.
-  Use `rstest` so each data point is a named test rather than a loop over
-  fixtures.
+  cross-cutting changes, add an integration test under the crate that owns the
+  behavior. Use `rstest` so each data point is a named test rather than a loop
+  over fixtures.
 - **Comments.** Comments describe what the code _is_, not what you _did_. Don't
   narrate the edit history, the PR, or what the function "used to do" — that
   belongs in the commit message.
@@ -66,7 +66,7 @@ disabling the rule.
 
 1. Fork the repository and create a topic branch.
 2. Make your change, with tests.
-3. Run `prek run --all-files` and `cargo test --workspace`.
+3. Run `prek run --all-files` and `cargo test --release --workspace`.
 4. Open a pull request. In the description, explain _why_ the change is needed;
    the diff already shows the _what_.
 5. CI will run the same checks on a clean machine. If it fails on something that

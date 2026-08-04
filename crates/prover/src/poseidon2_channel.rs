@@ -1,4 +1,4 @@
-//! Poseidon2-M31 Fiat-Shamir channel and Merkle hasher (docs/recursion.md, M4).
+//! Poseidon2-M31 Fiat-Shamir channel and Merkle hasher.
 //!
 //! Inner stark-v proofs committed with this channel hash with the same
 //! Poseidon2 permutation the `poseidon2`/`merkle` AIR components already

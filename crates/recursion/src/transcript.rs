@@ -1,399 +1,1285 @@
-//! Fiat-Shamir transcript replay for a stark-v proof.
+//! Backend-neutral Poseidon2 transcript engine for recursive verification.
 //!
-//! The recursive verifier AIR (docs/recursion.md) needs every channel draw
-//! of the inner proof as witness data, and its composition-check component
-//! must recompute the composition polynomial value at the OODS point from
-//! the proof's sampled mask values — through the same
-//! `FrameworkEval::evaluate` code the prover and host verifier use.
-//!
-//! This module performs that replay natively: it advances the channel
-//! exactly as `verify_rv32im` + `stwo::core::verifier::verify` do, then
-//! evaluates the composition through `Components::eval_composition_polynomial_at_point`
-//! (which instantiates each component's `evaluate()` with `PointEvaluator`).
-//! No constraint is copied: an edit to `define_trace_tables!` changes the
-//! replayed value in the same compilation.
+//! Transcript state transitions are implemented once. The native backend is
+//! the outer-verifier oracle; the recording backend materializes the same
+//! permutation inputs, outputs, and PoW checks as witness data for the
+//! universal AIR. Raw machine words are split into 16-bit limbs, while
+//! digests and field values remain canonical M31 words. This distinction is
+//! required for an injective transcript encoding.
 
-use stwo::core::air::Components as CoreComponents;
-use stwo::core::channel::Channel;
-use stwo::core::channel::MerkleChannel;
-use stwo::core::circle::CirclePoint;
-use stwo::core::fields::qm31::{SECURE_EXTENSION_DEGREE, SecureField};
-use stwo::core::pcs::PcsConfig;
-use stwo::core::pcs::utils::try_get_lifting_log_size;
-use stwo::core::vcs_lifted::blake2_merkle::{Blake2sMerkleChannel, Blake2sMerkleHasher};
-use stwo::core::vcs_lifted::merkle_hasher::MerkleHasherLifted;
-use stwo::core::verifier::{COMPOSITION_LOG_SPLIT, VerificationError as StwoVerificationError};
-use stwo_constraint_framework::{PREPROCESSED_TRACE_IDX, TraceLocationAllocator};
+use core::fmt;
 
-use prover::VerificationError;
-use prover::components::Components;
-use prover::verifier::replay_claim_phase;
-use prover::{Preprocessing, Proof};
+use air::digest::{Digest8, M31Word};
+use air::poseidon2::{T, poseidon2_permutation};
+use stwo::core::fields::m31::P as M31_MODULUS;
+use stwo::core::fields::qm31::SecureField;
 
-/// The OODS composition check of a proof, replayed outside the verifier.
-#[derive(Debug, Clone, Copy)]
-pub struct OodsCheck {
-    /// The OODS point drawn from the replayed channel.
-    pub oods_point: CirclePoint<SecureField>,
-    /// The constraint-combination coefficient drawn from the replayed channel.
-    pub random_coeff: SecureField,
-    /// Composition value claimed by the proof (combined from the sampled
-    /// composition coordinate polynomials).
-    pub claimed: SecureField,
-    /// Composition value recomputed from the sampled mask values through the
-    /// components' `evaluate()`.
-    pub replayed: SecureField,
+use super::protocol::CanonicalWords;
+
+const RATE: usize = 8;
+const DRAW_TAG: u32 = 0x4452_4157;
+
+/// Monotonic coordinates at a boundary between transcript operations.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TranscriptPosition {
+    next_call_id: u32,
+    next_hash_id: u32,
 }
 
-impl OodsCheck {
-    /// Whether the proof's claimed composition value matches the replay
-    /// (the DEEP-ALI check).
-    pub fn holds(&self) -> bool {
-        self.claimed == self.replayed
+impl TranscriptPosition {
+    pub const fn next_call_id(self) -> u32 {
+        self.next_call_id
+    }
+
+    pub const fn next_hash_id(self) -> u32 {
+        self.next_hash_id
     }
 }
 
-/// Everything the recursion binding needs to re-evaluate a proof's
-/// composition check in-AIR: the constructed components (with drawn
-/// relations), the channel draws, and the sampled mask values.
-pub struct CompositionBindingData {
-    pub components: Components,
-    pub relations: prover::relations::Relations,
-    pub oods_point: CirclePoint<SecureField>,
-    pub random_coeff: SecureField,
-    pub max_log_degree_bound: u32,
-    /// Sampled mask values, as committed in the proof.
-    pub sampled_values: stwo::core::pcs::TreeVec<Vec<Vec<SecureField>>>,
-    /// The composition value the proof claims at the OODS point.
-    pub claimed_composition: SecureField,
-    /// Per-component claimed LogUp sums, as in the proof.
-    pub claimed_sums: prover::components::ClaimedSum,
+/// Coordinates one permutation within both the global and per-hash schedules.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PermutationId {
+    pub call_id: u32,
+    pub hash_id: u32,
+    pub step: u32,
 }
 
-/// State of the polynomial commitment scheme at the OODS point: the channel
-/// (advanced past the OODS draw), the committed tree shapes, and the mask
-/// sample points — everything the post-OODS protocol (sampled-value mixing,
-/// FRI, proof of work, query openings) consumes.
-pub struct PcsBindingData<MC: MerkleChannel> {
-    /// Channel state right after the OODS draw.
-    pub channel: MC::C,
-    /// Per tree, the committed (blowup-extended) column log sizes, in commit
-    /// order — exactly `CommitmentSchemeVerifier::column_log_sizes`.
-    pub column_log_sizes: stwo::core::pcs::TreeVec<Vec<u32>>,
-    /// Per tree, the Merkle height (the lifting size of the commitment).
-    pub tree_heights: Vec<u32>,
-    /// Per tree, the commitment root.
-    pub roots: Vec<<MC::H as MerkleHasherLifted>::Hash>,
-    /// Mask sample points per tree per column (composition points included),
-    /// as passed to `verify_values`.
-    pub sample_points: stwo::core::pcs::TreeVec<Vec<Vec<CirclePoint<SecureField>>>>,
-    /// The lifting log size (height of the largest tree, FRI input size).
-    pub lifting_log_size: u32,
+/// One atomic permutation call shared with the Poseidon2 AIR relation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PoseidonCall {
+    pub id: PermutationId,
+    pub input: [M31Word; T],
+    pub output: [M31Word; T],
 }
 
-/// Replay the transcript and return the full composition-binding data
-/// (Blake2s channel).
-pub fn composition_binding_data(
-    proof: &Proof<Blake2sMerkleHasher>,
-    config: PcsConfig,
-    preprocessing: &Preprocessing,
-) -> Result<CompositionBindingData, VerificationError> {
-    composition_binding_data_with_channel::<Blake2sMerkleChannel>(proof, config, preprocessing)
+/// Why one independent sponge session is executed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum HashPurpose {
+    /// Updates the persistent transcript digest with new words.
+    Mix = 1,
+    /// Derives randomness without updating the persistent digest.
+    Draw = 2,
 }
 
-/// Replay the transcript and return the full composition-binding data with
-/// any Merkle channel.
-pub fn composition_binding_data_with_channel<MC: MerkleChannel>(
-    proof: &Proof<MC::H>,
-    config: PcsConfig,
-    preprocessing: &Preprocessing<MC::H>,
-) -> Result<CompositionBindingData, VerificationError> {
-    full_binding_data_with_channel::<MC>(proof, config, preprocessing).map(|(data, _)| data)
+/// One complete sponge session and its exact word stream before padding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HashFrame {
+    pub hash_id: u32,
+    pub first_call_id: u32,
+    pub call_count: u32,
+    pub purpose: HashPurpose,
+    pub words: Vec<M31Word>,
+    pub output: [M31Word; T],
 }
 
-/// Replay the transcript and return both the composition-binding data and
-/// the PCS state at the OODS point, with any Merkle channel.
-pub fn full_binding_data_with_channel<MC: MerkleChannel>(
-    proof: &Proof<MC::H>,
-    config: PcsConfig,
-    preprocessing: &Preprocessing<MC::H>,
-) -> Result<(CompositionBindingData, PcsBindingData<MC>), VerificationError> {
-    let (mut channel, mut commitment_scheme, relations) =
-        replay_claim_phase::<MC>(proof, config, preprocessing)?;
+impl HashFrame {
+    pub fn final_call_id(&self) -> Option<u32> {
+        self.call_count
+            .checked_sub(1)
+            .and_then(|offset| self.first_call_id.checked_add(offset))
+    }
+}
 
-    let preprocessed_ids = preprocessing.column_ids();
-    let mut location_allocator =
-        TraceLocationAllocator::new_with_preprocessed_columns(&preprocessed_ids);
-    let components = Components::new(
-        &proof.claim,
-        &mut location_allocator,
-        relations.clone(),
-        &proof.interaction_claim.claimed_sum,
-    );
-    let n_preprocessed_columns = commitment_scheme.trees[PREPROCESSED_TRACE_IDX]
-        .column_log_sizes
-        .len();
-    let core_components = CoreComponents {
-        n_preprocessed_columns,
-        components: components.verifiers(),
-    };
+/// One nonce check against a transcript-derived M31 word.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PowCheck {
+    pub call_id: u32,
+    pub nonce: u64,
+    pub bits: u32,
+    pub word: M31Word,
+}
 
-    let split_composition_log_degree_bound =
-        core_components.composition_log_degree_bound() - COMPOSITION_LOG_SPLIT;
-    let lifting_log_size = try_get_lifting_log_size(
-        &commitment_scheme.config,
-        split_composition_log_degree_bound + commitment_scheme.config.fri_config.log_blowup_factor,
-    )
-    .map_err(StwoVerificationError::from)?;
-    let max_log_degree_bound =
-        lifting_log_size - commitment_scheme.config.fri_config.log_blowup_factor;
+/// The cryptographic operations emitted by the shared transcript algorithm.
+pub trait TranscriptBackend {
+    type Error;
 
-    let random_coeff = channel.draw_secure_felt();
-    commitment_scheme.commit(
-        *proof
-            .stark_proof
-            .commitments
-            .last()
-            .expect("proof has a composition commitment"),
-        &[max_log_degree_bound; 2 * SECURE_EXTENSION_DEGREE],
-        &mut channel,
-    );
-    let oods_point = CirclePoint::<SecureField>::get_random_point(&mut channel);
+    fn permute(
+        &mut self,
+        id: PermutationId,
+        input: [M31Word; T],
+    ) -> Result<[M31Word; T], Self::Error>;
 
-    let claimed_composition =
-        extract_composition_oods_eval(&proof.stark_proof, oods_point, max_log_degree_bound)
-            .ok_or_else(|| {
-                StwoVerificationError::InvalidStructure(
-                    "Unexpected sampled_values structure".to_string(),
-                )
-            })?;
+    fn verify_pow(&mut self, check: PowCheck) -> Result<(), Self::Error>;
 
-    // Mask sample points, with the composition polynomial points appended —
-    // exactly the `sample_points` `verify_ex` hands to `verify_values`.
-    let include_all_preprocessed_columns = false;
-    let mut sample_points = core_components.mask_points(
-        oods_point,
-        max_log_degree_bound,
-        include_all_preprocessed_columns,
-    );
-    sample_points.push(vec![vec![oods_point]; 2 * SECURE_EXTENSION_DEGREE]);
+    fn record_hash(&mut self, frame: HashFrame) -> Result<(), Self::Error>;
+}
 
-    let pcs = PcsBindingData::<MC> {
-        channel,
-        column_log_sizes: commitment_scheme
-            .trees
-            .as_ref()
-            .map(|tree| tree.column_log_sizes.clone()),
-        tree_heights: commitment_scheme
-            .trees
+/// Native Poseidon2 execution and PoW checking for the outer verifier.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NativeTranscriptBackend;
+
+impl TranscriptBackend for NativeTranscriptBackend {
+    type Error = TranscriptError;
+
+    fn permute(
+        &mut self,
+        _id: PermutationId,
+        input: [M31Word; T],
+    ) -> Result<[M31Word; T], Self::Error> {
+        Ok(permute_words(input))
+    }
+
+    fn verify_pow(&mut self, check: PowCheck) -> Result<(), Self::Error> {
+        if check.word.as_u32().trailing_zeros() >= check.bits {
+            Ok(())
+        } else {
+            Err(TranscriptError::InvalidProofOfWork {
+                nonce: check.nonce,
+                bits: check.bits,
+                word: check.word,
+            })
+        }
+    }
+
+    fn record_hash(&mut self, _frame: HashFrame) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+
+/// Witness events produced by the AIR-facing transcript backend.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TranscriptTrace {
+    pub poseidon_calls: Vec<PoseidonCall>,
+    pub hash_frames: Vec<HashFrame>,
+    pub pow_checks: Vec<PowCheck>,
+}
+
+/// One sponge row with reset/chaining data made explicit for AIR columns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpongeRow {
+    pub id: PermutationId,
+    pub previous: [M31Word; T],
+    pub chunk: [M31Word; RATE],
+    pub output: [M31Word; T],
+}
+
+impl TranscriptTrace {
+    /// Reconstructs rate chunks and rejects malformed session coordinates.
+    pub fn sponge_rows(&self) -> Result<Vec<SpongeRow>, TranscriptError> {
+        let mut rows = Vec::with_capacity(self.poseidon_calls.len());
+        let mut current_hash = None;
+        let mut next_hash_id = 0_u32;
+        let mut expected_step = 0_u32;
+        let mut previous = [M31Word::ZERO; T];
+
+        for (call_index, call) in self.poseidon_calls.iter().copied().enumerate() {
+            let expected_call_id = u32::try_from(call_index)
+                .map_err(|_| TranscriptError::TraceIndexOutOfRange { index: call_index })?;
+            if call.id.call_id != expected_call_id {
+                return Err(TranscriptError::TraceCallIdMismatch {
+                    index: call_index,
+                    expected: expected_call_id,
+                    actual: call.id.call_id,
+                });
+            }
+            if current_hash != Some(call.id.hash_id) {
+                if call.id.hash_id != next_hash_id {
+                    return Err(TranscriptError::TraceHashIdMismatch {
+                        call_id: call.id.call_id,
+                        expected: next_hash_id,
+                        actual: call.id.hash_id,
+                    });
+                }
+                current_hash = Some(call.id.hash_id);
+                next_hash_id = next_hash_id
+                    .checked_add(1)
+                    .ok_or(TranscriptError::HashIdOverflow)?;
+                expected_step = 0;
+                previous = [M31Word::ZERO; T];
+            }
+            if call.id.step != expected_step {
+                return Err(TranscriptError::TraceStepMismatch {
+                    call_id: call.id.call_id,
+                    expected: expected_step,
+                    actual: call.id.step,
+                });
+            }
+            for (word, (&actual, &expected)) in
+                call.input.iter().zip(&previous).enumerate().skip(RATE)
+            {
+                if actual != expected {
+                    return Err(TranscriptError::TraceCapacityMismatch {
+                        call_id: call.id.call_id,
+                        word,
+                        expected,
+                        actual,
+                    });
+                }
+            }
+            let chunk =
+                core::array::from_fn(|word| subtract_m31_words(call.input[word], previous[word]));
+            rows.push(SpongeRow {
+                id: call.id,
+                previous,
+                chunk,
+                output: call.output,
+            });
+            previous = call.output;
+            expected_step = expected_step
+                .checked_add(1)
+                .ok_or(TranscriptError::HashStepOverflow)?;
+        }
+
+        self.validate_hash_frames(&rows)?;
+
+        for check in &self.pow_checks {
+            let call = self.poseidon_calls.get(check.call_id as usize).ok_or(
+                TranscriptError::PowDrawCallMissing {
+                    call_id: check.call_id,
+                },
+            )?;
+            if call.output[0] != check.word {
+                return Err(TranscriptError::PowDrawWordMismatch {
+                    call_id: check.call_id,
+                    expected: call.output[0],
+                    actual: check.word,
+                });
+            }
+            let is_final_draw_call = self.hash_frames.iter().any(|frame| {
+                frame.purpose == HashPurpose::Draw && frame.final_call_id() == Some(check.call_id)
+            });
+            if !is_final_draw_call {
+                return Err(TranscriptError::PowDrawFrameMissing {
+                    call_id: check.call_id,
+                });
+            }
+        }
+        Ok(rows)
+    }
+
+    fn validate_hash_frames(&self, rows: &[SpongeRow]) -> Result<(), TranscriptError> {
+        let mut first_call = 0_usize;
+        for (frame_index, frame) in self.hash_frames.iter().enumerate() {
+            let expected_hash_id = u32::try_from(frame_index)
+                .map_err(|_| TranscriptError::TraceIndexOutOfRange { index: frame_index })?;
+            if frame.hash_id != expected_hash_id {
+                return Err(TranscriptError::TraceFrameHashIdMismatch {
+                    index: frame_index,
+                    expected: expected_hash_id,
+                    actual: frame.hash_id,
+                });
+            }
+            let expected_first_call = u32::try_from(first_call)
+                .map_err(|_| TranscriptError::TraceIndexOutOfRange { index: first_call })?;
+            if frame.first_call_id != expected_first_call {
+                return Err(TranscriptError::TraceFrameFirstCallMismatch {
+                    hash_id: frame.hash_id,
+                    expected: expected_first_call,
+                    actual: frame.first_call_id,
+                });
+            }
+
+            let chunks = hash_chunks(&frame.words);
+            let expected_call_count =
+                u32::try_from(chunks.len()).map_err(|_| TranscriptError::TraceIndexOutOfRange {
+                    index: chunks.len(),
+                })?;
+            if frame.call_count != expected_call_count {
+                return Err(TranscriptError::TraceFrameCallCountMismatch {
+                    hash_id: frame.hash_id,
+                    expected: expected_call_count,
+                    actual: frame.call_count,
+                });
+            }
+            for (step, expected_chunk) in chunks.iter().enumerate() {
+                let row_index = first_call
+                    .checked_add(step)
+                    .ok_or(TranscriptError::TraceIndexOutOfRange { index: usize::MAX })?;
+                let row =
+                    rows.get(row_index)
+                        .ok_or(TranscriptError::TraceFrameCoverageMismatch {
+                            expected: rows.len(),
+                            actual: row_index + 1,
+                        })?;
+                for (word, (&actual, &expected)) in row.chunk.iter().zip(expected_chunk).enumerate()
+                {
+                    if actual != expected {
+                        return Err(TranscriptError::TraceFrameChunkMismatch {
+                            hash_id: frame.hash_id,
+                            step,
+                            word,
+                            expected,
+                            actual,
+                        });
+                    }
+                }
+            }
+            let frame_end = first_call
+                .checked_add(chunks.len())
+                .ok_or(TranscriptError::TraceIndexOutOfRange { index: usize::MAX })?;
+            let final_row_index = frame_end
+                .checked_sub(1)
+                .expect("hash padding always creates at least one chunk");
+            let final_row =
+                rows.get(final_row_index)
+                    .ok_or(TranscriptError::TraceFrameCoverageMismatch {
+                        expected: rows.len(),
+                        actual: frame_end,
+                    })?;
+            if frame.output != final_row.output {
+                return Err(TranscriptError::TraceFrameOutputMismatch {
+                    hash_id: frame.hash_id,
+                });
+            }
+            if frame.purpose == HashPurpose::Draw
+                && (frame.words.len() != RATE + 2
+                    || frame.words.get(RATE + 1).copied()
+                        != Some(M31Word::try_from(DRAW_TAG).expect("draw tag is canonical M31")))
+            {
+                return Err(TranscriptError::TraceDrawFrameMismatch {
+                    hash_id: frame.hash_id,
+                });
+            }
+            first_call = frame_end;
+        }
+        if first_call != rows.len() {
+            return Err(TranscriptError::TraceFrameCoverageMismatch {
+                expected: rows.len(),
+                actual: first_call,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Records values for constraints without defining a second transcript order.
+#[derive(Clone, Debug, Default)]
+pub struct RecordingTranscriptBackend {
+    trace: TranscriptTrace,
+}
+
+impl RecordingTranscriptBackend {
+    pub fn trace(&self) -> &TranscriptTrace {
+        &self.trace
+    }
+
+    pub fn into_trace(self) -> TranscriptTrace {
+        self.trace
+    }
+}
+
+impl TranscriptBackend for RecordingTranscriptBackend {
+    type Error = TranscriptError;
+
+    fn permute(
+        &mut self,
+        id: PermutationId,
+        input: [M31Word; T],
+    ) -> Result<[M31Word; T], Self::Error> {
+        let output = permute_words(input);
+        self.trace
+            .poseidon_calls
+            .push(PoseidonCall { id, input, output });
+        Ok(output)
+    }
+
+    fn verify_pow(&mut self, check: PowCheck) -> Result<(), Self::Error> {
+        self.trace.pow_checks.push(check);
+        if check.word.as_u32().trailing_zeros() >= check.bits {
+            Ok(())
+        } else {
+            Err(TranscriptError::InvalidProofOfWork {
+                nonce: check.nonce,
+                bits: check.bits,
+                word: check.word,
+            })
+        }
+    }
+
+    fn record_hash(&mut self, frame: HashFrame) -> Result<(), Self::Error> {
+        self.trace.hash_frames.push(frame);
+        Ok(())
+    }
+}
+
+/// One transcript state parameterized only by how operations are enforced.
+#[derive(Clone, Debug)]
+pub struct TranscriptKernel<B> {
+    digest: Digest8,
+    n_draws: u32,
+    next_call_id: u32,
+    next_hash_id: u32,
+    backend: B,
+}
+
+impl<B: Default> Default for TranscriptKernel<B> {
+    fn default() -> Self {
+        Self {
+            digest: Digest8::ZERO,
+            n_draws: 0,
+            next_call_id: 0,
+            next_hash_id: 0,
+            backend: B::default(),
+        }
+    }
+}
+
+impl<B: TranscriptBackend> TranscriptKernel<B>
+where
+    B::Error: From<TranscriptError>,
+{
+    pub fn new(backend: B) -> Self {
+        Self {
+            digest: Digest8::ZERO,
+            n_draws: 0,
+            next_call_id: 0,
+            next_hash_id: 0,
+            backend,
+        }
+    }
+
+    pub const fn digest(&self) -> Digest8 {
+        self.digest
+    }
+
+    pub const fn draw_count(&self) -> u32 {
+        self.n_draws
+    }
+
+    /// Returns the next call and hash identifiers without exposing mutable counters.
+    pub const fn position(&self) -> TranscriptPosition {
+        TranscriptPosition {
+            next_call_id: self.next_call_id,
+            next_hash_id: self.next_hash_id,
+        }
+    }
+
+    pub const fn backend(&self) -> &B {
+        &self.backend
+    }
+
+    pub fn into_backend(self) -> B {
+        self.backend
+    }
+
+    /// Absorbs canonical field words without applying the RV32 limb split.
+    pub fn absorb_m31_words(&mut self, words: &[M31Word]) -> Result<(), B::Error> {
+        let mut stream = Vec::with_capacity(RATE + words.len());
+        stream.extend_from_slice(self.digest.words());
+        stream.extend_from_slice(words);
+        let output = self.hash_stream(&stream, HashPurpose::Mix)?;
+        self.digest = Digest8::new(output[..RATE].try_into().expect("rate-sized digest"));
+        self.n_draws = 0;
+        Ok(())
+    }
+
+    /// Absorbs one typed canonical encoding through the same mix transition.
+    pub fn absorb_canonical(&mut self, value: &impl CanonicalWords) -> Result<(), B::Error> {
+        self.absorb_m31_words(&value.canonical_words())
+    }
+
+    /// Absorbs unrestricted machine words through an injective 16-bit split.
+    pub fn absorb_u32s(&mut self, words: &[u32]) -> Result<(), B::Error> {
+        let encoded: Vec<M31Word> = words
             .iter()
-            .map(|tree| tree.height)
-            .collect(),
-        roots: commitment_scheme
-            .trees
-            .iter()
-            .map(|tree| tree.root)
-            .collect(),
-        sample_points,
-        lifting_log_size,
-    };
+            .flat_map(|word| [word & 0xffff, word >> 16])
+            .map(|limb| M31Word::try_from(limb).expect("a 16-bit limb is canonical M31"))
+            .collect();
+        self.absorb_m31_words(&encoded)
+    }
 
-    drop(core_components);
-    Ok((
-        CompositionBindingData {
-            components,
-            relations,
-            oods_point,
-            random_coeff,
-            max_log_degree_bound,
-            sampled_values: proof.stark_proof.sampled_values.clone(),
-            claimed_composition,
-            claimed_sums: proof.interaction_claim.claimed_sum.clone(),
-        },
-        pcs,
-    ))
+    pub fn absorb_u64(&mut self, value: u64) -> Result<(), B::Error> {
+        self.absorb_m31_words(&encode_u64_words(value))
+    }
+
+    pub fn absorb_digest(&mut self, digest: Digest8) -> Result<(), B::Error> {
+        self.absorb_m31_words(digest.words())
+    }
+
+    pub fn absorb_secure_fields(&mut self, values: &[SecureField]) -> Result<(), B::Error> {
+        let words: Vec<M31Word> = values
+            .iter()
+            .flat_map(|value| value.to_m31_array())
+            .map(M31Word::from)
+            .collect();
+        self.absorb_m31_words(&words)
+    }
+
+    /// Draws one rate block without feeding it back into the transcript digest.
+    pub fn draw_block(&mut self) -> Result<[M31Word; RATE], B::Error> {
+        let draw_count =
+            M31Word::try_from(self.n_draws).map_err(|_| TranscriptError::DrawCountOutOfRange {
+                draw_count: self.n_draws,
+            })?;
+        let draw_tag = M31Word::try_from(DRAW_TAG).expect("the draw tag is canonical M31");
+        let mut stream = Vec::with_capacity(RATE + 2);
+        stream.extend_from_slice(self.digest.words());
+        stream.extend([draw_count, draw_tag]);
+        let output = self.hash_stream(&stream, HashPurpose::Draw)?;
+        self.n_draws = self
+            .n_draws
+            .checked_add(1)
+            .ok_or(TranscriptError::DrawCountOverflow)?;
+        Ok(output[..RATE].try_into().expect("rate-sized draw"))
+    }
+
+    pub fn draw_secure_field(&mut self) -> Result<SecureField, B::Error> {
+        let words = self.draw_block()?;
+        let limbs: [M31Word; 4] = words[..4].try_into().expect("QM31 has four limbs");
+        Ok(SecureField::from_m31_array(
+            limbs.map(stwo::core::fields::m31::M31::from),
+        ))
+    }
+
+    /// Derives fixed raw query slots directly from constrained draw words.
+    pub fn draw_queries<const N: usize>(
+        &mut self,
+        log_domain_size: u32,
+    ) -> Result<[u32; N], B::Error> {
+        if !(1..=30).contains(&log_domain_size) {
+            return Err(TranscriptError::QueryLogSizeOutOfRange { log_domain_size }.into());
+        }
+        let query_mask = (1_u32 << log_domain_size) - 1;
+        let mut queries = Vec::with_capacity(N);
+        while queries.len() < N {
+            let words = self.draw_block()?;
+            for word in words {
+                if queries.len() == N {
+                    break;
+                }
+                queries.push(word.as_u32() & query_mask);
+            }
+        }
+        match queries.try_into() {
+            Ok(queries) => Ok(queries),
+            Err(_) => unreachable!("query derivation fills the fixed array exactly"),
+        }
+    }
+
+    /// Verifies the nonce challenge and performs its transcript absorption once.
+    pub fn verify_and_absorb_pow(&mut self, nonce: u64, bits: u32) -> Result<(), B::Error> {
+        self.absorb_u64(nonce)?;
+        self.verify_pow_from_current_digest(nonce, bits)
+    }
+
+    /// Checks a nonce already absorbed by a typed transcript operation.
+    pub(crate) fn verify_pow_from_current_digest(
+        &mut self,
+        nonce: u64,
+        bits: u32,
+    ) -> Result<(), B::Error> {
+        if bits > 31 {
+            return Err(TranscriptError::PowBitsOutOfRange { bits }.into());
+        }
+
+        let nonce_digest = self.digest;
+        let word = self.draw_block()?[0];
+        let call_id = self
+            .next_call_id
+            .checked_sub(1)
+            .ok_or(TranscriptError::MissingPowDraw)?;
+        self.backend.verify_pow(PowCheck {
+            call_id,
+            nonce,
+            bits,
+            word,
+        })?;
+
+        // Verification draws from a temporary channel. Acceptance absorbs the
+        // nonce but leaves the real channel with a reset draw counter.
+        self.digest = nonce_digest;
+        self.n_draws = 0;
+        Ok(())
+    }
+
+    fn hash_stream(
+        &mut self,
+        words: &[M31Word],
+        purpose: HashPurpose,
+    ) -> Result<[M31Word; T], B::Error> {
+        let hash_id = self.next_hash_id;
+        let first_call_id = self.next_call_id;
+        self.next_hash_id = self
+            .next_hash_id
+            .checked_add(1)
+            .ok_or(TranscriptError::HashIdOverflow)?;
+        let mut state = [M31Word::ZERO; T];
+        let mut step = 0_u32;
+        for chunk in hash_chunks(words) {
+            for (slot, word) in state.iter_mut().zip(chunk) {
+                *slot = add_m31_words(*slot, word);
+            }
+            state = self.permute(hash_id, step, state)?;
+            step = step
+                .checked_add(1)
+                .ok_or(TranscriptError::HashStepOverflow)?;
+        }
+        let call_count = self
+            .next_call_id
+            .checked_sub(first_call_id)
+            .expect("call ids increase monotonically within one hash");
+        self.backend.record_hash(HashFrame {
+            hash_id,
+            first_call_id,
+            call_count,
+            purpose,
+            words: words.to_vec(),
+            output: state,
+        })?;
+        Ok(state)
+    }
+
+    fn permute(
+        &mut self,
+        hash_id: u32,
+        step: u32,
+        input: [M31Word; T],
+    ) -> Result<[M31Word; T], B::Error> {
+        let call_id = self.next_call_id;
+        self.next_call_id = self
+            .next_call_id
+            .checked_add(1)
+            .ok_or(TranscriptError::CallIdOverflow)?;
+        self.backend.permute(
+            PermutationId {
+                call_id,
+                hash_id,
+                step,
+            },
+            input,
+        )
+    }
 }
 
-/// Replay the transcript of a proof up to the OODS point and recompute the
-/// composition polynomial value from the sampled mask values.
-pub fn replay_composition_oods(
-    proof: &Proof<Blake2sMerkleHasher>,
-    config: PcsConfig,
-    preprocessing: &Preprocessing,
-) -> Result<OodsCheck, VerificationError> {
-    let (mut channel, mut commitment_scheme, relations) =
-        replay_claim_phase::<Blake2sMerkleChannel>(proof, config, preprocessing)?;
-
-    let preprocessed_ids = preprocessing.column_ids();
-    let mut location_allocator =
-        TraceLocationAllocator::new_with_preprocessed_columns(&preprocessed_ids);
-    let components = Components::new(
-        &proof.claim,
-        &mut location_allocator,
-        relations,
-        &proof.interaction_claim.claimed_sum,
-    );
-    let verifiers = components.verifiers();
-    let core_components = CoreComponents {
-        n_preprocessed_columns: commitment_scheme.trees[PREPROCESSED_TRACE_IDX]
-            .column_log_sizes
-            .len(),
-        components: verifiers,
-    };
-
-    // Mirror `stwo::core::verifier::verify_ex` up to the OODS draw.
-    let split_composition_log_degree_bound =
-        core_components.composition_log_degree_bound() - COMPOSITION_LOG_SPLIT;
-    let lifting_log_size = try_get_lifting_log_size(
-        &commitment_scheme.config,
-        split_composition_log_degree_bound + commitment_scheme.config.fri_config.log_blowup_factor,
-    )
-    .map_err(StwoVerificationError::from)?;
-    let max_log_degree_bound =
-        lifting_log_size - commitment_scheme.config.fri_config.log_blowup_factor;
-
-    let random_coeff = channel.draw_secure_felt();
-    commitment_scheme.commit(
-        *proof
-            .stark_proof
-            .commitments
-            .last()
-            .expect("proof has a composition commitment"),
-        &[max_log_degree_bound; 2 * SECURE_EXTENSION_DEGREE],
-        &mut channel,
-    );
-    let oods_point = CirclePoint::<SecureField>::get_random_point(&mut channel);
-
-    let claimed =
-        extract_composition_oods_eval(&proof.stark_proof, oods_point, max_log_degree_bound)
-            .ok_or_else(|| {
-                StwoVerificationError::InvalidStructure(
-                    "Unexpected sampled_values structure".to_string(),
-                )
-            })?;
-    let replayed = core_components.eval_composition_polynomial_at_point(
-        oods_point,
-        &proof.stark_proof.sampled_values,
-        random_coeff,
-        max_log_degree_bound,
-    );
-
-    Ok(OodsCheck {
-        oods_point,
-        random_coeff,
-        claimed,
-        replayed,
+/// Encodes one unrestricted integer as four little-endian 16-bit M31 limbs.
+pub(crate) fn encode_u64_words(value: u64) -> [M31Word; 4] {
+    core::array::from_fn(|limb| {
+        let value = ((value >> (16 * limb)) & 0xffff) as u16;
+        M31Word::from(value)
     })
 }
 
-/// Combine the sampled composition coordinate polynomials into the claimed
-/// composition value at the OODS point.
-///
-/// The composition polynomial is committed as two splits of
-/// `SECURE_EXTENSION_DEGREE` base-field coordinate polynomials each; the
-/// full value is `left + oods_point.repeated_double(max_log_degree_bound - 1).x * right`.
-pub(crate) fn extract_composition_oods_eval<H: MerkleHasherLifted>(
-    stark_proof: &stwo::core::proof::StarkProof<H>,
-    oods_point: CirclePoint<SecureField>,
-    max_log_degree_bound: u32,
-) -> Option<SecureField> {
-    let [.., left_and_right_composition_mask] = &**stark_proof.sampled_values else {
-        return None;
-    };
-    let left_and_right_coordinate_evals: [SecureField; 2 * SECURE_EXTENSION_DEGREE] =
-        left_and_right_composition_mask
-            .iter()
-            .map(|columns| {
-                let &[eval] = &columns[..] else {
-                    return None;
-                };
-                Some(eval)
-            })
-            .collect::<Option<Vec<_>>>()?
-            .try_into()
-            .ok()?;
-
-    let (left_coordinate_evals, right_coordinate_evals) =
-        left_and_right_coordinate_evals.split_at(SECURE_EXTENSION_DEGREE);
-
-    let left_eval = SecureField::from_partial_evals(left_coordinate_evals.try_into().ok()?);
-    let right_eval = SecureField::from_partial_evals(right_coordinate_evals.try_into().ok()?);
-    Some(left_eval + oods_point.repeated_double(max_log_degree_bound - 1).x * right_eval)
+fn hash_chunks(words: &[M31Word]) -> Vec<[M31Word; RATE]> {
+    let mut chunks = Vec::new();
+    let mut chunk = [M31Word::ZERO; RATE];
+    let mut filled = 0;
+    for word in words
+        .iter()
+        .copied()
+        .chain(core::iter::once(M31Word::from(1)))
+    {
+        chunk[filled] = word;
+        filled += 1;
+        if filled == RATE {
+            chunks.push(chunk);
+            chunk = [M31Word::ZERO; RATE];
+            filled = 0;
+        }
+    }
+    if filled != 0 {
+        chunks.push(chunk);
+    }
+    chunks
 }
 
-// =============================================================================
-// Constraint seam: the stark-v constraint system as data
-// =============================================================================
-//
-// The 2-to-1 recursive verifier consumes the same `FrameworkEval::evaluate`
-// code as the prover and the host verifier, so constraints are never copied:
-// an edit to `define_trace_tables!` changes the prover, the host verifier,
-// and everything built on these helpers in the same compilation.
-
-use stwo_constraint_framework::expr::ExprEvaluator;
-use stwo_constraint_framework::{FrameworkEval, InfoEvaluator};
-
-/// Extract a component's constraints as expression trees.
-///
-/// The result contains every polynomial constraint (`constraints`) and the
-/// formal LogUp fractions (`logup.fracs`) with relation parameters
-/// (`<relation>_z`, `<relation>_alpha<i>`) left symbolic.
-pub fn constraint_exprs<E: FrameworkEval>(eval: &E) -> ExprEvaluator {
-    eval.evaluate(ExprEvaluator::new())
+fn add_m31_words(left: M31Word, right: M31Word) -> M31Word {
+    let sum = u64::from(left.as_u32()) + u64::from(right.as_u32());
+    M31Word::try_from((sum % u64::from(M31_MODULUS)) as u32)
+        .expect("modular addition returns a canonical M31 word")
 }
 
-/// Extract a component's structural summary: mask offsets per interaction
-/// and the number of constraints, as used for trace layout.
-pub fn constraint_info<E: FrameworkEval>(eval: &E) -> InfoEvaluator {
-    eval.evaluate(InfoEvaluator::empty())
+fn subtract_m31_words(left: M31Word, right: M31Word) -> M31Word {
+    let value = (u64::from(left.as_u32()) + u64::from(M31_MODULUS) - u64::from(right.as_u32()))
+        % u64::from(M31_MODULUS);
+    M31Word::try_from(value as u32).expect("modular subtraction returns a canonical M31 word")
 }
+
+fn permute_words(input: [M31Word; T]) -> [M31Word; T] {
+    let mut state = input.map(M31Word::as_u32);
+    poseidon2_permutation(&mut state);
+    state.map(|word| M31Word::try_from(word).expect("Poseidon2 output is canonical M31"))
+}
+
+/// Failure at a checked transcript boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TranscriptError {
+    DrawCountOutOfRange {
+        draw_count: u32,
+    },
+    DrawCountOverflow,
+    CallIdOverflow,
+    HashIdOverflow,
+    HashStepOverflow,
+    PowBitsOutOfRange {
+        bits: u32,
+    },
+    QueryLogSizeOutOfRange {
+        log_domain_size: u32,
+    },
+    TraceIndexOutOfRange {
+        index: usize,
+    },
+    TraceCallIdMismatch {
+        index: usize,
+        expected: u32,
+        actual: u32,
+    },
+    TraceHashIdMismatch {
+        call_id: u32,
+        expected: u32,
+        actual: u32,
+    },
+    TraceStepMismatch {
+        call_id: u32,
+        expected: u32,
+        actual: u32,
+    },
+    TraceCapacityMismatch {
+        call_id: u32,
+        word: usize,
+        expected: M31Word,
+        actual: M31Word,
+    },
+    TraceFrameHashIdMismatch {
+        index: usize,
+        expected: u32,
+        actual: u32,
+    },
+    TraceFrameFirstCallMismatch {
+        hash_id: u32,
+        expected: u32,
+        actual: u32,
+    },
+    TraceFrameCallCountMismatch {
+        hash_id: u32,
+        expected: u32,
+        actual: u32,
+    },
+    TraceFrameChunkMismatch {
+        hash_id: u32,
+        step: usize,
+        word: usize,
+        expected: M31Word,
+        actual: M31Word,
+    },
+    TraceFrameOutputMismatch {
+        hash_id: u32,
+    },
+    TraceDrawFrameMismatch {
+        hash_id: u32,
+    },
+    TraceFrameCoverageMismatch {
+        expected: usize,
+        actual: usize,
+    },
+    RecordedPoseidonOutputMismatch {
+        call_id: u32,
+    },
+    PowDrawCallMissing {
+        call_id: u32,
+    },
+    PowDrawFrameMissing {
+        call_id: u32,
+    },
+    PowDrawWordMismatch {
+        call_id: u32,
+        expected: M31Word,
+        actual: M31Word,
+    },
+    MissingPowDraw,
+    InvalidProofOfWork {
+        nonce: u64,
+        bits: u32,
+        word: M31Word,
+    },
+}
+
+impl fmt::Display for TranscriptError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DrawCountOutOfRange { draw_count } => {
+                write!(formatter, "draw count {draw_count} is not canonical M31")
+            }
+            Self::DrawCountOverflow => write!(formatter, "transcript draw count overflowed"),
+            Self::CallIdOverflow => write!(formatter, "transcript Poseidon call id overflowed"),
+            Self::HashIdOverflow => write!(formatter, "transcript hash session id overflowed"),
+            Self::HashStepOverflow => write!(formatter, "transcript hash step overflowed"),
+            Self::PowBitsOutOfRange { bits } => {
+                write!(formatter, "PoW bits {bits} exceed the M31 maximum 31")
+            }
+            Self::QueryLogSizeOutOfRange { log_domain_size } => write!(
+                formatter,
+                "query log domain size {log_domain_size} is outside 1..=30"
+            ),
+            Self::TraceIndexOutOfRange { index } => {
+                write!(formatter, "transcript trace index {index} does not fit u32")
+            }
+            Self::TraceCallIdMismatch {
+                index,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "transcript call at index {index} has id {actual}, expected {expected}"
+            ),
+            Self::TraceHashIdMismatch {
+                call_id,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "transcript call {call_id} has hash id {actual}, expected {expected}"
+            ),
+            Self::TraceStepMismatch {
+                call_id,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "transcript call {call_id} has hash step {actual}, expected {expected}"
+            ),
+            Self::TraceCapacityMismatch {
+                call_id,
+                word,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "transcript call {call_id} capacity word {word} is {}, expected {}",
+                actual.as_u32(),
+                expected.as_u32()
+            ),
+            Self::TraceFrameHashIdMismatch {
+                index,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "transcript hash frame at index {index} has id {actual}, expected {expected}"
+            ),
+            Self::TraceFrameFirstCallMismatch {
+                hash_id,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "transcript hash frame {hash_id} starts at call {actual}, expected {expected}"
+            ),
+            Self::TraceFrameCallCountMismatch {
+                hash_id,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "transcript hash frame {hash_id} has {actual} calls, expected {expected}"
+            ),
+            Self::TraceFrameChunkMismatch {
+                hash_id,
+                step,
+                word,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "transcript hash frame {hash_id} step {step} word {word} is {}, expected {}",
+                actual.as_u32(),
+                expected.as_u32()
+            ),
+            Self::TraceFrameOutputMismatch { hash_id } => write!(
+                formatter,
+                "transcript hash frame {hash_id} output does not match its final call"
+            ),
+            Self::TraceDrawFrameMismatch { hash_id } => write!(
+                formatter,
+                "transcript draw frame {hash_id} does not use the fixed digest-counter-tag stream"
+            ),
+            Self::TraceFrameCoverageMismatch { expected, actual } => write!(
+                formatter,
+                "transcript hash frames cover {actual} calls, expected {expected}"
+            ),
+            Self::RecordedPoseidonOutputMismatch { call_id } => write!(
+                formatter,
+                "recorded Poseidon output for call {call_id} does not match its input"
+            ),
+            Self::PowDrawCallMissing { call_id } => {
+                write!(formatter, "PoW check references missing call {call_id}")
+            }
+            Self::PowDrawFrameMissing { call_id } => write!(
+                formatter,
+                "PoW check references call {call_id}, which is not the final call of a draw frame"
+            ),
+            Self::PowDrawWordMismatch {
+                call_id,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "PoW call {call_id} checks word {}, expected {}",
+                actual.as_u32(),
+                expected.as_u32()
+            ),
+            Self::MissingPowDraw => write!(formatter, "PoW check has no transcript draw call"),
+            Self::InvalidProofOfWork { nonce, bits, word } => write!(
+                formatter,
+                "nonce {nonce} does not satisfy {bits} PoW bits in word {}",
+                word.as_u32()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TranscriptError {}
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+    use stwo::core::channel::{Channel, MerkleChannel};
+    use stwo::core::proof_of_work::GrindOps;
+    use stwo::core::queries::draw_queries;
+    use stwo::prover::backend::simd::SimdBackend;
+
+    use prover::poseidon2_channel::{
+        Poseidon2M31Channel, Poseidon2M31Hash, Poseidon2M31MerkleChannel,
+    };
+
     use super::*;
-    use prover::relations::Relations;
 
-    fn lui_eval() -> prover::components::lui::air::Eval {
-        prover::components::lui::air::Eval {
-            log_size: 4,
-            relations: Relations::dummy(),
+    #[rstest]
+    fn raw_u32_absorption_matches_the_existing_channel() {
+        let words = [M31_MODULUS, u32::MAX, 7];
+        let mut reference = Poseidon2M31Channel::default();
+        reference.mix_u32s(&words);
+        let mut kernel = TranscriptKernel::<NativeTranscriptBackend>::default();
+        kernel
+            .absorb_u32s(&words)
+            .expect("the native transcript accepts unrestricted u32 words");
+        assert_eq!(kernel.draw_secure_field(), Ok(reference.draw_secure_felt()));
+    }
+
+    #[rstest]
+    fn digest_absorption_matches_merkle_channel_root_mixing() {
+        let raw = [1, 2, 3, 4, 5, 6, 7, 8];
+        let digest = Digest8::try_from(raw).expect("the fixture root is canonical");
+        let mut reference = Poseidon2M31Channel::default();
+        Poseidon2M31MerkleChannel::mix_root(&mut reference, Poseidon2M31Hash(raw));
+        let mut kernel = TranscriptKernel::<NativeTranscriptBackend>::default();
+        kernel
+            .absorb_digest(digest)
+            .expect("the native transcript accepts a canonical digest");
+        assert_eq!(
+            kernel.draw_block().map(|words| words.map(M31Word::as_u32)),
+            Ok(reference
+                .draw_u32s()
+                .try_into()
+                .expect("the reference channel draws one rate block"))
+        );
+    }
+
+    #[rstest]
+    fn successive_draws_match_the_existing_channel() {
+        let mut reference = Poseidon2M31Channel::default();
+        reference.mix_u64(0x1122_3344_5566_7788);
+        let mut kernel = TranscriptKernel::<NativeTranscriptBackend>::default();
+        kernel
+            .absorb_u64(0x1122_3344_5566_7788)
+            .expect("the nonce limbs are canonical");
+        let first = kernel.draw_block();
+        let second = kernel.draw_block();
+        assert_eq!(
+            (first, second),
+            (
+                Ok(reference
+                    .draw_u32s()
+                    .into_iter()
+                    .map(|word| M31Word::try_from(word).expect("draws are canonical"))
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .expect("one rate block")),
+                Ok(reference
+                    .draw_u32s()
+                    .into_iter()
+                    .map(|word| M31Word::try_from(word).expect("draws are canonical"))
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .expect("one rate block")),
+            )
+        );
+    }
+
+    #[rstest]
+    fn valid_pow_transition_matches_the_existing_channel() {
+        let mut reference = Poseidon2M31Channel::default();
+        reference.mix_u32s(&[1, 2, 3]);
+        let nonce = <SimdBackend as GrindOps<Poseidon2M31Channel>>::grind(&reference, 8);
+        let mut kernel = TranscriptKernel::<NativeTranscriptBackend>::default();
+        kernel
+            .absorb_u32s(&[1, 2, 3])
+            .expect("the fixture words are accepted");
+        let result = kernel
+            .verify_and_absorb_pow(nonce, 8)
+            .and_then(|()| kernel.draw_secure_field());
+        reference.mix_u64(nonce);
+        assert_eq!(result, Ok(reference.draw_secure_felt()));
+    }
+
+    #[rstest]
+    fn invalid_pow_transition_is_rejected() {
+        let mut reference = Poseidon2M31Channel::default();
+        reference.mix_u32s(&[1, 2, 3]);
+        let mut nonce = 0;
+        while reference.verify_pow_nonce(8, nonce) {
+            nonce += 1;
         }
+        let mut kernel = TranscriptKernel::<NativeTranscriptBackend>::default();
+        kernel
+            .absorb_u32s(&[1, 2, 3])
+            .expect("the fixture words are accepted");
+        assert!(matches!(
+            kernel.verify_and_absorb_pow(nonce, 8),
+            Err(TranscriptError::InvalidProofOfWork {
+                nonce: rejected,
+                bits: 8,
+                ..
+            }) if rejected == nonce
+        ));
     }
 
-    fn base_alu_imm_eval() -> prover::components::base_alu_imm::air::Eval {
-        prover::components::base_alu_imm::air::Eval {
-            log_size: 4,
-            relations: Relations::dummy(),
-        }
+    #[rstest]
+    fn recording_and_native_backends_execute_identical_transitions() {
+        let mut native = TranscriptKernel::<NativeTranscriptBackend>::default();
+        let mut recording = TranscriptKernel::<RecordingTranscriptBackend>::default();
+        native
+            .absorb_u32s(&[M31_MODULUS, 9])
+            .expect("the native transcript accepts the fixture");
+        recording
+            .absorb_u32s(&[M31_MODULUS, 9])
+            .expect("the recording transcript accepts the fixture");
+        let native_draw = native.draw_block();
+        let recording_draw = recording.draw_block();
+        assert_eq!(
+            (native.digest(), native_draw),
+            (recording.digest(), recording_draw)
+        );
     }
 
-    #[test]
-    fn test_lui_constraint_exprs_match_info_count() {
-        let exprs = constraint_exprs(&lui_eval());
-        let info = constraint_info(&lui_eval());
-        assert_eq!(exprs.constraints.len(), info.n_constraints);
+    #[rstest]
+    fn secure_field_absorption_matches_the_existing_channel() {
+        let values = [
+            SecureField::from_u32_unchecked(1, 2, 3, 4),
+            SecureField::from_u32_unchecked(5, 6, 7, 8),
+        ];
+        let mut reference = Poseidon2M31Channel::default();
+        reference.mix_felts(&values);
+        let mut kernel = TranscriptKernel::<NativeTranscriptBackend>::default();
+        kernel
+            .absorb_secure_fields(&values)
+            .expect("the secure-field limbs are canonical");
+        assert_eq!(kernel.draw_secure_field(), Ok(reference.draw_secure_felt()));
     }
 
-    #[test]
-    fn test_lui_logup_batches_become_constraints() {
-        let exprs = constraint_exprs(&lui_eval());
-        // 1 enabler booleanity + ceil(7 LogUp entries / 2) = 4 batch constraints
-        assert_eq!(exprs.constraints.len(), 5);
+    #[rstest]
+    fn absorption_resets_the_draw_counter_like_the_existing_channel() {
+        let mut reference = Poseidon2M31Channel::default();
+        let mut kernel = TranscriptKernel::<NativeTranscriptBackend>::default();
+        reference.draw_u32s();
+        reference.draw_u32s();
+        kernel.draw_block().expect("the first draw succeeds");
+        kernel.draw_block().expect("the second draw succeeds");
+        reference.mix_u32s(&[9]);
+        kernel.absorb_u32s(&[9]).expect("the absorption succeeds");
+        assert_eq!(
+            (kernel.draw_secure_field(), kernel.draw_count()),
+            (Ok(reference.draw_secure_felt()), 1)
+        );
     }
 
-    #[test]
-    fn test_base_alu_imm_constraint_exprs_match_info_count() {
-        let exprs = constraint_exprs(&base_alu_imm_eval());
-        let info = constraint_info(&base_alu_imm_eval());
-        assert_eq!(exprs.constraints.len(), info.n_constraints);
+    #[rstest]
+    fn raw_query_slots_match_stwo_draw_queries_without_deduplication() {
+        let mut reference = Poseidon2M31Channel::default();
+        reference.mix_u32s(&[11, 12]);
+        let expected: [u32; 9] = draw_queries(&mut reference, 7, 9)
+            .into_iter()
+            .map(|query| u32::try_from(query).expect("the seven-bit query fits u32"))
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("the reference returns the requested raw query count");
+        let mut kernel = TranscriptKernel::<NativeTranscriptBackend>::default();
+        kernel
+            .absorb_u32s(&[11, 12])
+            .expect("the fixture words are accepted");
+        assert_eq!(kernel.draw_queries::<9>(7), Ok(expected));
     }
 
-    #[test]
-    fn test_lui_constraints_are_nonempty_expressions() {
-        let exprs = constraint_exprs(&lui_eval());
-        // The enabler booleanity constraint formats to a real expression
-        // referencing the trace column, proving constraints flow from the
-        // macro into expression data.
-        assert!(!exprs.format_constraints().is_empty());
+    #[rstest]
+    #[case::zero(0)]
+    #[case::above_circle_maximum(31)]
+    fn invalid_query_domain_size_is_rejected(#[case] log_domain_size: u32) {
+        let mut kernel = TranscriptKernel::<NativeTranscriptBackend>::default();
+        assert_eq!(
+            kernel.draw_queries::<1>(log_domain_size),
+            Err(TranscriptError::QueryLogSizeOutOfRange { log_domain_size })
+        );
+    }
+
+    #[rstest]
+    fn recorded_pow_check_is_anchored_to_its_draw_permutation() {
+        let mut reference = Poseidon2M31Channel::default();
+        reference.mix_u32s(&[1, 2, 3]);
+        let nonce = <SimdBackend as GrindOps<Poseidon2M31Channel>>::grind(&reference, 8);
+        let mut kernel = TranscriptKernel::<RecordingTranscriptBackend>::default();
+        kernel
+            .absorb_u32s(&[1, 2, 3])
+            .expect("the fixture words are accepted");
+        kernel
+            .verify_and_absorb_pow(nonce, 8)
+            .expect("the generated nonce satisfies the fixture challenge");
+        let trace = kernel.backend().trace();
+        let check = trace.pow_checks[0];
+        assert_eq!(
+            trace
+                .poseidon_calls
+                .iter()
+                .find(|call| call.id.call_id == check.call_id)
+                .map(|call| call.output[0]),
+            Some(check.word)
+        );
+    }
+
+    #[rstest]
+    fn recorded_calls_preserve_hash_session_and_step_coordinates() {
+        let mut kernel = TranscriptKernel::<RecordingTranscriptBackend>::default();
+        kernel
+            .absorb_u32s(&[1, 2, 3, 4, 5])
+            .expect("the fixture words are accepted");
+        kernel.draw_block().expect("the draw succeeds");
+        let trace = kernel.into_backend().into_trace();
+        assert_eq!(
+            trace.sponge_rows().map(|rows| rows
+                .into_iter()
+                .map(|row| (row.id.hash_id, row.id.step))
+                .collect::<Vec<_>>()),
+            Ok(vec![(0, 0), (0, 1), (0, 2), (1, 0), (1, 1)])
+        );
+    }
+
+    #[rstest]
+    fn recorded_hash_frames_bind_purpose_stream_and_call_range() {
+        let mut kernel = TranscriptKernel::<RecordingTranscriptBackend>::default();
+        kernel
+            .absorb_u32s(&[1])
+            .expect("the fixture word is accepted");
+        kernel.draw_block().expect("the draw succeeds");
+        let trace = kernel.into_backend().into_trace();
+        assert_eq!(
+            trace
+                .hash_frames
+                .iter()
+                .map(|frame| (
+                    frame.hash_id,
+                    frame.purpose,
+                    frame.first_call_id,
+                    frame.call_count,
+                    frame.words.len(),
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, HashPurpose::Mix, 0, 2, 10),
+                (1, HashPurpose::Draw, 2, 2, 10),
+            ]
+        );
+    }
+
+    #[rstest]
+    fn corrupted_hash_frame_stream_is_rejected_before_air_materialization() {
+        let mut kernel = TranscriptKernel::<RecordingTranscriptBackend>::default();
+        kernel
+            .absorb_u32s(&[1])
+            .expect("the fixture word is accepted");
+        let mut trace = kernel.into_backend().into_trace();
+        trace.hash_frames[0].words[8] =
+            add_m31_words(trace.hash_frames[0].words[8], M31Word::from(1));
+        assert!(matches!(
+            trace.sponge_rows(),
+            Err(TranscriptError::TraceFrameChunkMismatch {
+                hash_id: 0,
+                step: 1,
+                word: 0,
+                ..
+            })
+        ));
+    }
+
+    #[rstest]
+    fn unframed_poseidon_call_is_rejected_before_air_materialization() {
+        let mut kernel = TranscriptKernel::<RecordingTranscriptBackend>::default();
+        kernel
+            .absorb_u32s(&[1])
+            .expect("the fixture word is accepted");
+        let mut trace = kernel.into_backend().into_trace();
+        trace.hash_frames.clear();
+        assert_eq!(
+            trace.sponge_rows(),
+            Err(TranscriptError::TraceFrameCoverageMismatch {
+                expected: 2,
+                actual: 0,
+            })
+        );
+    }
+
+    #[rstest]
+    fn pow_check_must_reference_the_final_call_of_a_draw_frame() {
+        let mut reference = Poseidon2M31Channel::default();
+        reference.mix_u32s(&[1, 2, 3]);
+        let nonce = <SimdBackend as GrindOps<Poseidon2M31Channel>>::grind(&reference, 8);
+        let mut kernel = TranscriptKernel::<RecordingTranscriptBackend>::default();
+        kernel
+            .absorb_u32s(&[1, 2, 3])
+            .expect("the fixture words are accepted");
+        kernel
+            .verify_and_absorb_pow(nonce, 8)
+            .expect("the generated nonce satisfies the fixture challenge");
+        let mut trace = kernel.into_backend().into_trace();
+        let draw_frame = trace
+            .hash_frames
+            .last()
+            .expect("PoW ends with a draw frame");
+        trace.pow_checks[0].call_id = draw_frame.first_call_id;
+        trace.pow_checks[0].word =
+            trace.poseidon_calls[draw_frame.first_call_id as usize].output[0];
+        assert_eq!(
+            trace.sponge_rows(),
+            Err(TranscriptError::PowDrawFrameMissing {
+                call_id: draw_frame.first_call_id,
+            })
+        );
+    }
+
+    #[rstest]
+    fn reordered_hash_steps_are_rejected_before_air_materialization() {
+        let mut kernel = TranscriptKernel::<RecordingTranscriptBackend>::default();
+        kernel
+            .absorb_u32s(&[1])
+            .expect("the fixture word is accepted");
+        let mut trace = kernel.into_backend().into_trace();
+        trace.poseidon_calls[1].id.step = 0;
+        assert!(matches!(
+            trace.sponge_rows(),
+            Err(TranscriptError::TraceStepMismatch {
+                call_id: 1,
+                expected: 1,
+                actual: 0,
+            })
+        ));
+    }
+
+    #[rstest]
+    fn broken_hash_capacity_chaining_is_rejected_before_air_materialization() {
+        let mut kernel = TranscriptKernel::<RecordingTranscriptBackend>::default();
+        kernel
+            .absorb_u32s(&[1])
+            .expect("the fixture word is accepted");
+        let mut trace = kernel.into_backend().into_trace();
+        let expected = trace.poseidon_calls[0].output[RATE];
+        trace.poseidon_calls[1].input[RATE] = add_m31_words(expected, M31Word::from(1));
+        assert!(matches!(
+            trace.sponge_rows(),
+            Err(TranscriptError::TraceCapacityMismatch {
+                call_id: 1,
+                word: RATE,
+                expected: actual_expected,
+                ..
+            }) if actual_expected == expected
+        ));
     }
 }

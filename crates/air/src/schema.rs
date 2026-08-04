@@ -104,7 +104,7 @@ stwo_macros::define_air! {
         },
 
         // ==========================================================================
-        // 2. Base ALU Imm (addi/xori/ori/andi) - airs.md Section 2
+        // 2. Base ALU Imm (addi/xori/ori/andi)
         // ==========================================================================
         base_alu_imm: {
             committed: {
@@ -118,7 +118,7 @@ stwo_macros::define_air! {
                     + opcode_xor_flag * constant(crate::instructions::Opcode::Xori as u32)
                     + opcode_or_flag * constant(crate::instructions::Opcode::Ori as u32)
                     + opcode_and_flag * constant(crate::instructions::Opcode::Andi as u32),
-                // I-type immediate: imm_0 (8 bits) + imm_1 (3 bits) + sign bit (airs.md 2.2)
+                // I-type immediate: imm_0 (8 bits) + imm_1 (3 bits) + sign bit
                 imm: imm_0 + pow2(8) * imm_1 + pow2(11) * imm_msb,
                 // Sign-extended immediate limbs; limb 0 is imm_0 and limb 3 equals limb 2
                 sext_imm_1: imm_1 + ((1 << 3) * ((1 << 5) - 1)) * imm_msb,
@@ -171,7 +171,7 @@ stwo_macros::define_air! {
         },
 
         // ==========================================================================
-        // 3. Shifts Reg (sll/srl/sra) - airs.md Section 3
+        // 3. Shifts Reg (sll/srl/sra)
         // ==========================================================================
         shifts_reg: {
             committed: {
@@ -189,7 +189,7 @@ stwo_macros::define_air! {
                     + opcode_srl_flag * constant(crate::instructions::Opcode::Srl as u32)
                     + opcode_sra_flag * constant(crate::instructions::Opcode::Sra as u32),
                 right_shift: opcode_srl_flag + opcode_sra_flag,
-                // Hot-one decoded shift quantities (airs.md 3.2)
+                // Hot-one decoded shift quantities
                 bit_multiplier: bit_shift_marker_0 + 2 * bit_shift_marker_1 + 4 * bit_shift_marker_2
                     + 8 * bit_shift_marker_3 + 16 * bit_shift_marker_4 + 32 * bit_shift_marker_5
                     + 64 * bit_shift_marker_6 + 128 * bit_shift_marker_7,
@@ -203,7 +203,7 @@ stwo_macros::define_air! {
                     + bit_shift_marker_7,
                 limb_marker_sum: limb_shift_marker_0 + limb_shift_marker_1 + limb_shift_marker_2
                     + limb_shift_marker_3,
-                // Shift amount comes from the low 5 bits of rs2 (airs.md 3.3)
+                // Shift amount comes from the low 5 bits of rs2
                 // 7 - (rs2_next_0 - shift_amount) / 2^5: in range iff the shift
                 // amount is rs2's low 5 bits (the field division by 32 explodes
                 // otherwise) - spec 3.3.
@@ -234,7 +234,7 @@ stwo_macros::define_air! {
                 bit_multiplier_left - opcode_sll_flag * bit_multiplier,
                 bit_multiplier_right - right_shift * bit_multiplier,
                 // Left shift by 8*i + b: rd limbs below i vanish, limb i carries
-                // out, higher limbs chain the carries (airs.md 3.3)
+                // out, higher limbs chain the carries
                 opcode_sll_flag * limb_shift_marker_0 * (rd_next_0 + pow2(8) * bit_shift_carry_0)
                     - limb_shift_marker_0 * rs1_next_0 * bit_multiplier_left,
                 opcode_sll_flag * limb_shift_marker_0 * (rd_next_1 - (bit_shift_carry_0 - pow2(8) * bit_shift_carry_1))
@@ -334,7 +334,7 @@ stwo_macros::define_air! {
         },
 
         // ==========================================================================
-        // 4. Shifts Imm (slli/srli/srai) - airs.md Section 4
+        // 4. Shifts Imm (slli/srli/srai)
         // ==========================================================================
         shifts_imm: {
             committed: {
@@ -352,7 +352,7 @@ stwo_macros::define_air! {
                     + opcode_srl_flag * constant(crate::instructions::Opcode::Srli as u32)
                     + opcode_sra_flag * constant(crate::instructions::Opcode::Srai as u32),
                 right_shift: opcode_srl_flag + opcode_sra_flag,
-                // Hot-one decoded shift quantities (airs.md 4.2)
+                // Hot-one decoded shift quantities
                 bit_multiplier: bit_shift_marker_0 + 2 * bit_shift_marker_1 + 4 * bit_shift_marker_2
                     + 8 * bit_shift_marker_3 + 16 * bit_shift_marker_4 + 32 * bit_shift_marker_5
                     + 64 * bit_shift_marker_6 + 128 * bit_shift_marker_7,
@@ -389,9 +389,9 @@ stwo_macros::define_air! {
                 limb_marker_sum - enabler,
                 bit_multiplier_left - opcode_sll_flag * bit_multiplier,
                 bit_multiplier_right - right_shift * bit_multiplier,
-                // The immediate encodes the decoded shift amount (airs.md 4.3)
+                // The immediate encodes the decoded shift amount
                 imm_truncated - shift_amount,
-                // Left shift by 8*i + b (airs.md 4.3)
+                // Left shift by 8*i + b
                 opcode_sll_flag * limb_shift_marker_0 * (rd_next_0 + pow2(8) * bit_shift_carry_0)
                     - limb_shift_marker_0 * rs1_next_0 * bit_multiplier_left,
                 opcode_sll_flag * limb_shift_marker_0 * (rd_next_1 - (bit_shift_carry_0 - pow2(8) * bit_shift_carry_1))
@@ -483,7 +483,7 @@ stwo_macros::define_air! {
         },
 
         // ==========================================================================
-        // 5. Less Than Reg (slt/sltu) - airs.md Section 5
+        // 5. Less Than Reg (slt/sltu)
         // ==========================================================================
         lt_reg: {
             committed: {
@@ -502,7 +502,7 @@ stwo_macros::define_air! {
                 rs2_clock_diff: clock - rs2_clock_prev,
                 rd_clock_diff: clock - rd_clock_prev,
                 // Most-significant-limb gaps: zero for unsigned interpretation,
-                // 2^8 when the sign adjustment applies (airs.md 5.2)
+                // 2^8 when the sign adjustment applies
                 rs1_msl_gap: rs1_next_3 - rs1_msl_felt,
                 rs2_msl_gap: rs2_next_3 - rs2_msl_felt,
                 // Signed-shifted most significant limbs for the range check
@@ -523,7 +523,7 @@ stwo_macros::define_air! {
                 rs2_msl_gap * (pow2(8) - rs2_msl_gap),
                 // Comparison scan from the most significant limb down: limbs
                 // above the first difference are equal, and the marked limb's
-                // difference equals diff_val (airs.md 5.3)
+                // difference equals diff_val
                 (1 - diff_marker_3) * (cmp_sign * (rs2_msl_felt - rs1_msl_felt)),
                 diff_marker_3 * (diff_val - cmp_sign * (rs2_msl_felt - rs1_msl_felt)),
                 (1 - diff_marker_3 - diff_marker_2) * (cmp_sign * (rs2_next_2 - rs1_next_2)),
@@ -563,7 +563,7 @@ stwo_macros::define_air! {
         },
 
         // ==========================================================================
-        // 6. Less Than Imm (slti/sltiu) - airs.md Section 6
+        // 6. Less Than Imm (slti/sltiu)
         // ==========================================================================
         lt_imm: {
             committed: {
@@ -577,7 +577,7 @@ stwo_macros::define_air! {
             derived: {
                 expected_opcode_id: opcode_slti_flag * constant(crate::instructions::Opcode::Slti as u32)
                     + opcode_sltiu_flag * constant(crate::instructions::Opcode::Sltiu as u32),
-                // I-type immediate (airs.md 6.2)
+                // I-type immediate
                 imm: imm_0 + pow2(8) * imm_1 + pow2(11) * imm_msb,
                 // Sign-extended immediate limbs; limb 0 is imm_0, limb 3 = limb 2
                 sext_imm_1: imm_1 + (pow2(8) - pow2(3)) * imm_msb,
@@ -602,7 +602,7 @@ stwo_macros::define_air! {
                 diff_marker_1 * (1 - diff_marker_1),
                 diff_marker_2 * (1 - diff_marker_2),
                 diff_marker_3 * (1 - diff_marker_3),
-                // Comparison scan from the most significant limb down (airs.md 6.3)
+                // Comparison scan from the most significant limb down
                 (1 - diff_marker_3) * (cmp_sign * (sext_imm_msl_felt - rs1_msl_felt)),
                 diff_marker_3 * (diff_val - cmp_sign * (sext_imm_msl_felt - rs1_msl_felt)),
                 (1 - diff_marker_3 - diff_marker_2) * (cmp_sign * (sext_imm_2 - rs1_next_2)),
@@ -637,7 +637,7 @@ stwo_macros::define_air! {
         },
 
         // ==========================================================================
-        // 7. Branch Equal (beq/bne) - airs.md Section 7
+        // 7. Branch Equal (beq/bne)
         // ==========================================================================
         branch_eq: {
             committed: {
@@ -658,7 +658,7 @@ stwo_macros::define_air! {
                     + (rs1_next_1 - rs2_next_1) * diff_inv_marker_1
                     + (rs1_next_2 - rs2_next_2) * diff_inv_marker_2
                     + (rs1_next_3 - rs2_next_3) * diff_inv_marker_3,
-                // Conditional branch target (airs.md 7.2)
+                // Conditional branch target
                 to_pc: pc + imm_felt * cmp_result + 4 * (1 - cmp_result),
                 clock_next: clock + 1,
                 rs1_clock_diff: clock - rs1_clock_prev,
@@ -691,7 +691,7 @@ stwo_macros::define_air! {
         },
 
         // ==========================================================================
-        // 8. Branch Less Than (blt/bltu/bge/bgeu) - airs.md Section 8
+        // 8. Branch Less Than (blt/bltu/bge/bgeu)
         // ==========================================================================
         branch_lt: {
             committed: {
@@ -726,7 +726,7 @@ stwo_macros::define_air! {
                 diff_marker_1 * (1 - diff_marker_1),
                 diff_marker_2 * (1 - diff_marker_2),
                 diff_marker_3 * (1 - diff_marker_3),
-                // Branch target, gated by enabler (airs.md 8.2)
+                // Branch target, gated by enabler
                 enabler * (branch_target - (pc + imm_felt * cmp_result + 4 * (1 - cmp_result))),
                 rs1_msl_gap * (pow2(8) - rs1_msl_gap),
                 rs2_msl_gap * (pow2(8) - rs2_msl_gap),
@@ -769,7 +769,7 @@ stwo_macros::define_air! {
         },
 
         // ==========================================================================
-        // 9. LUI - airs.md Section 9
+        // 9. LUI
         // ==========================================================================
         lui: {
             committed: {
@@ -777,7 +777,7 @@ stwo_macros::define_air! {
                 imm_0, imm_1, imm_2,
             },
             derived: {
-                // imm = imm_0 + 2^4 * imm_1 + 2^12 * imm_2 (U-type immediate, airs.md 9.2)
+                // imm = imm_0 + 2^4 * imm_1 + 2^12 * imm_2 (U-type immediate)
                 imm: imm_0 + pow2(4) * imm_1 + pow2(12) * imm_2,
                 pc_next: pc + 4,
                 clock_next: clock + 1,
@@ -801,7 +801,7 @@ stwo_macros::define_air! {
         },
 
         // ==========================================================================
-        // 10. AUIPC - airs.md Section 10
+        // 10. AUIPC
         // ==========================================================================
         auipc: {
             committed: {
@@ -815,7 +815,7 @@ stwo_macros::define_air! {
                 rd_clock_diff: clock - rd_clock_prev,
             },
             constraints: {
-                // rd = pc + imm (airs.md 10.2)
+                // rd = pc + imm
                 rd_felt - (pc + imm_felt),
             },
             lookups: {
@@ -835,7 +835,7 @@ stwo_macros::define_air! {
         },
 
         // ==========================================================================
-        // 11. JALR - airs.md Section 11
+        // 11. JALR
         // ==========================================================================
         jalr: {
             committed: {
@@ -846,7 +846,7 @@ stwo_macros::define_air! {
             derived: {
                 rs1_felt: rs1_next_0 + pow2(8) * rs1_next_1 + pow2(16) * rs1_next_2 + pow2(24) * rs1_next_3,
                 rd_felt: rd_next_0 + pow2(8) * rd_next_1 + pow2(16) * rd_next_2 + pow2(24) * rd_next_3,
-                // Jump target, even-aligned (airs.md 11.2)
+                // Jump target, even-aligned
                 jump_target: 2 * to_pc_over_two,
                 clock_next: clock + 1,
                 rs1_clock_diff: clock - rs1_clock_prev,
@@ -882,7 +882,7 @@ stwo_macros::define_air! {
         },
 
         // ==========================================================================
-        // 12. JAL - airs.md Section 12
+        // 12. JAL
         // ==========================================================================
         jal: {
             committed: {
@@ -911,13 +911,13 @@ stwo_macros::define_air! {
             },
             constraints: {
                 // rd = pc + 4, gated by enabler (padding) and rd_addr (x0
-                // writes are discarded, airs.md 12.2)
+                // writes are discarded)
                 enabler * rd_addr * (rd_felt - (pc + 4)),
             },
         },
 
         // ==========================================================================
-        // 13. Load/Store (lb/lbu/lh/lhu/lw/sb/sh/sw) - airs.md Section 13
+        // 13. Load/Store (lb/lbu/lh/lhu/lw/sb/sh/sw)
         // ==========================================================================
         load_store: {
             committed: {
@@ -969,7 +969,7 @@ stwo_macros::define_air! {
                 marker_2 * (1 - marker_2),
                 marker_3 * (1 - marker_3),
                 // Shift amount: byte ops use shift_id, half-word ops (shift_id 1
-                // or 5) use (shift_id - 1) / 2 (airs.md 13.3)
+                // or 5) use (shift_id - 1) / 2
                 shift_amount - (opcode_b_flag * shift_id
                     + opcode_h_flag * (shift_id - 1) * inv(2)),
                 // Load/store dependent source and destination addresses
@@ -1038,7 +1038,7 @@ stwo_macros::define_air! {
         },
 
         // ==========================================================================
-        // 14. MUL - airs.md Section 14
+        // 14. MUL
         // ==========================================================================
         mul: {
             committed: {
@@ -1051,7 +1051,7 @@ stwo_macros::define_air! {
                 rs2_clock_diff: clock - rs2_clock_prev,
                 rd_clock_diff: clock - rd_clock_prev,
                 // Schoolbook carry chain of rd = (rs1 * rs2) mod 2^32 over 8-bit
-                // limbs (airs.md 14.2); each carry is range-checked, not boolean
+                // limbs; each carry is range-checked, not boolean
                 carry_0: (rs1_next_0 * rs2_next_0 - rd_next_0) * inv(pow2(8)),
                 carry_1: (carry_0 + rs1_next_1 * rs2_next_0 + rs1_next_0 * rs2_next_1 - rd_next_1)
                         * inv(pow2(8)),
@@ -1092,7 +1092,7 @@ stwo_macros::define_air! {
         },
 
         // ==========================================================================
-        // 15. MULH (mulh/mulhsu/mulhu) - airs.md Section 15
+        // 15. MULH (mulh/mulhsu/mulhu)
         // ==========================================================================
         mulh: {
             committed: {
@@ -1111,7 +1111,7 @@ stwo_macros::define_air! {
                 rs2_clock_diff: clock - rs2_clock_prev,
                 rd_clock_diff: clock - rd_clock_prev,
                 // Sign-extended 64-bit operands: top limbs gain the sign bit,
-                // limbs 4..7 are the sign fill (airs.md 15.2)
+                // limbs 4..7 are the sign fill
                 rs1_top: rs1_next_3 + rs1_sign * pow2(7),
                 rs2_top: rs2_next_3 + rs2_sign * pow2(7),
                 rs1_fill: rs1_sign * (pow2(8) - 1),
@@ -1168,7 +1168,7 @@ stwo_macros::define_air! {
         },
 
         // ==========================================================================
-        // 16. DIV (div/divu/rem/remu) - airs.md Section 16
+        // 16. DIV (div/divu/rem/remu)
         // ==========================================================================
         div: {
             committed: {
@@ -1198,7 +1198,7 @@ stwo_macros::define_air! {
                 c_sum: rs2_next_0 + rs2_next_1 + rs2_next_2 + rs2_next_3,
                 r_sum: r_0 + r_1 + r_2 + r_3,
                 c_sign_factor: 1 - 2 * c_sign,
-                // |r| vs |c| limb differences under the divisor sign (airs.md 16.2)
+                // |r| vs |c| limb differences under the divisor sign
                 diff_0: c_sign_factor * (rs2_next_0 - r_abs_0),
                 diff_1: c_sign_factor * (rs2_next_1 - r_abs_1),
                 diff_2: c_sign_factor * (rs2_next_2 - r_abs_2),
@@ -1228,7 +1228,7 @@ stwo_macros::define_air! {
                 b_hi: 255 * b_sign,
                 r_hi: 255 * b_sign * (1 - r_zero),
                 // Schoolbook carries of rs1 = rs2 * q + r over the sign-extended
-                // limbs (airs.md 16.2): carry_k integral and below 2^11 makes the
+                // limbs: carry_k integral and below 2^11 makes the
                 // limb equations an exact 64-bit identity, which pins (q, r) to
                 // the dividend (the overflow case is exact too: q_sign = 0 reads
                 // 0x80000000 as +2^31).
@@ -1273,7 +1273,7 @@ stwo_macros::define_air! {
                 special_case * (1 - special_case),
                 valid_not_zero_divisor * (1 - valid_not_zero_divisor),
                 valid_not_special * (1 - valid_not_special),
-                // Zero divisor: all-one quotient, zero divisor limbs (airs.md 16.3)
+                // Zero divisor: all-one quotient, zero divisor limbs
                 zero_divisor * rs2_next_0,
                 zero_divisor * rs2_next_1,
                 zero_divisor * rs2_next_2,
@@ -1345,7 +1345,7 @@ stwo_macros::define_air! {
                 enabler * memory_access(0, rs2_addr, clock, rs2_next_0, rs2_next_1, rs2_next_2, rs2_next_3),
                 - enabler * range_check_20(rs2_clock_diff),
                 // Quotient and remainder limbs are bytes and the rs1 = rs2*q + r
-                // schoolbook carries fit 11 bits (airs.md 16.3).
+                // schoolbook carries fit 11 bits.
                 - enabler * range_check_8_11(q_0, carry_0),
                 - enabler * range_check_8_11(q_1, carry_1),
                 - enabler * range_check_8_11(q_2, carry_2),

@@ -1,15 +1,15 @@
 //! Branch operations.
 //!
 //! This file contains:
-//! - branch_eq family: beq, bne (airs.md Section 7)
-//! - branch_lt family: blt, bltu, bge, bgeu (airs.md Section 8)
+//! - branch_eq family: beq, bne
+//! - branch_lt family: blt, bltu, bge, bgeu
 
 use super::utils::{compute_lt_reg_witness, imm_to_felt, m31_inverse};
 use crate::trace::Tracer;
 use crate::{Cpu, DecodedInst};
 
 // =============================================================================
-// Branch Equal (beq/bne) - airs.md Section 7
+// Branch Equal (beq/bne)
 // =============================================================================
 
 /// Compute witness columns for branch_eq family
@@ -88,7 +88,7 @@ pub fn bne(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
 }
 
 // =============================================================================
-// Branch Less Than (blt/bltu/bge/bgeu) - airs.md Section 8
+// Branch Less Than (blt/bltu/bge/bgeu)
 // =============================================================================
 
 pub fn blt(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {

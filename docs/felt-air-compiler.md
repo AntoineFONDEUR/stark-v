@@ -1,5 +1,13 @@
 # A felt language that compiles to AIR (design)
 
+> **Status: partially implemented compiler roadmap.** `define_air_fns!`
+> implements static control flow, functions, hints, degree-budget
+> materialization, relation statements, and embedded components; Poseidon2 uses
+> it in production. Opcode execution still has separate runner handlers, and
+> recursion-local components still contain legacy table declarations and
+> hand-written evaluators. Both migrations remain planned work. Macro source and
+> tests are authoritative for implemented syntax.
+
 ## The observation
 
 Write-once (single-assignment) memory with Cairo-style call frames is already a
@@ -26,38 +34,36 @@ committed trace column plus one equality constraint):
   `t = x * y` (materialized, constraint `t - x * y`) and the inline `t * z`.
 - Addition does not: `a + b + c + d` stays one inline expression no matter its
   length — it never increases the degree.
-- Reuse counts: a degree-2 subexpression used by ten constraints may be cheaper
-  materialized once than inlined ten times into the composition evaluation; the
-  compiler weighs (columns added) against (constraint degree and evaluation
-  cost).
+- Common subexpressions that must be materialized are deduplicated. The compiler
+  does not yet decide to materialize an otherwise valid expression based on
+  prover cost; that cost model remains future work.
 
-The output is exactly what `define_trace_tables!` consumes today: a column list
-(inputs + materialized intermediates), `derived:` (the inline nodes),
-`constraints:` (the materialization equalities plus the program's asserted
-zeros), and `lookups:` (relation calls in the code become LogUp entries).
+The generated backend contains a column list (inputs plus materialized
+intermediates), inline derived expressions, materialization equalities and
+program assertions, and LogUp entries for relation calls.
 
-The same program is the witness generator: run it with concrete `PackedM31`
-values and every materialized node _is_ the column fill, in the same order. This
-is the existing `T`-generic trick (one expression, evaluated with `E::F` for the
-AIR and `PackedM31` via `at(i)` for the witness) taken to its conclusion — the
-macro already proves the architecture works; the compiler adds control flow and
-automatic materialization on top.
+The same lowered program generates the AIR evaluation and the concrete
+`BaseField` witness calls, so materialized cells and their constraints stay in
+the same order.
 
-## Poseidon2, the motivating case
+## Poseidon2, the implemented reference
 
-Today the poseidon2 table is ~700 hand-flattened columns
-(`full0_sq1_0..15, full0_sq2_0..15, full0_mix_0..15, full1_...`) and the one
-remaining hand-written component module, because the expression DSL cannot loop.
-As felt code it is:
+Poseidon2 is the production reference for the felt-function path. Its
+permutation is written with static loops and helper functions in
+`crates/air/src/poseidon2.rs`, and `define_air_fns!` generates its materialized
+columns, constraints, witness calls, and embedded prover component. Its source
+has this shape:
 
 ```text
 fn poseidon2(state: [felt; 16]) -> [felt; 16] {
-    for round in 0..8 {                       // static bound: unrolled
+    state = external_matrix(state);
+    for round in 0..4 {                       // static bound: unrolled
         state = add_round_constants(state, EXTERNAL[round]);
         for i in 0..16 { state[i] = sbox(state[i]); }   // x^5
-        state = external_mix(state);          // additive: stays inline
+        state = external_matrix(state);       // additive: stays inline
     }
-    // ... partial rounds ...
+    for round in 0..14 { state = partial_round(state, round); }
+    for round in 4..8 { state = full_round(state, round); }
     state
 }
 
@@ -66,10 +72,11 @@ fn sbox(x: felt) -> felt {
 }
 ```
 
-At `max_degree = 3` the compiler materializes two cells per s-box instead of
-today's hand-chosen three (`sq1`, `sq2`, `mix`), derives the column count, the
-constraints, and the witness fill — and changing the degree budget re-derives
-all three. The flattened table becomes generated output, not source.
+At `max_degree = 3` the compiler materializes the cells needed to stay within
+the constraint bound and derives the column layout, constraints, and witness
+fill together. The flattened table is generated output, not source. Recursion
+components must reach the same single-source property; Poseidon2 is not part of
+their manual migration inventory.
 
 ## Control flow: the calling convention is a LogUp relation
 
@@ -90,7 +97,7 @@ replaces sequencing. What remains per activation is exactly one natural tuple,
   callee's constraints are what make them right.
 - A recursive call is the same emission against the function's own relation:
   rows of one AIR consuming and emitting each other, telescoping exactly like
-  the recursion crate's `merkle_node` paths and `sponge_step` chains.
+  the recursion crate's `merkle_node` paths and transcript state relations.
 - The program's public interface is the entry activations: the verifier emits
   `+fn_io(inputs, outputs)` as public claim terms (the `RootClaim` pattern), and
   the whole multiset must cancel.
@@ -132,20 +139,20 @@ exactly what the compiler adds:
    observation it could in principle be _executed_ on a write-once-memory VM as
    well as compiled to the AIR.
 
-Step 1 hardens soundness today; step 2 removes the poseidon2 exception; step 3
-is the full language. Each step keeps the single-source invariant: AIR, witness,
-and (through the recursion recorder) the final proof all derive from the same
-definition.
+Degree-budget materialization, static control flow, and function-call relations
+are no longer hypothetical: `define_air_fns!` ships them (static
+`for`/`map`/`sum`, inline functions, auto-materialized s-box chains under
+`max_degree`, the `fn_io` activation relation, `embedded:` flag columns, and
+`embedded_component:` integration into the prover composition). Poseidon2 is
+defined through it in `air/src/poseidon2.rs`. The remaining compiler work is
+making opcode execution and recursion-local components expressible through the
+accepted macro DSL.
 
-Steps 2 and the function-call relation are no longer hypothetical:
-`define_air_fns!` ships them (static `for`/`map`/`sum`, inline functions,
-auto-materialized s-box chains under `max_degree`, the `fn_io` activation
-relation, `embedded:` flag columns, and `embedded_component:` integration into
-the prover composition). Poseidon2 is defined through it in
-`air/src/poseidon2.rs`. What remains is step 4 below: making the opcode AIRs —
-and therefore the runner — expressible in the same language.
+Every component reachable from the recursion roster must use `define_air!` or
+`define_air_fns!`. `define_component_tables!` plus a hand-written
+`FrameworkEval` is migration input, not an acceptable final component.
 
-## Step 4: migrating the opcode AIRs (the runner rewrite)
+## Migrating the opcode AIRs and runner
 
 Target state: one function per opcode family, whose body **is** simultaneously
 the executable semantics (the runner calls `call_lui` and gets the right
@@ -218,9 +225,9 @@ What `define_air_fns!` is missing for opcodes, in dependency order:
    and `runner/src/ops/upper.rs` (and friends) are deleted. The clock catch-up
    rows become activations of a generated `clock_gap` function, which retires
    the hand-written `air::clock::ClockGapTable` (its layout is pinned to the
-   generated columns by `crates/air/tests/clock_layout.rs` until then — we
-   deliberately did NOT extend `define_air!` with a push-by-`Access` table API,
-   because this step supersedes it).
+   generated columns by `crates/air/tests/clock_layout.rs` until then. A
+   push-by-`Access` API in `define_air!` would duplicate the witness-side access
+   resolution this step is intended to provide.
 
 3. **Witness hints.** ✅ _Implemented._ `hint name = expr;` declares a
    prover-chosen committed column, free in the AIR (the body constrains it with
@@ -249,9 +256,9 @@ The **integration seam is also in place**. `define_air!` now takes an
 external: { poseidon2: crate::poseidon2 }   // air/src/schema.rs
 ```
 
-Each entry generates the `Tracer` field, init, `total_traces`, debug, and column
-re-export that were previously **hardcoded** for poseidon2 — so the monolithic
-`Tracer` is now composable. poseidon2 (already a fn-DSL component wired through
+Each entry generates the `Tracer` field, initialization, `total_traces`, debug,
+and column re-export, so the monolithic `Tracer` is composable. Poseidon2 (a
+fn-DSL component wired through
 `components! { … poseidon2: air::poseidon2::component … }`) is the first entry,
 and the full e2e suite (a real prove+verify per opcode) passes through the
 generalized path. Migrating an opcode is now additive: define it via
@@ -272,9 +279,8 @@ needs prover-side stwo types the air crate does not depend on. But
 composition for poseidon2. The retirement path is therefore not "merge
 `components!` into `define_air!`" but:
 
-1. land steps 1–3 above and migrate one simple opcode (`lui`) end to end —
-   function in the air crate, generated component in the prover, handler deleted
-   from the runner;
+1. migrate one simple opcode (`lui`) end to end — function in the air crate,
+   generated component in the prover, handler deleted from the runner;
 2. migrate the remaining families one PR each (the LogUp balance is checked by
    the existing e2e constraint tests at every step);
 3. when the last family is out of `define_air!`'s opcode list, delete

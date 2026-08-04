@@ -1,5 +1,5 @@
 //! Operation recorder: compiles an inner AIR's `evaluate()` into an
-//! arithmetic-operation arena (docs/recursion.md, M5).
+//! arithmetic-operation arena.
 //!
 //! `Recorder` implements `EvalAtRow` with a handle field type, so running any
 //! component's `FrameworkEval::evaluate` — the same single-source code the

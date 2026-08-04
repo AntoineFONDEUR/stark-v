@@ -1,16 +1,16 @@
 //! R-type ALU operations.
 //!
 //! This file contains:
-//! - base_alu_reg family: add, sub, xor, or, and (airs.md Section 1)
-//! - shifts_reg family: sll, srl, sra (airs.md Section 3)
-//! - lt_reg family: slt, sltu (airs.md Section 5)
+//! - base_alu_reg family: add, sub, xor, or, and
+//! - shifts_reg family: sll, srl, sra
+//! - lt_reg family: slt, sltu
 
 use super::utils::{compute_lt_reg_witness, compute_shift_witness};
 use crate::trace::Tracer;
 use crate::{Cpu, DecodedInst};
 
 // =============================================================================
-// Base ALU Reg (add/sub/xor/or/and) - airs.md Section 1
+// Base ALU Reg (add/sub/xor/or/and)
 // =============================================================================
 
 pub fn add(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
@@ -69,7 +69,7 @@ pub fn and(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
 }
 
 // =============================================================================
-// Shifts Reg (sll/srl/sra) - airs.md Section 3
+// Shifts Reg (sll/srl/sra)
 // =============================================================================
 
 pub fn sll(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
@@ -145,7 +145,7 @@ pub fn sra(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
 }
 
 // =============================================================================
-// Less Than Reg (slt/sltu) - airs.md Section 5
+// Less Than Reg (slt/sltu)
 // =============================================================================
 
 pub fn slt(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {

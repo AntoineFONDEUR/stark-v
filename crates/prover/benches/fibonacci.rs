@@ -8,7 +8,7 @@
 //!
 //! Usage:
 //! ```bash
-//! cargo bench --package prover --bench fibonacci --features parallel
+//! cargo bench --release --package prover --bench fibonacci --features parallel
 //! ```
 
 use divan::counter::ItemsCount;

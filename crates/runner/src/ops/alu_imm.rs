@@ -1,9 +1,9 @@
 //! I-type ALU operations.
 //!
 //! This file contains:
-//! - base_alu_imm family: addi, xori, ori, andi (airs.md Section 2)
-//! - shifts_imm family: slli, srli, srai (airs.md Section 4)
-//! - lt_imm family: slti, sltiu (airs.md Section 6)
+//! - base_alu_imm family: addi, xori, ori, andi
+//! - shifts_imm family: slli, srli, srai
+//! - lt_imm family: slti, sltiu
 
 use super::utils::{compute_lt_imm_witness, compute_shift_witness};
 use crate::trace::Tracer;
@@ -24,7 +24,7 @@ pub(crate) fn decode_imm_limbs(imm: i32) -> (u32, u32, u32) {
 }
 
 // =============================================================================
-// Base ALU Imm (addi/xori/ori/andi) - airs.md Section 2
+// Base ALU Imm (addi/xori/ori/andi)
 // =============================================================================
 
 pub fn addi(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
@@ -88,7 +88,7 @@ pub fn andi(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
 }
 
 // =============================================================================
-// Shifts Imm (slli/srli/srai) - airs.md Section 4
+// Shifts Imm (slli/srli/srai)
 // =============================================================================
 
 pub fn slli(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
@@ -161,7 +161,7 @@ pub fn srai(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
 }
 
 // =============================================================================
-// Less Than Imm (slti/sltiu) - airs.md Section 6
+// Less Than Imm (slti/sltiu)
 // =============================================================================
 
 pub fn slti(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {

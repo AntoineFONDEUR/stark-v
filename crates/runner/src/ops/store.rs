@@ -1,4 +1,4 @@
-//! Store operations - part of load_store family (airs.md Section 13)
+//! Store operations - part of load_store family
 
 use super::utils::imm_to_felt;
 use crate::trace::Tracer;

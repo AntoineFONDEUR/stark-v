@@ -1076,43 +1076,6 @@ fn test_keccak_input_constraints_len_136_drawn_relations() {
     Components::assert_constraints_on_polys(&traces, &relations);
 }
 
-/// Segmented proving (docs/recursion.md, M2): split a run into bounded
-/// segments, prove each independently, and verify the chain — per-segment
-/// STARK verification plus boundary equality of (pc, registers, memory root).
-#[test_log::test]
-fn test_prove_verify_segmented_run() {
-    use prover::e2e::{ensure_guest_built, guest_bin_dir, prove_segments, verify_segments};
-    use runner::run_segments_with_input;
-
-    ensure_guest_built();
-
-    let elf_path = guest_bin_dir().join("mulhu_alias");
-    let elf_bytes = std::fs::read(&elf_path).expect("Failed to read mulhu_alias ELF");
-
-    // Size segments to split the run in half: a fixed tiny segment size would
-    // make as many proofs as there are segments and blow up the test runtime.
-    // The halves plus the forced boundary at the first output-region store
-    // (the output tail always gets its own final segment) give 3 segments.
-    let cycles = runner::run(&elf_bytes, 10_000_000)
-        .expect("Failed to run mulhu_alias")
-        .cycles;
-    let segment_cycles = u32::try_from(cycles / 2 + 1).expect("cycle count fits u32");
-    let segments = run_segments_with_input(&elf_bytes, &[], Some(segment_cycles), 10_000_000)
-        .expect("Failed to run mulhu_alias segmented");
-    assert_eq!(segments.len(), 3, "expected exactly 3 segments");
-
-    // Boundary invariants hold by construction on the runner side.
-    for pair in segments.windows(2) {
-        assert_eq!(pair[0].final_pc, pair[1].initial_pc);
-        assert_eq!(pair[0].final_regs, pair[1].initial_regs);
-    }
-
-    let preprocessing = prover::preprocess(PcsConfig::default());
-    let proofs = prove_segments(segments, PcsConfig::default(), &preprocessing);
-    verify_segments(proofs, PcsConfig::default(), &preprocessing)
-        .expect("segmented verification failed");
-}
-
 /// Output anchoring consumes each output word's access within the final
 /// segment's trace, so the runner must place the whole output tail there no
 /// matter where the cycle budget would have cut: the first output-region
@@ -1143,7 +1106,7 @@ macro_rules! output_tail_test {
 output_tail_test!(test_output_tail_lands_in_final_segment_split_5, 5);
 output_tail_test!(test_output_tail_lands_in_final_segment_split_7, 7);
 
-/// Full inner proof over the Poseidon2-M31 channel (docs/recursion.md, M4):
+/// Full VM proof over the Poseidon2-M31 channel:
 /// the entire stark-v pipeline — preprocessing, proving, verification —
 /// committed with the hash the recursion verifier AIR proves.
 #[test_log::test]

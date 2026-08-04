@@ -1,33 +1,84 @@
-//! Recursive verifier AIR components (docs/recursion.md, M3+).
+//! AIR components and protocol types for binary recursive proving.
 //!
-//! Building blocks for the native stwo AIR that verifies stark-v proofs.
-//! Tables, derived columns, and constraints are declared once through
-//! `define_component_tables!` — the same DSL as the opcode tables — keeping a
-//! single source of definition for the whole recursion stack.
+//! The crate defines one verifier circuit that accepts either a stark-v
+//! segment proof or two proofs produced by this same circuit. It does not yet
+//! expose a complete recursive prover or root-verifier API; `docs/recursion.md`
+//! tracks the remaining integration work.
+//!
+//! The live roster still contains hand-written `FrameworkEval` components
+//! backed by `define_component_tables!`. They are migration debt, not the
+//! accepted recursion architecture: every roster component must move to
+//! `define_air!` or `define_air_fns!` before integration continues.
 #![allow(clippy::too_many_arguments)] // generated table push takes one arg per column
 
-pub mod aggregate;
-pub mod aggregate_tree;
-pub mod binding;
-pub mod boundary;
-pub mod channel_replay;
-pub mod circle_double;
+pub mod air_expression_circuit;
+pub mod air_relation_parameters;
 pub mod circuit;
+pub mod control_air;
 mod dynamic_logup;
-pub mod final_proof;
-pub mod fri_fold;
+pub mod fri_merkle_air;
+pub mod fri_verifier_circuit;
+pub mod fri_verifier_control_air;
+pub mod fri_verifier_input_air;
+pub mod fri_verifier_lowering;
+pub mod kernel;
 pub mod linear_ops;
-pub mod logup_sum;
 pub mod merkle_path;
-pub mod node;
-pub mod openings;
-pub mod prover;
+pub mod merkle_root_air;
+pub mod oods_circuit;
+pub mod pcs_deep_circuit;
+pub mod pcs_deep_input_air;
+pub mod pcs_deep_lowering;
+pub mod pow;
+pub mod protocol;
 pub mod qm31_inv;
 pub mod qm31_mul;
+pub mod query_position_air;
 pub mod recorder;
+pub mod recursion_air_program;
+pub mod relation_challenge_air;
 pub mod relations;
+pub mod statement;
+pub mod statement_input_air;
+pub mod statement_semantics_circuit;
+pub mod statement_semantics_input_air;
+pub mod statement_semantics_lowering;
+pub mod trace_merkle_air;
 pub mod transcript;
-pub mod v2;
+pub mod transcript_air;
+pub mod transcript_binding_air;
+pub mod transcript_layout;
+pub mod transcript_payload_air;
+pub mod transcript_program;
+pub mod transcript_state_air;
+pub mod transcript_word_air;
+pub mod universal_relations;
+pub mod verifier_randomness_air;
+pub mod vm_air_composition_circuit;
+pub mod vm_air_composition_control_air;
+pub mod vm_air_composition_input_air;
+pub mod vm_air_composition_lowering;
+pub mod vm_air_program;
+pub mod vm_pcs_layout;
+pub mod vm_public_claim;
+pub mod vm_public_claim_hash_air;
+pub mod vm_public_claim_input_air;
+pub mod vm_public_claim_semantics_circuit;
+pub mod vm_public_claim_semantics_input_air;
+pub mod vm_public_claim_semantics_lowering;
+pub mod vm_public_io_hash_air;
+pub mod vm_public_logup_circuit;
+pub mod vm_public_logup_control_air;
+pub mod vm_public_logup_input_air;
+pub mod vm_public_logup_lowering;
+pub mod wire;
+
+#[cfg(test)]
+mod fri_verifier_binding_tests;
+#[cfg(test)]
+pub(crate) mod test_fixtures;
+#[cfg(test)]
+mod vm_leaf_binding_tests;
 
 // combine!/write_pair! are used by witness modules.
 #[macro_use]
@@ -73,81 +124,6 @@ define_component_tables! {
         },
     },
 
-    // FRI line fold: folded = (f(x) + f(-x)) + alpha * (f(x) - f(-x)) * x^-1,
-    // i.e. stwo's `ibutterfly` followed by the alpha combination. The odd
-    // part t = (f(x) - f(-x)) * x^-1 is a witness column so every constraint
-    // stays degree 2; x^-1 is bound to x by x * x_inv = enabler. f, alpha,
-    // t, and folded are QM31 values as 4 M31 limbs; x is a base-field domain
-    // coordinate.
-    fri_fold_line: {
-        committed: {
-            x, x_inv,
-            f_x_0, f_x_1, f_x_2, f_x_3,
-            f_neg_x_0, f_neg_x_1, f_neg_x_2, f_neg_x_3,
-            t_0, t_1, t_2, t_3,
-            alpha_0, alpha_1, alpha_2, alpha_3,
-            folded_0, folded_1, folded_2, folded_3,
-        },
-        constraints: {
-            // x_inv is the inverse of x on enabled rows
-            x * x_inv - enabler,
-            // t = (f(x) - f(-x)) * x_inv, limb-wise (x_inv is a base scalar)
-            (f_x_0 - f_neg_x_0) * x_inv - t_0,
-            (f_x_1 - f_neg_x_1) * x_inv - t_1,
-            (f_x_2 - f_neg_x_2) * x_inv - t_2,
-            (f_x_3 - f_neg_x_3) * x_inv - t_3,
-            // folded = (f(x) + f(-x)) + alpha * t, with alpha * t expanded
-            // over the extension tower exactly as in qm31_mul
-            f_x_0 + f_neg_x_0
-                + alpha_0 * t_0 - alpha_1 * t_1
-                + 2 * (alpha_2 * t_2 - alpha_3 * t_3) - (alpha_2 * t_3 + alpha_3 * t_2)
-                - folded_0,
-            f_x_1 + f_neg_x_1
-                + alpha_0 * t_1 + alpha_1 * t_0
-                + (alpha_2 * t_2 - alpha_3 * t_3) + 2 * (alpha_2 * t_3 + alpha_3 * t_2)
-                - folded_1,
-            f_x_2 + f_neg_x_2
-                + alpha_0 * t_2 - alpha_1 * t_3 + alpha_2 * t_0 - alpha_3 * t_1
-                - folded_2,
-            f_x_3 + f_neg_x_3
-                + alpha_0 * t_3 + alpha_1 * t_2 + alpha_2 * t_1 + alpha_3 * t_0
-                - folded_3,
-        },
-    },
-
-    // Circle point doubling over QM31: r = 2p on the unit circle
-    // x^2 + y^2 = 1, i.e. r_x = 2 p_x^2 - 1 and r_y = 2 p_x p_y. The squares
-    // and products expand over the extension tower exactly as in qm31_mul;
-    // the `- 1` lands on limb 0 as `- enabler` so padding rows hold.
-    circle_double: {
-        committed: {
-            p_x_0, p_x_1, p_x_2, p_x_3,
-            p_y_0, p_y_1, p_y_2, p_y_3,
-            r_x_0, r_x_1, r_x_2, r_x_3,
-            r_y_0, r_y_1, r_y_2, r_y_3,
-        },
-        constraints: {
-            // r_x = 2 * p_x^2 - 1
-            2 * (p_x_0 * p_x_0 - p_x_1 * p_x_1
-                    + 2 * (p_x_2 * p_x_2 - p_x_3 * p_x_3) - 2 * (p_x_2 * p_x_3))
-                - enabler - r_x_0,
-            2 * (2 * (p_x_0 * p_x_1)
-                    + (p_x_2 * p_x_2 - p_x_3 * p_x_3) + 4 * (p_x_2 * p_x_3))
-                - r_x_1,
-            2 * (2 * (p_x_0 * p_x_2) - 2 * (p_x_1 * p_x_3)) - r_x_2,
-            2 * (2 * (p_x_0 * p_x_3) + 2 * (p_x_1 * p_x_2)) - r_x_3,
-            // r_y = 2 * p_x * p_y
-            2 * (p_x_0 * p_y_0 - p_x_1 * p_y_1
-                    + 2 * (p_x_2 * p_y_2 - p_x_3 * p_y_3) - (p_x_2 * p_y_3 + p_x_3 * p_y_2))
-                - r_y_0,
-            2 * (p_x_0 * p_y_1 + p_x_1 * p_y_0
-                    + (p_x_2 * p_y_2 - p_x_3 * p_y_3) + 2 * (p_x_2 * p_y_3 + p_x_3 * p_y_2))
-                - r_y_1,
-            2 * (p_x_0 * p_y_2 - p_x_1 * p_y_3 + p_x_2 * p_y_0 - p_x_3 * p_y_1) - r_y_2,
-            2 * (p_x_0 * p_y_3 + p_x_1 * p_y_2 + p_x_2 * p_y_1 + p_x_3 * p_y_0) - r_y_3,
-        },
-    },
-
     // One Merkle hash step over 8-word digests: parent = permute(left || right)[..8].
     // The permutation itself is proven by the reused stark-v poseidon2
     // component; this table binds the complete 16-word input and 16-word
@@ -184,23 +160,6 @@ define_component_tables! {
         },
     },
 
-    // One sponge absorption step of a Fiat-Shamir channel replay: the
-    // permutation input is prev_state with the absorbed chunk added into the
-    // rate, and the (input, output) pair is bound atomically through the
-    // poseidon2_io relation; states chain through sponge_step and the
-    // absorbed data is anchored through sponge_data public claims. No hash
-    // constraint lives here.
-    channel_replay: {
-        committed: {
-            channel_id, step,
-            prev_0, prev_1, prev_2, prev_3, prev_4, prev_5, prev_6, prev_7,
-            prev_8, prev_9, prev_10, prev_11, prev_12, prev_13, prev_14, prev_15,
-            chunk_0, chunk_1, chunk_2, chunk_3, chunk_4, chunk_5, chunk_6, chunk_7,
-            out_0, out_1, out_2, out_3, out_4, out_5, out_6, out_7,
-            out_8, out_9, out_10, out_11, out_12, out_13, out_14, out_15,
-        },
-    },
-
     // Linear circuit nodes (composition-check lowering): add, sub, neg over
     // QM31 values, one node per row, wired through op_def and wire claims.
     // Mul/inverse nodes live in qm31_mul/qm31_inv; inputs, constants, and
@@ -225,17 +184,6 @@ define_component_tables! {
             is_add * (lhs_1 + rhs_1) + is_sub * (lhs_1 - rhs_1) - is_neg * lhs_1 - out_1,
             is_add * (lhs_2 + rhs_2) + is_sub * (lhs_2 - rhs_2) - is_neg * lhs_2 - out_2,
             is_add * (lhs_3 + rhs_3) + is_sub * (lhs_3 - rhs_3) - is_neg * lhs_3 - out_3,
-        },
-    },
-
-    // LogUp sum of inverses: each row contributes enabler / term to the
-    // component's claimed sum, the in-AIR form of the verifier's LogUp-sum
-    // check. The fraction lives in the interaction trace; this table only
-    // carries the term limbs (fraction emission is not a polynomial
-    // constraint, see logup_sum.rs).
-    logup_sum: {
-        committed: {
-            term_0, term_1, term_2, term_3,
         },
     },
 

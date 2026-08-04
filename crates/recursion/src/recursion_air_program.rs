@@ -205,8 +205,8 @@ impl EvalAtRow for MaskConsumptionRecorder {
 
 /// How one component's composition contribution is evaluated over wires.
 ///
-/// Every hand-written current protocol component compiles to a formal expression program
-/// once; the poseidon2 permutation nests its round expressions without shared
+/// Every standard protocol component compiles to a formal expression program
+/// once. The Poseidon2 permutation nests its round expressions without shared
 /// intermediates, which makes that forest exponential, so it is evaluated
 /// through its macro-generated dynamic-relation evaluator instead — the same
 /// seam the VM composition circuit uses.

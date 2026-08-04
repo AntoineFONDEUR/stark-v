@@ -27,11 +27,10 @@ fn to_pascal_case(s: &str) -> String {
 struct ComponentEntry {
     name: Ident,
     module: Path,
-    /// Bare entries get their whole component module (air + witness)
-    /// generated from the table's `define_trace_tables!` declaration;
-    /// `name: module` entries point at a hand-written module (the escape
-    /// hatch for AIRs the table DSL cannot express, e.g. the unrolled
-    /// Poseidon2 permutation rounds).
+    /// Bare entries get their whole component module (AIR + witness)
+    /// generated from the table's `define_air!` declaration.
+    /// `name: module` entries reuse a component generated through the AIR DSL
+    /// in its owning crate.
     generated: bool,
 }
 

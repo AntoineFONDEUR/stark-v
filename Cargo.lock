@@ -1492,6 +1492,7 @@ dependencies = [
  "stwo",
  "stwo-constraint-framework",
  "stwo-macros",
+ "syn 2.0.111",
 ]
 
 [[package]]

@@ -1,8 +1,8 @@
 //! Component system for tracer-backed and preprocessed AIR components.
 
-// Every bare entry's whole component module (air + witness) is generated
-// from its `define_trace_tables!` declaration; `name: module` entries point
-// at a hand-written or macro-generated module instead.
+// Every bare entry's whole component module (AIR + witness) is generated from
+// its `define_air!` table declaration. A `name: module` entry reuses a
+// component generated through the AIR DSL in its owning crate.
 stwo_macros::components! {
     trace: {
         auipc,

@@ -77,13 +77,15 @@ proof is accepted.
 
 AIR, witness generation, column layout, and interaction-trace registration must
 come from the macro DSL. New components use `define_air!` or `define_air_fns!`.
-Handwritten `FrameworkEval` components and standalone `define_component_tables!`
-declarations are not accepted for new work.
+Handwritten `FrameworkEval` components, standalone `define_component_tables!`
+declarations, and wrapper macros that conceal either pattern are not accepted.
 
-The recursion roster applies the stricter form of this rule: every component it
-uses, including recursion-local components, must be migrated to `define_air!` or
-`define_air_fns!` before recursion integration continues. That migration is
-tracked in `docs/roadmap.md`.
+Every AIR currently reachable from the recursion roster is authored directly
+through one of the two accepted macros, including the inner VM components. The
+structural guard in `crates/recursion/tests/air_dsl_guard.rs` pins both
+component rosters to their owning sources and rejects violations. Future
+components must extend that inventory and satisfy the same rule before joining
+either roster.
 
 ## Verification expectations
 

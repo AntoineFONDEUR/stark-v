@@ -2,11 +2,11 @@
 
 > **Status: partially implemented compiler roadmap.** `define_air_fns!`
 > implements static control flow, functions, hints, degree-budget
-> materialization, relation statements, and embedded components; Poseidon2 uses
-> it in production. Opcode execution still has separate runner handlers, and
-> recursion-local components still contain legacy table declarations and
-> hand-written evaluators. Both migrations remain planned work. Macro source and
-> tests are authoritative for implemented syntax.
+> materialization, relation statements, and embedded components. Poseidon2 and
+> every recursion-local AIR use it in production, while the other inner VM AIRs
+> use `define_air!`. Opcode execution still has separate runner handlers;
+> unifying executable semantics and AIR witness generation remains planned work.
+> Macro source and tests are authoritative for implemented syntax.
 
 ## The observation
 
@@ -74,9 +74,9 @@ fn sbox(x: felt) -> felt {
 
 At `max_degree = 3` the compiler materializes the cells needed to stay within
 the constraint bound and derives the column layout, constraints, and witness
-fill together. The flattened table is generated output, not source. Recursion
-components must reach the same single-source property; Poseidon2 is not part of
-their manual migration inventory.
+fill together. The flattened table is generated output, not source. Every
+recursion-reachable AIR has the same single-source property, enforced by
+`crates/recursion/tests/air_dsl_guard.rs`.
 
 ## Control flow: the calling convention is a LogUp relation
 
@@ -114,43 +114,23 @@ language makes the pattern first-class: `let c = cube(a)` in source compiles to
 a column `c`, an emission into `cube`'s relation, and a row in `cube`'s table —
 wiring, table layout, and witness fill all from one line.
 
-## Relation to the current DSL (incremental path)
+## Relation to the current DSL
 
-The expression DSL already has: single-assignment named intermediates
-(`derived:`), expansion-time constant folding (`pow2`, `inv`, integer subtrees),
-spec-shaped lookups, and the dual AIR/witness evaluation. What it lacks is
-exactly what the compiler adds:
+`define_air!` provides the table-schema path used by the inner VM roster. It
+generates the column layout, witness evaluation, constraints, lookups, and
+component integration from one declaration.
 
-1. **Degree-budget materialization** (smallest step, immediately useful): today
-   a derived column that would breach the bound must be manually split into a
-   real trace column (the div carry chain stayed at degree 2 only by careful
-   hand-shaping, and two pre-existing degree-4 groups in div shipped unnoticed
-   until the first real-row proof — see commit e55578ff). Let the macro compute
-   each expression's degree and either reject with "materialize this" or
-   auto-materialize. Auto-materialization changes the table layout, so the macro
-   must also emit the fill — which it can, since the fill is the same expression
-   evaluated concretely.
-2. **Static control flow**: `for` with constant bounds (unroll), `if` on
-   compile-time flags (select). This is enough to absorb poseidon2 and delete
-   the last hand-written component.
-3. **Functions/frames**: reusable sub-circuits with the Cairo frame rule — a
-   callee reads only its arguments, writes only its frame. At this point the
-   language is a real (if minimal) felt language, and per the opening
-   observation it could in principle be _executed_ on a write-once-memory VM as
-   well as compiled to the AIR.
+`define_air_fns!` provides the felt-function path: degree-budget
+materialization, static `for`/`map`/`sum`, inline functions and function I/O,
+hints, external relation statements, embedded flag columns, and embedded
+component integration. Poseidon2 and every recursion-local AIR use this path.
 
-Degree-budget materialization, static control flow, and function-call relations
-are no longer hypothetical: `define_air_fns!` ships them (static
-`for`/`map`/`sum`, inline functions, auto-materialized s-box chains under
-`max_degree`, the `fn_io` activation relation, `embedded:` flag columns, and
-`embedded_component:` integration into the prover composition). Poseidon2 is
-defined through it in `air/src/poseidon2.rs`. The remaining compiler work is
-making opcode execution and recursion-local components expressible through the
-accepted macro DSL.
-
-Every component reachable from the recursion roster must use `define_air!` or
-`define_air_fns!`. `define_component_tables!` plus a hand-written
-`FrameworkEval` is migration input, not an acceptable final component.
+The remaining compiler work is witness-side VM access plus opcode execution and
+runner migration. It is not a recursion-local macro migration. Every component
+reachable from the recursion roster is already authored directly through
+`define_air!` or `define_air_fns!`; the structural guard rejects a handwritten
+`FrameworkEval`, standalone `define_component_tables!`, or wrapper macro in an
+owner source.
 
 ## Migrating the opcode AIRs and runner
 

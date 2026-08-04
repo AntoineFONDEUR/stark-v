@@ -19,6 +19,7 @@ prover.workspace = true
 [dev-dependencies]
 rand.workspace = true
 rstest.workspace = true
+syn.workspace = true
 
 [features]
 parallel = ["prover/parallel"]

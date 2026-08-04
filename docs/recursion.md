@@ -26,6 +26,9 @@ proof.
 The implemented foundation includes:
 
 - a canonical protocol manifest and fixed-width proof wire;
+- one frozen protocol profile without a version suffix, derived from both
+  generated AIR rosters, with 193 FRI queries, 4 KiB public-input and
+  public-output capacities, and an exact 3,080,316-byte universal proof wire;
 - typed complete-execution, job, slot, executed-span, and empty-span statements;
 - a fixed verifier control plan shared by native transcript execution and AIR
   tables;

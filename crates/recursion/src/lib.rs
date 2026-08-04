@@ -29,6 +29,7 @@ pub mod pcs_deep_circuit;
 pub mod pcs_deep_input_air;
 pub mod pcs_deep_lowering;
 pub mod pow;
+pub mod profile;
 pub mod protocol;
 pub mod qm31_inv;
 pub mod qm31_mul;

@@ -297,9 +297,8 @@ pub fn define_air(input: TokenStream) -> TokenStream {
 
             #![allow(non_camel_case_types)]
 
-            #[cfg(debug_assertions)]
-            pub const INTERACTION_POW_BITS: u32 = 1;
-            #[cfg(not(debug_assertions))]
+            // The interaction transcript is part of the proof protocol, so its
+            // grinding difficulty cannot depend on the compiler optimization profile.
             pub const INTERACTION_POW_BITS: u32 = 10;
 
             #relations_tokens

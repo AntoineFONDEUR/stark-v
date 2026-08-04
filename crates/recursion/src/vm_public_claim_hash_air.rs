@@ -11,7 +11,6 @@ use core::fmt;
 use air::digest::M31Word;
 use air::poseidon2::{T, poseidon2_traced_state};
 use air::trace::Poseidon2Table;
-use num_traits::One;
 use prover::public_data::PublicData;
 use prover::relations::Relations;
 use simd::AlignedVec;
@@ -22,15 +21,10 @@ use stwo::core::fields::qm31::QM31;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::simd::column::BaseColumn;
-use stwo::prover::backend::simd::m31::PackedM31;
-use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, RelationEntry, relation,
-};
-use stwo_macros::define_component_tables;
+use stwo_constraint_framework::relation;
 
 use super::control_air::SEGMENT_VERIFIER_ID;
 use super::transcript_payload_air::{VerifierInputKind, VerifierInputRelations};
@@ -52,57 +46,6 @@ const LAST_MASK_COLUMN: usize = 3;
 const CHUNK_COLUMNS_START: usize = 4;
 const CHUNK_COLUMNS_PER_WORD: usize = 3;
 const PREPROCESSED_COLUMN_COUNT: usize = CHUNK_COLUMNS_START + RATE * CHUNK_COLUMNS_PER_WORD;
-
-const PREPROCESSED_COLUMN_IDS: [&str; PREPROCESSED_COLUMN_COUNT] = [
-    "recursion_vm_claim_hash_row_mask",
-    "recursion_vm_claim_hash_step",
-    "recursion_vm_claim_hash_first_mask",
-    "recursion_vm_claim_hash_last_mask",
-    "recursion_vm_claim_hash_chunk_0_source_mask",
-    "recursion_vm_claim_hash_chunk_0_word_index",
-    "recursion_vm_claim_hash_chunk_0_constant",
-    "recursion_vm_claim_hash_chunk_1_source_mask",
-    "recursion_vm_claim_hash_chunk_1_word_index",
-    "recursion_vm_claim_hash_chunk_1_constant",
-    "recursion_vm_claim_hash_chunk_2_source_mask",
-    "recursion_vm_claim_hash_chunk_2_word_index",
-    "recursion_vm_claim_hash_chunk_2_constant",
-    "recursion_vm_claim_hash_chunk_3_source_mask",
-    "recursion_vm_claim_hash_chunk_3_word_index",
-    "recursion_vm_claim_hash_chunk_3_constant",
-    "recursion_vm_claim_hash_chunk_4_source_mask",
-    "recursion_vm_claim_hash_chunk_4_word_index",
-    "recursion_vm_claim_hash_chunk_4_constant",
-    "recursion_vm_claim_hash_chunk_5_source_mask",
-    "recursion_vm_claim_hash_chunk_5_word_index",
-    "recursion_vm_claim_hash_chunk_5_constant",
-    "recursion_vm_claim_hash_chunk_6_source_mask",
-    "recursion_vm_claim_hash_chunk_6_word_index",
-    "recursion_vm_claim_hash_chunk_6_constant",
-    "recursion_vm_claim_hash_chunk_7_source_mask",
-    "recursion_vm_claim_hash_chunk_7_word_index",
-    "recursion_vm_claim_hash_chunk_7_constant",
-];
-
-define_component_tables! {
-    vm_public_claim_hash: {
-        committed: {
-            previous_0, previous_1, previous_2, previous_3,
-            previous_4, previous_5, previous_6, previous_7,
-            previous_8, previous_9, previous_10, previous_11,
-            previous_12, previous_13, previous_14, previous_15,
-            chunk_0, chunk_1, chunk_2, chunk_3,
-            chunk_4, chunk_5, chunk_6, chunk_7,
-            output_0, output_1, output_2, output_3,
-            output_4, output_5, output_6, output_7,
-            output_8, output_9, output_10, output_11,
-            output_12, output_13, output_14, output_15,
-        },
-        constraints: {},
-    },
-}
-
-use prover_columns::VmPublicClaimHashColumns;
 
 // Internal state tuple: fixed step and the complete 16-word state.
 relation!(VmPublicClaimHashStateRelation, 17);
@@ -211,10 +154,7 @@ impl VmPublicClaimHashPreprocessed {
     }
 
     pub fn column_ids() -> Vec<PreProcessedColumnId> {
-        PREPROCESSED_COLUMN_IDS
-            .iter()
-            .map(|id| PreProcessedColumnId { id: (*id).into() })
-            .collect()
+        preprocessed_column_ids()
     }
 
     pub fn gen_columns(
@@ -256,199 +196,287 @@ const fn chunk_column(slot: usize) -> usize {
     CHUNK_COLUMNS_START + slot * CHUNK_COLUMNS_PER_WORD
 }
 
-pub type Component = FrameworkComponent<Eval>;
-
+/// Relation instances used by the macro-generated public-claim hash component.
 #[derive(Clone)]
-pub struct Eval {
-    pub log_size: u32,
-    pub proof_kind: ProofKind,
-    pub vm_relations: Relations,
-    pub claim_input_relations: VmPublicClaimInputRelations,
-    pub hash_relations: VmPublicClaimHashRelations,
-    pub verifier_input_relations: VerifierInputRelations,
+pub struct VmPublicClaimHashComponentRelations {
+    pub poseidon2_io: air::relations::relation_types::poseidon2_io,
+    pub claim_word: super::vm_public_claim_input_air::VmPublicClaimWordRelation,
+    pub state: VmPublicClaimHashStateRelation,
+    pub input_word: super::transcript_payload_air::VerifierInputWordRelation,
 }
 
-impl FrameworkEval for Eval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
-
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
-
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = VmPublicClaimHashColumns::from_eval(&mut eval);
-        let ids = VmPublicClaimHashPreprocessed::column_ids();
-        let row_mask = eval.get_preprocessed_column(ids[ROW_MASK_COLUMN].clone());
-        let step = eval.get_preprocessed_column(ids[STEP_COLUMN].clone());
-        let first = eval.get_preprocessed_column(ids[FIRST_MASK_COLUMN].clone());
-        let last = eval.get_preprocessed_column(ids[LAST_MASK_COLUMN].clone());
-        let chunk_metadata: [(E::F, E::F, E::F); RATE] = core::array::from_fn(|slot| {
-            let start = chunk_column(slot);
-            (
-                eval.get_preprocessed_column(ids[start].clone()),
-                eval.get_preprocessed_column(ids[start + 1].clone()),
-                eval.get_preprocessed_column(ids[start + 2].clone()),
-            )
-        });
-        let previous = previous_columns(&cols);
-        let chunks = chunk_columns(&cols);
-        let output = output_columns(&cols);
-        let one = E::F::from(BaseField::from(1));
-        let segment = E::F::from(BaseField::from(u32::from(
-            self.proof_kind == ProofKind::SegmentLeaf,
-        )));
-        let active = row_mask * segment;
-        eval.add_constraint(cols.enabler.clone() - active.clone());
-        for value in previous.iter().chain(&chunks).chain(&output) {
-            eval.add_constraint((one.clone() - active.clone()) * value.clone());
+impl VmPublicClaimHashComponentRelations {
+    /// Combine the VM-wide and recursion-local relations touched by the hash.
+    pub fn new(
+        vm_relations: &Relations,
+        claim_input_relations: &VmPublicClaimInputRelations,
+        hash_relations: &VmPublicClaimHashRelations,
+        verifier_input_relations: &VerifierInputRelations,
+    ) -> Self {
+        Self {
+            poseidon2_io: vm_relations.poseidon2_io.clone(),
+            claim_word: claim_input_relations.claim_word.clone(),
+            state: hash_relations.state.clone(),
+            input_word: verifier_input_relations.input_word.clone(),
         }
-
-        for (index, value) in previous.iter().enumerate() {
-            let initial = if index + 1 == T {
-                VM_PUBLIC_CLAIM_HASH_DOMAIN
-            } else {
-                0
-            };
-            eval.add_constraint(
-                active.clone()
-                    * first.clone()
-                    * (value.clone() - E::F::from(BaseField::from(initial))),
-            );
-        }
-
-        let mut poseidon_tuple = Vec::with_capacity(2 * T);
-        for (index, value) in previous.iter().enumerate() {
-            poseidon_tuple.push(if index < RATE {
-                value.clone() + chunks[index].clone()
-            } else {
-                value.clone()
-            });
-        }
-        poseidon_tuple.extend(output.iter().cloned());
-        for (slot, chunk) in chunks.iter().enumerate() {
-            let (source_mask, _, constant) = &chunk_metadata[slot];
-            eval.add_constraint(
-                active.clone()
-                    * (one.clone() - source_mask.clone())
-                    * (chunk.clone() - constant.clone()),
-            );
-        }
-
-        eval.add_to_relation(RelationEntry::new(
-            &self.vm_relations.poseidon2_io,
-            -E::EF::from(active.clone()),
-            &poseidon_tuple,
-        ));
-
-        for (slot, chunk) in chunks.iter().enumerate() {
-            let (source_mask, word_index, _) = &chunk_metadata[slot];
-            eval.add_to_relation(RelationEntry::new(
-                &self.claim_input_relations.claim_word,
-                -E::EF::from(active.clone() * source_mask.clone()),
-                &[
-                    E::F::from(BaseField::from(VM_CLAIM_HASH_SCOPE)),
-                    word_index.clone(),
-                    chunk.clone(),
-                ],
-            ));
-        }
-
-        let mut previous_tuple = vec![step.clone()];
-        previous_tuple.extend(previous.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.hash_relations.state,
-            -E::EF::from(active.clone() * (one.clone() - first)),
-            &previous_tuple,
-        ));
-        let mut output_tuple = vec![step + one.clone()];
-        output_tuple.extend(output.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.hash_relations.state,
-            E::EF::from(active.clone() * (one.clone() - last.clone())),
-            &output_tuple,
-        ));
-
-        for (limb, digest_word) in output[..RATE].iter().enumerate() {
-            eval.add_to_relation(RelationEntry::new(
-                &self.verifier_input_relations.input_word,
-                -E::EF::from(active.clone() * last.clone()),
-                &[
-                    E::F::from(BaseField::from(SEGMENT_VERIFIER_ID)),
-                    E::F::from(BaseField::from(
-                        VerifierInputKind::VmPublicClaimDigest.as_u32(),
-                    )),
-                    E::F::from(BaseField::from(0)),
-                    E::F::from(BaseField::from(
-                        u32::try_from(limb).expect("digest limb fits u32"),
-                    )),
-                    digest_word.clone(),
-                ],
-            ));
-        }
-
-        eval.finalize_logup_in_pairs();
-        eval
     }
 }
 
-fn previous_columns<F: Clone>(cols: &VmPublicClaimHashColumns<F>) -> [F; T] {
-    [
-        cols.previous_0.clone(),
-        cols.previous_1.clone(),
-        cols.previous_2.clone(),
-        cols.previous_3.clone(),
-        cols.previous_4.clone(),
-        cols.previous_5.clone(),
-        cols.previous_6.clone(),
-        cols.previous_7.clone(),
-        cols.previous_8.clone(),
-        cols.previous_9.clone(),
-        cols.previous_10.clone(),
-        cols.previous_11.clone(),
-        cols.previous_12.clone(),
-        cols.previous_13.clone(),
-        cols.previous_14.clone(),
-        cols.previous_15.clone(),
-    ]
+stwo_macros::define_air_fns! {
+    max_degree: 3,
+    embedded: [],
+    embedded_component: true,
+    embedded_enabler_boolean: false,
+    embedded_relations:
+        crate::vm_public_claim_hash_air::VmPublicClaimHashComponentRelations,
+    logup_batch: 2,
+    embedded_preprocessed: {
+        row_mask: "recursion_vm_claim_hash_row_mask",
+        step: "recursion_vm_claim_hash_step",
+        first: "recursion_vm_claim_hash_first_mask",
+        last: "recursion_vm_claim_hash_last_mask",
+        chunk_0_source_mask: "recursion_vm_claim_hash_chunk_0_source_mask",
+        chunk_0_word_index: "recursion_vm_claim_hash_chunk_0_word_index",
+        chunk_0_constant: "recursion_vm_claim_hash_chunk_0_constant",
+        chunk_1_source_mask: "recursion_vm_claim_hash_chunk_1_source_mask",
+        chunk_1_word_index: "recursion_vm_claim_hash_chunk_1_word_index",
+        chunk_1_constant: "recursion_vm_claim_hash_chunk_1_constant",
+        chunk_2_source_mask: "recursion_vm_claim_hash_chunk_2_source_mask",
+        chunk_2_word_index: "recursion_vm_claim_hash_chunk_2_word_index",
+        chunk_2_constant: "recursion_vm_claim_hash_chunk_2_constant",
+        chunk_3_source_mask: "recursion_vm_claim_hash_chunk_3_source_mask",
+        chunk_3_word_index: "recursion_vm_claim_hash_chunk_3_word_index",
+        chunk_3_constant: "recursion_vm_claim_hash_chunk_3_constant",
+        chunk_4_source_mask: "recursion_vm_claim_hash_chunk_4_source_mask",
+        chunk_4_word_index: "recursion_vm_claim_hash_chunk_4_word_index",
+        chunk_4_constant: "recursion_vm_claim_hash_chunk_4_constant",
+        chunk_5_source_mask: "recursion_vm_claim_hash_chunk_5_source_mask",
+        chunk_5_word_index: "recursion_vm_claim_hash_chunk_5_word_index",
+        chunk_5_constant: "recursion_vm_claim_hash_chunk_5_constant",
+        chunk_6_source_mask: "recursion_vm_claim_hash_chunk_6_source_mask",
+        chunk_6_word_index: "recursion_vm_claim_hash_chunk_6_word_index",
+        chunk_6_constant: "recursion_vm_claim_hash_chunk_6_constant",
+        chunk_7_source_mask: "recursion_vm_claim_hash_chunk_7_source_mask",
+        chunk_7_word_index: "recursion_vm_claim_hash_chunk_7_word_index",
+        chunk_7_constant: "recursion_vm_claim_hash_chunk_7_constant",
+    },
+    embedded_params: [
+        segment_active, hash_domain, hash_scope, verifier_id, verifier_input_kind,
+    ],
+
+    relation poseidon2_io(32);
+    relation claim_word(3);
+    relation state(17);
+    relation input_word(5);
+
+    fn vm_public_claim_hash(
+        previous_0, previous_1, previous_2, previous_3,
+        previous_4, previous_5, previous_6, previous_7,
+        previous_8, previous_9, previous_10, previous_11,
+        previous_12, previous_13, previous_14, previous_15,
+        chunk_0, chunk_1, chunk_2, chunk_3,
+        chunk_4, chunk_5, chunk_6, chunk_7,
+        output_0, output_1, output_2, output_3,
+        output_4, output_5, output_6, output_7,
+        output_8, output_9, output_10, output_11,
+        output_12, output_13, output_14, output_15,
+        row_mask, step, first, last,
+        chunk_0_source_mask, chunk_0_word_index, chunk_0_constant,
+        chunk_1_source_mask, chunk_1_word_index, chunk_1_constant,
+        chunk_2_source_mask, chunk_2_word_index, chunk_2_constant,
+        chunk_3_source_mask, chunk_3_word_index, chunk_3_constant,
+        chunk_4_source_mask, chunk_4_word_index, chunk_4_constant,
+        chunk_5_source_mask, chunk_5_word_index, chunk_5_constant,
+        chunk_6_source_mask, chunk_6_word_index, chunk_6_constant,
+        chunk_7_source_mask, chunk_7_word_index, chunk_7_constant,
+        segment_active, hash_domain, hash_scope, verifier_id, verifier_input_kind,
+    ) {
+        let active = row_mask * segment_active;
+
+        constrain enabler - active;
+        constrain (1 - active) * previous_0;
+        constrain (1 - active) * previous_1;
+        constrain (1 - active) * previous_2;
+        constrain (1 - active) * previous_3;
+        constrain (1 - active) * previous_4;
+        constrain (1 - active) * previous_5;
+        constrain (1 - active) * previous_6;
+        constrain (1 - active) * previous_7;
+        constrain (1 - active) * previous_8;
+        constrain (1 - active) * previous_9;
+        constrain (1 - active) * previous_10;
+        constrain (1 - active) * previous_11;
+        constrain (1 - active) * previous_12;
+        constrain (1 - active) * previous_13;
+        constrain (1 - active) * previous_14;
+        constrain (1 - active) * previous_15;
+        constrain (1 - active) * chunk_0;
+        constrain (1 - active) * chunk_1;
+        constrain (1 - active) * chunk_2;
+        constrain (1 - active) * chunk_3;
+        constrain (1 - active) * chunk_4;
+        constrain (1 - active) * chunk_5;
+        constrain (1 - active) * chunk_6;
+        constrain (1 - active) * chunk_7;
+        constrain (1 - active) * output_0;
+        constrain (1 - active) * output_1;
+        constrain (1 - active) * output_2;
+        constrain (1 - active) * output_3;
+        constrain (1 - active) * output_4;
+        constrain (1 - active) * output_5;
+        constrain (1 - active) * output_6;
+        constrain (1 - active) * output_7;
+        constrain (1 - active) * output_8;
+        constrain (1 - active) * output_9;
+        constrain (1 - active) * output_10;
+        constrain (1 - active) * output_11;
+        constrain (1 - active) * output_12;
+        constrain (1 - active) * output_13;
+        constrain (1 - active) * output_14;
+        constrain (1 - active) * output_15;
+
+        constrain segment_active * first * previous_0;
+        constrain segment_active * first * previous_1;
+        constrain segment_active * first * previous_2;
+        constrain segment_active * first * previous_3;
+        constrain segment_active * first * previous_4;
+        constrain segment_active * first * previous_5;
+        constrain segment_active * first * previous_6;
+        constrain segment_active * first * previous_7;
+        constrain segment_active * first * previous_8;
+        constrain segment_active * first * previous_9;
+        constrain segment_active * first * previous_10;
+        constrain segment_active * first * previous_11;
+        constrain segment_active * first * previous_12;
+        constrain segment_active * first * previous_13;
+        constrain segment_active * first * previous_14;
+        constrain segment_active * first * (previous_15 - hash_domain);
+
+        // Trusted source masks are subsets of the row mask, so their
+        // difference selects exactly the fixed padding constants.
+        constrain segment_active * (row_mask - chunk_0_source_mask) * (chunk_0 - chunk_0_constant);
+        constrain segment_active * (row_mask - chunk_1_source_mask) * (chunk_1 - chunk_1_constant);
+        constrain segment_active * (row_mask - chunk_2_source_mask) * (chunk_2 - chunk_2_constant);
+        constrain segment_active * (row_mask - chunk_3_source_mask) * (chunk_3 - chunk_3_constant);
+        constrain segment_active * (row_mask - chunk_4_source_mask) * (chunk_4 - chunk_4_constant);
+        constrain segment_active * (row_mask - chunk_5_source_mask) * (chunk_5 - chunk_5_constant);
+        constrain segment_active * (row_mask - chunk_6_source_mask) * (chunk_6 - chunk_6_constant);
+        constrain segment_active * (row_mask - chunk_7_source_mask) * (chunk_7 - chunk_7_constant);
+
+        consume(active) poseidon2_io(
+            previous_0 + chunk_0,
+            previous_1 + chunk_1,
+            previous_2 + chunk_2,
+            previous_3 + chunk_3,
+            previous_4 + chunk_4,
+            previous_5 + chunk_5,
+            previous_6 + chunk_6,
+            previous_7 + chunk_7,
+            previous_8, previous_9, previous_10, previous_11,
+            previous_12, previous_13, previous_14, previous_15,
+            output_0, output_1, output_2, output_3,
+            output_4, output_5, output_6, output_7,
+            output_8, output_9, output_10, output_11,
+            output_12, output_13, output_14, output_15,
+        );
+        consume(segment_active * chunk_0_source_mask) claim_word(
+            hash_scope, chunk_0_word_index, chunk_0,
+        );
+        consume(segment_active * chunk_1_source_mask) claim_word(
+            hash_scope, chunk_1_word_index, chunk_1,
+        );
+        consume(segment_active * chunk_2_source_mask) claim_word(
+            hash_scope, chunk_2_word_index, chunk_2,
+        );
+        consume(segment_active * chunk_3_source_mask) claim_word(
+            hash_scope, chunk_3_word_index, chunk_3,
+        );
+        consume(segment_active * chunk_4_source_mask) claim_word(
+            hash_scope, chunk_4_word_index, chunk_4,
+        );
+        consume(segment_active * chunk_5_source_mask) claim_word(
+            hash_scope, chunk_5_word_index, chunk_5,
+        );
+        consume(segment_active * chunk_6_source_mask) claim_word(
+            hash_scope, chunk_6_word_index, chunk_6,
+        );
+        consume(segment_active * chunk_7_source_mask) claim_word(
+            hash_scope, chunk_7_word_index, chunk_7,
+        );
+        consume(segment_active * (row_mask - first)) state(
+            step,
+            previous_0, previous_1, previous_2, previous_3,
+            previous_4, previous_5, previous_6, previous_7,
+            previous_8, previous_9, previous_10, previous_11,
+            previous_12, previous_13, previous_14, previous_15,
+        );
+        emit(segment_active * (row_mask - last)) state(
+            step + 1,
+            output_0, output_1, output_2, output_3,
+            output_4, output_5, output_6, output_7,
+            output_8, output_9, output_10, output_11,
+            output_12, output_13, output_14, output_15,
+        );
+        consume(segment_active * last) input_word(
+            verifier_id, verifier_input_kind, 0, 0, output_0,
+        );
+        consume(segment_active * last) input_word(
+            verifier_id, verifier_input_kind, 0, 1, output_1,
+        );
+        consume(segment_active * last) input_word(
+            verifier_id, verifier_input_kind, 0, 2, output_2,
+        );
+        consume(segment_active * last) input_word(
+            verifier_id, verifier_input_kind, 0, 3, output_3,
+        );
+        consume(segment_active * last) input_word(
+            verifier_id, verifier_input_kind, 0, 4, output_4,
+        );
+        consume(segment_active * last) input_word(
+            verifier_id, verifier_input_kind, 0, 5, output_5,
+        );
+        consume(segment_active * last) input_word(
+            verifier_id, verifier_input_kind, 0, 6, output_6,
+        );
+        consume(segment_active * last) input_word(
+            verifier_id, verifier_input_kind, 0, 7, output_7,
+        );
+
+        return (
+            output_0, output_1, output_2, output_3,
+            output_4, output_5, output_6, output_7,
+        );
+    }
 }
 
-fn chunk_columns<F: Clone>(cols: &VmPublicClaimHashColumns<F>) -> [F; RATE] {
-    [
-        cols.chunk_0.clone(),
-        cols.chunk_1.clone(),
-        cols.chunk_2.clone(),
-        cols.chunk_3.clone(),
-        cols.chunk_4.clone(),
-        cols.chunk_5.clone(),
-        cols.chunk_6.clone(),
-        cols.chunk_7.clone(),
-    ]
+pub use component::air::{Component, Eval};
+
+/// Construct the generated evaluator for the selected universal proof kind.
+pub fn eval_for_proof_kind(
+    log_size: u32,
+    proof_kind: ProofKind,
+    vm_relations: &Relations,
+    claim_input_relations: &VmPublicClaimInputRelations,
+    hash_relations: &VmPublicClaimHashRelations,
+    verifier_input_relations: &VerifierInputRelations,
+) -> Eval {
+    Eval {
+        log_size,
+        segment_active: BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        hash_domain: BaseField::from(VM_PUBLIC_CLAIM_HASH_DOMAIN),
+        hash_scope: BaseField::from(VM_CLAIM_HASH_SCOPE),
+        verifier_id: BaseField::from(SEGMENT_VERIFIER_ID),
+        verifier_input_kind: BaseField::from(VerifierInputKind::VmPublicClaimDigest.as_u32()),
+        relations: VmPublicClaimHashComponentRelations::new(
+            vm_relations,
+            claim_input_relations,
+            hash_relations,
+            verifier_input_relations,
+        ),
+    }
 }
 
-fn output_columns<F: Clone>(cols: &VmPublicClaimHashColumns<F>) -> [F; T] {
-    [
-        cols.output_0.clone(),
-        cols.output_1.clone(),
-        cols.output_2.clone(),
-        cols.output_3.clone(),
-        cols.output_4.clone(),
-        cols.output_5.clone(),
-        cols.output_6.clone(),
-        cols.output_7.clone(),
-        cols.output_8.clone(),
-        cols.output_9.clone(),
-        cols.output_10.clone(),
-        cols.output_11.clone(),
-        cols.output_12.clone(),
-        cols.output_13.clone(),
-        cols.output_14.clone(),
-        cols.output_15.clone(),
-    ]
-}
-
-/// Generates the hash, claim-word, state-chain, and transcript-digest fractions.
+/// Generate hash, claim-word, state-chain, and transcript-digest fractions.
 #[allow(clippy::too_many_arguments)]
 pub fn gen_interaction_trace(
     trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
@@ -462,274 +490,21 @@ pub fn gen_interaction_trace(
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     QM31,
 ) {
-    let cols =
-        VmPublicClaimHashColumns::from_iter(trace.iter().map(|evaluation| &evaluation.values.data));
-    let pp = preprocessed
-        .iter()
-        .map(|column| &column.values.data)
-        .collect::<Vec<_>>();
-    let simd_size = cols.enabler.len();
-    let log_size = trace[0].domain.log_size();
-    let segment = BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf));
-    let active = (0..simd_size)
-        .map(|row| PackedQM31::from(pp[ROW_MASK_COLUMN][row] * segment))
-        .collect::<Vec<_>>();
-    let negative_active = active.iter().map(|value| -*value).collect::<Vec<_>>();
-    let first = (0..simd_size)
-        .map(|row| PackedQM31::from(pp[FIRST_MASK_COLUMN][row]))
-        .collect::<Vec<_>>();
-    let last = (0..simd_size)
-        .map(|row| PackedQM31::from(pp[LAST_MASK_COLUMN][row]))
-        .collect::<Vec<_>>();
-    let not_first = active
-        .iter()
-        .zip(&first)
-        .map(|(active, first)| -*active * (PackedQM31::one() - *first))
-        .collect::<Vec<_>>();
-    let not_last = active
-        .iter()
-        .zip(&last)
-        .map(|(active, last)| *active * (PackedQM31::one() - *last))
-        .collect::<Vec<_>>();
-    let digest_multiplicity = active
-        .iter()
-        .zip(&last)
-        .map(|(active, last)| -*active * *last)
-        .collect::<Vec<_>>();
-
-    let in_rate = [
-        add_columns(cols.previous_0, cols.chunk_0),
-        add_columns(cols.previous_1, cols.chunk_1),
-        add_columns(cols.previous_2, cols.chunk_2),
-        add_columns(cols.previous_3, cols.chunk_3),
-        add_columns(cols.previous_4, cols.chunk_4),
-        add_columns(cols.previous_5, cols.chunk_5),
-        add_columns(cols.previous_6, cols.chunk_6),
-        add_columns(cols.previous_7, cols.chunk_7),
-    ];
-    let poseidon_denom = combine!(
-        vm_relations.poseidon2_io,
-        [
-            &in_rate[0],
-            &in_rate[1],
-            &in_rate[2],
-            &in_rate[3],
-            &in_rate[4],
-            &in_rate[5],
-            &in_rate[6],
-            &in_rate[7],
-            cols.previous_8,
-            cols.previous_9,
-            cols.previous_10,
-            cols.previous_11,
-            cols.previous_12,
-            cols.previous_13,
-            cols.previous_14,
-            cols.previous_15,
-            cols.output_0,
-            cols.output_1,
-            cols.output_2,
-            cols.output_3,
-            cols.output_4,
-            cols.output_5,
-            cols.output_6,
-            cols.output_7,
-            cols.output_8,
-            cols.output_9,
-            cols.output_10,
-            cols.output_11,
-            cols.output_12,
-            cols.output_13,
-            cols.output_14,
-            cols.output_15
-        ]
-    );
-
-    let hash_scope = vec![PackedM31::broadcast(BaseField::from(VM_CLAIM_HASH_SCOPE)); simd_size];
-    let chunk_values = [
-        cols.chunk_0,
-        cols.chunk_1,
-        cols.chunk_2,
-        cols.chunk_3,
-        cols.chunk_4,
-        cols.chunk_5,
-        cols.chunk_6,
-        cols.chunk_7,
-    ];
-    let chunk_multiplicities = (0..RATE)
-        .map(|slot| {
-            (0..simd_size)
-                .map(|row| -active[row] * PackedQM31::from(pp[chunk_column(slot)][row]))
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    let chunk_denoms = (0..RATE)
-        .map(|slot| {
-            combine!(
-                claim_input_relations.claim_word,
-                [&hash_scope, pp[chunk_column(slot) + 1], chunk_values[slot]]
-            )
-        })
-        .collect::<Vec<_>>();
-
-    let one = PackedM31::broadcast(BaseField::from(1));
-    let step_plus_one = (0..simd_size)
-        .map(|row| pp[STEP_COLUMN][row] + one)
-        .collect::<Vec<_>>();
-    let previous_denom = combine!(
-        hash_relations.state,
-        [
-            pp[STEP_COLUMN],
-            cols.previous_0,
-            cols.previous_1,
-            cols.previous_2,
-            cols.previous_3,
-            cols.previous_4,
-            cols.previous_5,
-            cols.previous_6,
-            cols.previous_7,
-            cols.previous_8,
-            cols.previous_9,
-            cols.previous_10,
-            cols.previous_11,
-            cols.previous_12,
-            cols.previous_13,
-            cols.previous_14,
-            cols.previous_15
-        ]
-    );
-    let output_denom = combine!(
-        hash_relations.state,
-        [
-            &step_plus_one,
-            cols.output_0,
-            cols.output_1,
-            cols.output_2,
-            cols.output_3,
-            cols.output_4,
-            cols.output_5,
-            cols.output_6,
-            cols.output_7,
-            cols.output_8,
-            cols.output_9,
-            cols.output_10,
-            cols.output_11,
-            cols.output_12,
-            cols.output_13,
-            cols.output_14,
-            cols.output_15
-        ]
-    );
-
-    let verifier_id = vec![PackedM31::broadcast(BaseField::from(SEGMENT_VERIFIER_ID)); simd_size];
-    let input_kind = vec![
-        PackedM31::broadcast(BaseField::from(
-            VerifierInputKind::VmPublicClaimDigest.as_u32(),
-        ));
-        simd_size
-    ];
-    let zero = vec![PackedM31::broadcast(BaseField::from(0)); simd_size];
-    let digest_values = [
-        cols.output_0,
-        cols.output_1,
-        cols.output_2,
-        cols.output_3,
-        cols.output_4,
-        cols.output_5,
-        cols.output_6,
-        cols.output_7,
-    ];
-    let digest_denoms = (0..RATE)
-        .map(|limb| {
-            let limb_index = vec![
-                PackedM31::broadcast(BaseField::from(
-                    u32::try_from(limb).expect("digest limb fits u32"),
-                ));
-                simd_size
-            ];
-            combine!(
-                verifier_input_relations.input_word,
-                [
-                    &verifier_id,
-                    &input_kind,
-                    &zero,
-                    limb_index,
-                    digest_values[limb]
-                ]
-            )
-        })
-        .collect::<Vec<_>>();
-
-    let mut logup_gen = LogupTraceGenerator::new(log_size);
-    write_pair!(
-        &negative_active,
-        &poseidon_denom,
-        &chunk_multiplicities[0],
-        &chunk_denoms[0],
-        logup_gen
-    );
-    write_pair!(
-        &chunk_multiplicities[1],
-        &chunk_denoms[1],
-        &chunk_multiplicities[2],
-        &chunk_denoms[2],
-        logup_gen
-    );
-    write_pair!(
-        &chunk_multiplicities[3],
-        &chunk_denoms[3],
-        &chunk_multiplicities[4],
-        &chunk_denoms[4],
-        logup_gen
-    );
-    write_pair!(
-        &chunk_multiplicities[5],
-        &chunk_denoms[5],
-        &chunk_multiplicities[6],
-        &chunk_denoms[6],
-        logup_gen
-    );
-    write_pair!(
-        &chunk_multiplicities[7],
-        &chunk_denoms[7],
-        &not_first,
-        &previous_denom,
-        logup_gen
-    );
-    write_pair!(
-        &not_last,
-        &output_denom,
-        &digest_multiplicity,
-        &digest_denoms[0],
-        logup_gen
-    );
-    write_pair!(
-        &digest_multiplicity,
-        &digest_denoms[1],
-        &digest_multiplicity,
-        &digest_denoms[2],
-        logup_gen
-    );
-    write_pair!(
-        &digest_multiplicity,
-        &digest_denoms[3],
-        &digest_multiplicity,
-        &digest_denoms[4],
-        logup_gen
-    );
-    write_pair!(
-        &digest_multiplicity,
-        &digest_denoms[5],
-        &digest_multiplicity,
-        &digest_denoms[6],
-        logup_gen
-    );
-    write_col!(&digest_multiplicity, &digest_denoms[7], logup_gen);
-    logup_gen.finalize_last()
-}
-
-fn add_columns(lhs: &[PackedM31], rhs: &[PackedM31]) -> Vec<PackedM31> {
-    lhs.iter().zip(rhs).map(|(lhs, rhs)| *lhs + *rhs).collect()
+    component::witness::gen_interaction_trace(
+        trace,
+        preprocessed,
+        BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        BaseField::from(VM_PUBLIC_CLAIM_HASH_DOMAIN),
+        BaseField::from(VM_CLAIM_HASH_SCOPE),
+        BaseField::from(SEGMENT_VERIFIER_ID),
+        BaseField::from(VerifierInputKind::VmPublicClaimDigest.as_u32()),
+        &VmPublicClaimHashComponentRelations::new(
+            vm_relations,
+            claim_input_relations,
+            hash_relations,
+            verifier_input_relations,
+        ),
+    )
 }
 
 /// Records the fixed claim sponge and every reused Poseidon2 permutation.
@@ -846,7 +621,7 @@ mod tests {
     use stwo::core::fields::FieldExpOps;
     use stwo::core::fields::m31::M31;
     use stwo::core::pcs::TreeVec;
-    use stwo_constraint_framework::{Relation, assert_constraints_on_polys};
+    use stwo_constraint_framework::{FrameworkEval, Relation, assert_constraints_on_polys};
 
     use super::*;
     use crate::vm_public_claim::tests::{public_data, shape};
@@ -909,14 +684,14 @@ mod tests {
         );
         let traces = TreeVec::new(vec![preprocessed, trace, interaction]);
         let trace_polys = traces.map_cols(|column| column.interpolate());
-        let eval = Eval {
-            log_size: preprocessing.log_size(),
-            proof_kind: kind,
-            vm_relations,
-            claim_input_relations,
-            hash_relations,
-            verifier_input_relations,
-        };
+        let eval = eval_for_proof_kind(
+            preprocessing.log_size(),
+            kind,
+            &vm_relations,
+            &claim_input_relations,
+            &hash_relations,
+            &verifier_input_relations,
+        );
         assert_constraints_on_polys(
             &trace_polys,
             CanonicCoset::new(preprocessing.log_size()),

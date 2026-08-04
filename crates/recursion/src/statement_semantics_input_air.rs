@@ -17,15 +17,9 @@ use stwo::core::fields::qm31::QM31;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::simd::column::BaseColumn;
-use stwo::prover::backend::simd::m31::PackedM31;
-use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, RelationEntry,
-};
-use stwo_macros::define_component_tables;
 
 use crate::circuit::use_counts_for_outputs;
 
@@ -38,7 +32,6 @@ use super::wire::ProofKind;
 
 const MIN_LOG_SIZE: u32 = 4;
 const MAX_LOG_SIZE: u32 = 30;
-const U16_BYTE_BASE: u32 = 1 << 8;
 
 const ROW_MASK_COLUMN: usize = 0;
 const STATEMENT_MASK_COLUMN: usize = 1;
@@ -54,31 +47,6 @@ const USE_COUNT_COLUMN: usize = 10;
 const STATEMENT_SCOPE_COLUMN: usize = 11;
 const WORD_INDEX_COLUMN: usize = 12;
 const PREPROCESSED_COLUMN_COUNT: usize = 13;
-
-const PREPROCESSED_COLUMN_IDS: [&str; PREPROCESSED_COLUMN_COUNT] = [
-    "recursion_statement_semantics_input_row_mask",
-    "recursion_statement_semantics_input_statement_mask",
-    "recursion_statement_semantics_input_selector_mask",
-    "recursion_statement_semantics_input_private_mask",
-    "recursion_statement_semantics_input_integer_mask",
-    "recursion_statement_semantics_input_segment_active",
-    "recursion_statement_semantics_input_binary_active",
-    "recursion_statement_semantics_input_empty_active",
-    "recursion_statement_semantics_input_circuit_id",
-    "recursion_statement_semantics_input_node_id",
-    "recursion_statement_semantics_input_use_count",
-    "recursion_statement_semantics_input_scope",
-    "recursion_statement_semantics_input_word_index",
-];
-
-define_component_tables! {
-    statement_semantics_input: {
-        committed: { value, low_byte, high_byte },
-        constraints: {},
-    },
-}
-
-use prover_columns::StatementSemanticsInputColumns;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InputSource {
@@ -200,10 +168,7 @@ impl StatementSemanticsInputPreprocessed {
     }
 
     pub fn column_ids() -> Vec<PreProcessedColumnId> {
-        PREPROCESSED_COLUMN_IDS
-            .iter()
-            .map(|id| PreProcessedColumnId { id: (*id).into() })
-            .collect()
+        preprocessed_column_ids()
     }
 
     pub fn gen_columns(
@@ -241,92 +206,115 @@ impl StatementSemanticsInputPreprocessed {
     }
 }
 
-pub type Component = FrameworkComponent<Eval>;
-
+/// Relation instances used by the macro-generated semantics-input component.
 #[derive(Clone)]
-pub struct Eval {
-    pub log_size: u32,
-    pub proof_kind: ProofKind,
-    pub statement_relations: StatementInputRelations,
-    pub circuit_relations: crate::relations::RecursionRelations,
-    pub vm_relations: Relations,
+pub struct StatementSemanticsInputRelations {
+    pub statement_word: super::statement_input_air::StatementWordRelation,
+    pub wire: crate::relations::WireRelation,
+    pub range_check_8_8: air::relations::relation_types::range_check_8_8,
 }
 
-impl FrameworkEval for Eval {
-    fn log_size(&self) -> u32 {
-        self.log_size
+impl StatementSemanticsInputRelations {
+    /// Combine statement, recursion-circuit, and VM range relation instances.
+    pub fn new(
+        statement_relations: &StatementInputRelations,
+        circuit_relations: &crate::relations::RecursionRelations,
+        vm_relations: &Relations,
+    ) -> Self {
+        Self {
+            statement_word: statement_relations.statement_word.clone(),
+            wire: circuit_relations.wire.clone(),
+            range_check_8_8: vm_relations.range_check_8_8.clone(),
+        }
     }
+}
 
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
+stwo_macros::define_air_fns! {
+    max_degree: 3,
+    embedded: [],
+    embedded_component: true,
+    embedded_enabler_boolean: false,
+    embedded_relations:
+        crate::statement_semantics_input_air::StatementSemanticsInputRelations,
+    logup_batch: 2,
+    embedded_preprocessed: {
+        row_mask: "recursion_statement_semantics_input_row_mask",
+        statement_mask: "recursion_statement_semantics_input_statement_mask",
+        selector_mask: "recursion_statement_semantics_input_selector_mask",
+        private_mask: "recursion_statement_semantics_input_private_mask",
+        integer_mask: "recursion_statement_semantics_input_integer_mask",
+        segment_enabled: "recursion_statement_semantics_input_segment_active",
+        binary_enabled: "recursion_statement_semantics_input_binary_active",
+        empty_enabled: "recursion_statement_semantics_input_empty_active",
+        circuit_id: "recursion_statement_semantics_input_circuit_id",
+        node_id: "recursion_statement_semantics_input_node_id",
+        use_count: "recursion_statement_semantics_input_use_count",
+        statement_scope: "recursion_statement_semantics_input_scope",
+        word_index: "recursion_statement_semantics_input_word_index",
+    },
+    embedded_params: [segment_active, binary_active, empty_active, zero],
 
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = StatementSemanticsInputColumns::from_eval(&mut eval);
-        let ids = StatementSemanticsInputPreprocessed::column_ids();
-        let row_mask = eval.get_preprocessed_column(ids[ROW_MASK_COLUMN].clone());
-        let statement_mask = eval.get_preprocessed_column(ids[STATEMENT_MASK_COLUMN].clone());
-        let selector_mask = eval.get_preprocessed_column(ids[SELECTOR_MASK_COLUMN].clone());
-        let private_mask = eval.get_preprocessed_column(ids[PRIVATE_MASK_COLUMN].clone());
-        let integer_mask = eval.get_preprocessed_column(ids[INTEGER_MASK_COLUMN].clone());
-        let segment_active = eval.get_preprocessed_column(ids[SEGMENT_ACTIVE_COLUMN].clone());
-        let binary_active = eval.get_preprocessed_column(ids[BINARY_ACTIVE_COLUMN].clone());
-        let empty_active = eval.get_preprocessed_column(ids[EMPTY_ACTIVE_COLUMN].clone());
-        let circuit_id = eval.get_preprocessed_column(ids[CIRCUIT_ID_COLUMN].clone());
-        let node_id = eval.get_preprocessed_column(ids[NODE_ID_COLUMN].clone());
-        let use_count = eval.get_preprocessed_column(ids[USE_COUNT_COLUMN].clone());
-        let statement_scope = eval.get_preprocessed_column(ids[STATEMENT_SCOPE_COLUMN].clone());
-        let word_index = eval.get_preprocessed_column(ids[WORD_INDEX_COLUMN].clone());
-        eval.add_constraint(cols.enabler.clone() - row_mask.clone());
+    relation statement_word(3);
+    relation wire(6);
+    relation range_check_8_8(2);
 
-        let segment = BaseField::from(u32::from(self.proof_kind == ProofKind::SegmentLeaf));
-        let binary = BaseField::from(u32::from(self.proof_kind == ProofKind::BinaryNode));
-        let empty = BaseField::from(u32::from(self.proof_kind == ProofKind::EmptyLeaf));
-        let one = E::F::from(BaseField::from(1));
-        let active = segment_active * segment + binary_active * binary + empty_active * empty;
-        let active_statement = statement_mask.clone() * active.clone();
-        let active_integer = active_statement.clone() * integer_mask;
+    fn statement_semantics_input(
+        value, low_byte, high_byte,
+        row_mask, statement_mask, selector_mask, private_mask, integer_mask,
+        segment_enabled, binary_enabled, empty_enabled,
+        circuit_id, node_id, use_count, statement_scope, word_index,
+        segment_active, binary_active, empty_active, zero,
+    ) {
+        let active =
+            segment_enabled * segment_active
+            + binary_enabled * binary_active
+            + empty_enabled * empty_active;
+        let active_statement = statement_mask * active;
+        let active_integer = integer_mask * active;
         let witness_input = statement_mask + private_mask;
-        eval.add_constraint(witness_input * (one.clone() - active.clone()) * cols.value.clone());
-        eval.add_constraint(selector_mask * (cols.value.clone() - active));
-        eval.add_constraint(
-            active_integer.clone()
-                * (cols.value.clone()
-                    - cols.low_byte.clone()
-                    - cols.high_byte.clone() * BaseField::from(U16_BYTE_BASE)),
+
+        constrain enabler - row_mask;
+        constrain witness_input * (1 - active) * value;
+        constrain selector_mask * (value - active);
+        constrain active_integer * (value - low_byte - high_byte * 256);
+        constrain (1 - active_integer) * low_byte;
+        constrain (1 - active_integer) * high_byte;
+
+        consume(active_statement) statement_word(statement_scope, word_index, value);
+        emit(row_mask * use_count) wire(
+            circuit_id, node_id, value, zero, zero, zero,
         );
-        eval.add_constraint((one.clone() - active_integer.clone()) * cols.low_byte.clone());
-        eval.add_constraint((one - active_integer.clone()) * cols.high_byte.clone());
+        consume(active_integer) range_check_8_8(low_byte, high_byte);
 
-        eval.add_to_relation(RelationEntry::new(
-            &self.statement_relations.statement_word,
-            -E::EF::from(active_statement),
-            &[statement_scope, word_index, cols.value.clone()],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.circuit_relations.wire,
-            E::EF::from(row_mask * use_count),
-            &[
-                circuit_id,
-                node_id,
-                cols.value,
-                E::F::from(BaseField::from(0)),
-                E::F::from(BaseField::from(0)),
-                E::F::from(BaseField::from(0)),
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.vm_relations.range_check_8_8,
-            -E::EF::from(active_integer),
-            &[cols.low_byte, cols.high_byte],
-        ));
-
-        eval.finalize_logup_in_pairs();
-        eval
+        return value;
     }
 }
 
-/// Generates statement, circuit-wire, and byte-range interaction fractions.
+pub use component::air::{Component, Eval};
+
+/// Construct the generated evaluator with verifier-owned proof-kind selectors.
+pub fn eval_for_proof_kind(
+    log_size: u32,
+    proof_kind: ProofKind,
+    statement_relations: &StatementInputRelations,
+    circuit_relations: &crate::relations::RecursionRelations,
+    vm_relations: &Relations,
+) -> Eval {
+    Eval {
+        log_size,
+        segment_active: BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        binary_active: BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        empty_active: BaseField::from(u32::from(proof_kind == ProofKind::EmptyLeaf)),
+        zero: BaseField::from(0),
+        relations: StatementSemanticsInputRelations::new(
+            statement_relations,
+            circuit_relations,
+            vm_relations,
+        ),
+    }
+}
+
+/// Generate statement, circuit-wire, and byte-range interaction fractions.
 pub fn gen_interaction_trace(
     trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     preprocessed: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
@@ -338,74 +326,19 @@ pub fn gen_interaction_trace(
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     QM31,
 ) {
-    let cols = StatementSemanticsInputColumns::from_iter(
-        trace.iter().map(|evaluation| &evaluation.values.data),
-    );
-    let pp = preprocessed
-        .iter()
-        .map(|column| &column.values.data)
-        .collect::<Vec<_>>();
-    let simd_size = cols.enabler.len();
-    let log_size = trace[0].domain.log_size();
-    let segment = BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf));
-    let binary = BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode));
-    let empty = BaseField::from(u32::from(proof_kind == ProofKind::EmptyLeaf));
-    let active = (0..simd_size)
-        .map(|row| {
-            pp[SEGMENT_ACTIVE_COLUMN][row] * segment
-                + pp[BINARY_ACTIVE_COLUMN][row] * binary
-                + pp[EMPTY_ACTIVE_COLUMN][row] * empty
-        })
-        .collect::<Vec<_>>();
-    let active_statement = (0..simd_size)
-        .map(|row| PackedQM31::from(pp[STATEMENT_MASK_COLUMN][row] * active[row]))
-        .collect::<Vec<_>>();
-    let negative_statement = active_statement
-        .iter()
-        .map(|value| -*value)
-        .collect::<Vec<_>>();
-    let wire_multiplicity = (0..simd_size)
-        .map(|row| PackedQM31::from(pp[ROW_MASK_COLUMN][row] * pp[USE_COUNT_COLUMN][row]))
-        .collect::<Vec<_>>();
-    let negative_integer = (0..simd_size)
-        .map(|row| -active_statement[row] * PackedQM31::from(pp[INTEGER_MASK_COLUMN][row]))
-        .collect::<Vec<_>>();
-    let zeros = vec![PackedM31::broadcast(BaseField::from(0)); simd_size];
-
-    let statement_denom = combine!(
-        statement_relations.statement_word,
-        [
-            pp[STATEMENT_SCOPE_COLUMN],
-            pp[WORD_INDEX_COLUMN],
-            cols.value
-        ]
-    );
-    let wire_denom = combine!(
-        circuit_relations.wire,
-        [
-            pp[CIRCUIT_ID_COLUMN],
-            pp[NODE_ID_COLUMN],
-            cols.value,
-            zeros,
-            zeros,
-            zeros
-        ]
-    );
-    let range_denom = combine!(
-        vm_relations.range_check_8_8,
-        [cols.low_byte, cols.high_byte]
-    );
-
-    let mut logup_gen = LogupTraceGenerator::new(log_size);
-    write_pair!(
-        &negative_statement,
-        &statement_denom,
-        &wire_multiplicity,
-        &wire_denom,
-        logup_gen
-    );
-    write_col!(&negative_integer, &range_denom, logup_gen);
-    logup_gen.finalize_last()
+    component::witness::gen_interaction_trace(
+        trace,
+        preprocessed,
+        BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        BaseField::from(u32::from(proof_kind == ProofKind::EmptyLeaf)),
+        BaseField::from(0),
+        &StatementSemanticsInputRelations::new(
+            statement_relations,
+            circuit_relations,
+            vm_relations,
+        ),
+    )
 }
 
 /// Registers the byte-pair consumers in the standard VM range table.
@@ -415,14 +348,13 @@ pub fn register_range_check_multiplicities(
     proof_kind: ProofKind,
     counters: &mut prover::relations::Counters,
 ) {
-    let cols = StatementSemanticsInputColumns::from_iter(
-        trace.iter().map(|evaluation| &evaluation.values.data),
-    );
+    let low_byte = &trace[2].values.data;
+    let high_byte = &trace[3].values.data;
     let pp = preprocessed
         .iter()
         .map(|column| &column.values.data)
         .collect::<Vec<_>>();
-    let simd_size = cols.enabler.len();
+    let simd_size = trace[0].values.data.len();
     let segment = BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf));
     let binary = BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode));
     let empty = BaseField::from(u32::from(proof_kind == ProofKind::EmptyLeaf));
@@ -436,7 +368,7 @@ pub fn register_range_check_multiplicities(
         .collect::<Vec<_>>();
     counters.range_check_8_8.register_many(
         &multiplicities,
-        &[cols.low_byte.as_slice(), cols.high_byte.as_slice()],
+        &[low_byte.as_slice(), high_byte.as_slice()],
     );
 }
 
@@ -645,7 +577,7 @@ mod tests {
     use stwo::core::fields::FieldExpOps;
     use stwo::core::fields::m31::M31;
     use stwo::core::pcs::TreeVec;
-    use stwo_constraint_framework::{Relation, assert_constraints_on_polys};
+    use stwo_constraint_framework::{FrameworkEval, Relation, assert_constraints_on_polys};
 
     use super::*;
     use crate::relations::RecursionRelations;
@@ -703,13 +635,13 @@ mod tests {
         );
         let traces = TreeVec::new(vec![preprocessed, trace, interaction]);
         let trace_polys = traces.map_cols(|column| column.interpolate());
-        let eval = Eval {
-            log_size: preprocessing.log_size(),
-            proof_kind: kind,
-            statement_relations,
-            circuit_relations,
-            vm_relations,
-        };
+        let eval = eval_for_proof_kind(
+            preprocessing.log_size(),
+            kind,
+            &statement_relations,
+            &circuit_relations,
+            &vm_relations,
+        );
         assert_constraints_on_polys(
             &trace_polys,
             CanonicCoset::new(preprocessing.log_size()),
@@ -890,13 +822,13 @@ mod tests {
     fn semantics_input_constraint_profile_stays_cubic() {
         use stwo_constraint_framework::expr::ExprEvaluator;
 
-        let eval = Eval {
-            log_size: 4,
-            proof_kind: ProofKind::BinaryNode,
-            statement_relations: StatementInputRelations::dummy(),
-            circuit_relations: RecursionRelations::dummy(),
-            vm_relations: Relations::dummy(),
-        };
+        let eval = eval_for_proof_kind(
+            4,
+            ProofKind::BinaryNode,
+            &StatementInputRelations::dummy(),
+            &RecursionRelations::dummy(),
+            &Relations::dummy(),
+        );
         let degrees = eval
             .evaluate(ExprEvaluator::new())
             .constraint_degree_bounds();

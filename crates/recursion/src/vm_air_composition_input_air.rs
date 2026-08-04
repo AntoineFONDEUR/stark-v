@@ -16,15 +16,9 @@ use stwo::core::fields::qm31::QM31;
 use stwo::core::poly::circle::{CanonicCoset, MAX_CIRCLE_DOMAIN_LOG_SIZE};
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::simd::column::BaseColumn;
-use stwo::prover::backend::simd::m31::PackedM31;
-use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, RelationEntry,
-};
-use stwo_macros::define_component_tables;
 
 use super::control_air::SEGMENT_VERIFIER_ID;
 use super::relation_challenge_air::{AIR_EVALUATION_CHALLENGE_SCOPE, RelationChallengeRelations};
@@ -55,30 +49,6 @@ const USE_COUNT_COLUMN: usize = 9;
 const SOURCE_INDEX_0_COLUMN: usize = 10;
 const SOURCE_INDEX_1_COLUMN: usize = 11;
 const PREPROCESSED_COLUMN_COUNT: usize = 12;
-
-const PREPROCESSED_COLUMN_IDS: [&str; PREPROCESSED_COLUMN_COUNT] = [
-    "recursion_vm_air_composition_input_row_mask",
-    "recursion_vm_air_composition_input_sampled_value_mask",
-    "recursion_vm_air_composition_input_claimed_sum_mask",
-    "recursion_vm_air_composition_input_challenge_mask",
-    "recursion_vm_air_composition_input_composition_randomness_mask",
-    "recursion_vm_air_composition_input_oods_point_mask",
-    "recursion_vm_air_composition_input_selector_mask",
-    "recursion_vm_air_composition_input_circuit_id",
-    "recursion_vm_air_composition_input_node_id",
-    "recursion_vm_air_composition_input_use_count",
-    "recursion_vm_air_composition_input_source_index_0",
-    "recursion_vm_air_composition_input_source_index_1",
-];
-
-define_component_tables! {
-    vm_air_composition_input: {
-        committed: { value },
-        constraints: {},
-    },
-}
-
-use prover_columns::VmAirCompositionInputColumns;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PreprocessedRow {
@@ -188,10 +158,7 @@ impl VmAirCompositionInputPreprocessed {
     }
 
     pub fn column_ids() -> Vec<PreProcessedColumnId> {
-        PREPROCESSED_COLUMN_IDS
-            .iter()
-            .map(|id| PreProcessedColumnId { id: (*id).into() })
-            .collect()
+        preprocessed_column_ids()
     }
 
     pub fn gen_columns(
@@ -362,129 +329,132 @@ fn expected_input_count(
         .ok_or(VmAirCompositionInputError::RowCountOverflow)
 }
 
-pub type Component = FrameworkComponent<Eval>;
-
+/// Relations used by the macro-generated VM composition input component.
 #[derive(Clone)]
-pub struct Eval {
-    pub log_size: u32,
-    pub proof_kind: ProofKind,
-    pub challenge_relations: RelationChallengeRelations,
-    pub verifier_input_relations: VerifierInputRelations,
-    pub randomness_relations: VerifierRandomnessRelations,
-    pub circuit_relations: RecursionRelations,
+pub struct VmAirCompositionInputComponentRelations {
+    pub verifier_input_word: super::transcript_payload_air::VerifierInputWordRelation,
+    pub challenge_word: super::relation_challenge_air::RelationChallengeWordRelation,
+    pub randomness_word: super::verifier_randomness_air::VerifierRandomnessWordRelation,
+    pub wire: crate::relations::WireRelation,
 }
 
-impl FrameworkEval for Eval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
-
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
-
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = VmAirCompositionInputColumns::from_eval(&mut eval);
-        let ids = VmAirCompositionInputPreprocessed::column_ids();
-        let row_mask = eval.get_preprocessed_column(ids[ROW_MASK_COLUMN].clone());
-        let sampled_value_mask =
-            eval.get_preprocessed_column(ids[SAMPLED_VALUE_MASK_COLUMN].clone());
-        let claimed_sum_mask = eval.get_preprocessed_column(ids[CLAIMED_SUM_MASK_COLUMN].clone());
-        let challenge_mask = eval.get_preprocessed_column(ids[CHALLENGE_MASK_COLUMN].clone());
-        let composition_randomness_mask =
-            eval.get_preprocessed_column(ids[COMPOSITION_RANDOMNESS_MASK_COLUMN].clone());
-        let oods_point_mask = eval.get_preprocessed_column(ids[OODS_POINT_MASK_COLUMN].clone());
-        let selector_mask = eval.get_preprocessed_column(ids[SELECTOR_MASK_COLUMN].clone());
-        let circuit_id = eval.get_preprocessed_column(ids[CIRCUIT_ID_COLUMN].clone());
-        let node_id = eval.get_preprocessed_column(ids[NODE_ID_COLUMN].clone());
-        let use_count = eval.get_preprocessed_column(ids[USE_COUNT_COLUMN].clone());
-        let source_index_0 = eval.get_preprocessed_column(ids[SOURCE_INDEX_0_COLUMN].clone());
-        let source_index_1 = eval.get_preprocessed_column(ids[SOURCE_INDEX_1_COLUMN].clone());
-        eval.add_constraint(cols.enabler.clone() - row_mask.clone());
-
-        let segment = E::F::from(BaseField::from(u32::from(
-            self.proof_kind == ProofKind::SegmentLeaf,
-        )));
-        let one = E::F::from(BaseField::from(1));
-        let witness_mask = row_mask.clone() - selector_mask.clone();
-        eval.add_constraint(witness_mask * (one - segment.clone()) * cols.value.clone());
-        eval.add_constraint(selector_mask * (cols.value.clone() - segment.clone()));
-
-        eval.add_to_relation(RelationEntry::new(
-            &self.verifier_input_relations.input_word,
-            -E::EF::from(segment.clone() * sampled_value_mask),
-            &[
-                E::F::from(BaseField::from(SEGMENT_VERIFIER_ID)),
-                E::F::from(BaseField::from(VerifierInputKind::SampledValue.as_u32())),
-                source_index_0.clone(),
-                source_index_1.clone(),
-                cols.value.clone(),
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.verifier_input_relations.input_word,
-            -E::EF::from(segment.clone() * claimed_sum_mask),
-            &[
-                E::F::from(BaseField::from(SEGMENT_VERIFIER_ID)),
-                E::F::from(BaseField::from(VerifierInputKind::VmAirClaimedSum.as_u32())),
-                source_index_0.clone(),
-                source_index_1.clone(),
-                cols.value.clone(),
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.challenge_relations.word,
-            -E::EF::from(segment.clone() * challenge_mask),
-            &[
-                E::F::from(BaseField::from(SEGMENT_VERIFIER_ID)),
-                E::F::from(BaseField::from(AIR_EVALUATION_CHALLENGE_SCOPE)),
-                source_index_0.clone(),
-                source_index_1.clone(),
-                cols.value.clone(),
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.randomness_relations.word,
-            -E::EF::from(segment.clone() * composition_randomness_mask),
-            &[
-                E::F::from(BaseField::from(SEGMENT_VERIFIER_ID)),
-                E::F::from(BaseField::from(
-                    VerifierRandomnessKind::CompositionRandomness.as_u32(),
-                )),
-                source_index_0.clone(),
-                source_index_1.clone(),
-                cols.value.clone(),
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.randomness_relations.word,
-            -E::EF::from(segment * oods_point_mask),
-            &[
-                E::F::from(BaseField::from(SEGMENT_VERIFIER_ID)),
-                E::F::from(BaseField::from(VerifierRandomnessKind::OodsPoint.as_u32())),
-                source_index_0,
-                source_index_1,
-                cols.value.clone(),
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.circuit_relations.wire,
-            E::EF::from(row_mask * use_count),
-            &[
-                circuit_id,
-                node_id,
-                cols.value,
-                E::F::from(BaseField::from(0)),
-                E::F::from(BaseField::from(0)),
-                E::F::from(BaseField::from(0)),
-            ],
-        ));
-        eval.finalize_logup_in_pairs();
-        eval
+impl VmAirCompositionInputComponentRelations {
+    /// Combine every transcript source with the shared arithmetic wire relation.
+    pub fn new(
+        challenge_relations: &RelationChallengeRelations,
+        verifier_input_relations: &VerifierInputRelations,
+        randomness_relations: &VerifierRandomnessRelations,
+        circuit_relations: &RecursionRelations,
+    ) -> Self {
+        Self {
+            verifier_input_word: verifier_input_relations.input_word.clone(),
+            challenge_word: challenge_relations.word.clone(),
+            randomness_word: randomness_relations.word.clone(),
+            wire: circuit_relations.wire.clone(),
+        }
     }
 }
 
-/// Generates source consumers and exact circuit-wire producers.
+stwo_macros::define_air_fns! {
+    max_degree: 3,
+    embedded: [],
+    embedded_component: true,
+    embedded_enabler_boolean: false,
+    embedded_relations:
+        crate::vm_air_composition_input_air::VmAirCompositionInputComponentRelations,
+    logup_batch: 2,
+    embedded_preprocessed: {
+        row_mask: "recursion_vm_air_composition_input_row_mask",
+        sampled_value_mask: "recursion_vm_air_composition_input_sampled_value_mask",
+        claimed_sum_mask: "recursion_vm_air_composition_input_claimed_sum_mask",
+        challenge_mask: "recursion_vm_air_composition_input_challenge_mask",
+        composition_randomness_mask:
+            "recursion_vm_air_composition_input_composition_randomness_mask",
+        oods_point_mask: "recursion_vm_air_composition_input_oods_point_mask",
+        selector_mask: "recursion_vm_air_composition_input_selector_mask",
+        circuit_id: "recursion_vm_air_composition_input_circuit_id",
+        node_id: "recursion_vm_air_composition_input_node_id",
+        use_count: "recursion_vm_air_composition_input_use_count",
+        source_index_0: "recursion_vm_air_composition_input_source_index_0",
+        source_index_1: "recursion_vm_air_composition_input_source_index_1",
+    },
+    embedded_params: [
+        segment_active, verifier_id, sampled_value_kind, claimed_sum_kind,
+        challenge_scope, composition_randomness_kind, oods_point_kind,
+    ],
+
+    relation verifier_input_word(5);
+    relation challenge_word(5);
+    relation randomness_word(5);
+    relation wire(6);
+
+    fn vm_air_composition_input(
+        value,
+        row_mask, sampled_value_mask, claimed_sum_mask, challenge_mask,
+        composition_randomness_mask, oods_point_mask, selector_mask,
+        circuit_id, node_id, use_count, source_index_0, source_index_1,
+        segment_active, verifier_id, sampled_value_kind, claimed_sum_kind,
+        challenge_scope, composition_randomness_kind, oods_point_kind,
+    ) {
+        let witness_mask = row_mask - selector_mask;
+
+        constrain enabler - row_mask;
+        constrain witness_mask * (1 - segment_active) * value;
+        constrain selector_mask * (value - segment_active);
+
+        consume(segment_active * sampled_value_mask) verifier_input_word(
+            verifier_id, sampled_value_kind, source_index_0, source_index_1, value,
+        );
+        consume(segment_active * claimed_sum_mask) verifier_input_word(
+            verifier_id, claimed_sum_kind, source_index_0, source_index_1, value,
+        );
+        consume(segment_active * challenge_mask) challenge_word(
+            verifier_id, challenge_scope, source_index_0, source_index_1, value,
+        );
+        consume(segment_active * composition_randomness_mask) randomness_word(
+            verifier_id, composition_randomness_kind, source_index_0, source_index_1, value,
+        );
+        consume(segment_active * oods_point_mask) randomness_word(
+            verifier_id, oods_point_kind, source_index_0, source_index_1, value,
+        );
+        emit(row_mask * use_count) wire(circuit_id, node_id, value, 0, 0, 0);
+
+        return value;
+    }
+}
+
+pub use component::air::{Component, Eval};
+
+/// Construct the generated evaluator for the selected universal proof kind.
+pub fn eval_for_proof_kind(
+    log_size: u32,
+    proof_kind: ProofKind,
+    challenge_relations: &RelationChallengeRelations,
+    verifier_input_relations: &VerifierInputRelations,
+    randomness_relations: &VerifierRandomnessRelations,
+    circuit_relations: &RecursionRelations,
+) -> Eval {
+    Eval {
+        log_size,
+        segment_active: BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        verifier_id: BaseField::from(SEGMENT_VERIFIER_ID),
+        sampled_value_kind: BaseField::from(VerifierInputKind::SampledValue.as_u32()),
+        claimed_sum_kind: BaseField::from(VerifierInputKind::VmAirClaimedSum.as_u32()),
+        challenge_scope: BaseField::from(AIR_EVALUATION_CHALLENGE_SCOPE),
+        composition_randomness_kind: BaseField::from(
+            VerifierRandomnessKind::CompositionRandomness.as_u32(),
+        ),
+        oods_point_kind: BaseField::from(VerifierRandomnessKind::OodsPoint.as_u32()),
+        relations: VmAirCompositionInputComponentRelations::new(
+            challenge_relations,
+            verifier_input_relations,
+            randomness_relations,
+            circuit_relations,
+        ),
+    }
+}
+
+/// Generate source consumers and exact circuit-wire producers.
 pub fn gen_interaction_trace(
     trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     preprocessed: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
@@ -497,139 +467,23 @@ pub fn gen_interaction_trace(
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     QM31,
 ) {
-    let cols = VmAirCompositionInputColumns::from_iter(
-        trace.iter().map(|evaluation| &evaluation.values.data),
-    );
-    let pp = preprocessed
-        .iter()
-        .map(|column| &column.values.data)
-        .collect::<Vec<_>>();
-    let simd_size = cols.enabler.len();
-    let log_size = trace[0].domain.log_size();
-    let segment = BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf));
-    let negative_source = |mask: usize| {
-        (0..simd_size)
-            .map(|row| -PackedQM31::from(pp[mask][row] * segment))
-            .collect::<Vec<_>>()
-    };
-    let negative_sampled = negative_source(SAMPLED_VALUE_MASK_COLUMN);
-    let negative_claimed = negative_source(CLAIMED_SUM_MASK_COLUMN);
-    let negative_challenge = negative_source(CHALLENGE_MASK_COLUMN);
-    let negative_composition_randomness = negative_source(COMPOSITION_RANDOMNESS_MASK_COLUMN);
-    let negative_oods = negative_source(OODS_POINT_MASK_COLUMN);
-    let wire_multiplicity = (0..simd_size)
-        .map(|row| PackedQM31::from(pp[ROW_MASK_COLUMN][row] * pp[USE_COUNT_COLUMN][row]))
-        .collect::<Vec<_>>();
-    let verifier_id = vec![PackedM31::broadcast(BaseField::from(SEGMENT_VERIFIER_ID)); simd_size];
-    let sampled_kind =
-        vec![
-            PackedM31::broadcast(BaseField::from(VerifierInputKind::SampledValue.as_u32()));
-            simd_size
-        ];
-    let claimed_kind =
-        vec![
-            PackedM31::broadcast(BaseField::from(VerifierInputKind::VmAirClaimedSum.as_u32(),));
-            simd_size
-        ];
-    let challenge_scope =
-        vec![PackedM31::broadcast(BaseField::from(AIR_EVALUATION_CHALLENGE_SCOPE)); simd_size];
-    let composition_kind = vec![
-        PackedM31::broadcast(BaseField::from(
-            VerifierRandomnessKind::CompositionRandomness.as_u32(),
-        ));
-        simd_size
-    ];
-    let oods_kind =
-        vec![
-            PackedM31::broadcast(BaseField::from(VerifierRandomnessKind::OodsPoint.as_u32(),));
-            simd_size
-        ];
-    let zeros = vec![PackedM31::broadcast(BaseField::from(0)); simd_size];
-    let sampled_denom = combine!(
-        verifier_input_relations.input_word,
-        [
-            &verifier_id,
-            sampled_kind,
-            pp[SOURCE_INDEX_0_COLUMN],
-            pp[SOURCE_INDEX_1_COLUMN],
-            cols.value
-        ]
-    );
-    let claimed_denom = combine!(
-        verifier_input_relations.input_word,
-        [
-            &verifier_id,
-            claimed_kind,
-            pp[SOURCE_INDEX_0_COLUMN],
-            pp[SOURCE_INDEX_1_COLUMN],
-            cols.value
-        ]
-    );
-    let challenge_denom = combine!(
-        challenge_relations.word,
-        [
-            &verifier_id,
-            challenge_scope,
-            pp[SOURCE_INDEX_0_COLUMN],
-            pp[SOURCE_INDEX_1_COLUMN],
-            cols.value
-        ]
-    );
-    let composition_denom = combine!(
-        randomness_relations.word,
-        [
-            &verifier_id,
-            composition_kind,
-            pp[SOURCE_INDEX_0_COLUMN],
-            pp[SOURCE_INDEX_1_COLUMN],
-            cols.value
-        ]
-    );
-    let oods_denom = combine!(
-        randomness_relations.word,
-        [
-            verifier_id,
-            oods_kind,
-            pp[SOURCE_INDEX_0_COLUMN],
-            pp[SOURCE_INDEX_1_COLUMN],
-            cols.value
-        ]
-    );
-    let wire_denom = combine!(
-        circuit_relations.wire,
-        [
-            pp[CIRCUIT_ID_COLUMN],
-            pp[NODE_ID_COLUMN],
-            cols.value,
-            &zeros,
-            &zeros,
-            zeros
-        ]
-    );
-
-    let mut logup_gen = LogupTraceGenerator::new(log_size);
-    write_pair!(
-        &negative_sampled,
-        &sampled_denom,
-        &negative_claimed,
-        &claimed_denom,
-        logup_gen
-    );
-    write_pair!(
-        &negative_challenge,
-        &challenge_denom,
-        &negative_composition_randomness,
-        &composition_denom,
-        logup_gen
-    );
-    write_pair!(
-        &negative_oods,
-        &oods_denom,
-        &wire_multiplicity,
-        &wire_denom,
-        logup_gen
-    );
-    logup_gen.finalize_last()
+    component::witness::gen_interaction_trace(
+        trace,
+        preprocessed,
+        BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        BaseField::from(SEGMENT_VERIFIER_ID),
+        BaseField::from(VerifierInputKind::SampledValue.as_u32()),
+        BaseField::from(VerifierInputKind::VmAirClaimedSum.as_u32()),
+        BaseField::from(AIR_EVALUATION_CHALLENGE_SCOPE),
+        BaseField::from(VerifierRandomnessKind::CompositionRandomness.as_u32()),
+        BaseField::from(VerifierRandomnessKind::OodsPoint.as_u32()),
+        &VmAirCompositionInputComponentRelations::new(
+            challenge_relations,
+            verifier_input_relations,
+            randomness_relations,
+            circuit_relations,
+        ),
+    )
 }
 
 /// Materializes input values after checking the fixed circuit layout.
@@ -782,7 +636,7 @@ mod tests {
     use rstest::rstest;
     use stwo::core::fields::qm31::SecureField;
     use stwo::core::pcs::TreeVec;
-    use stwo_constraint_framework::assert_constraints_on_polys;
+    use stwo_constraint_framework::{FrameworkEval, assert_constraints_on_polys};
 
     use super::*;
     use crate::air_relation_parameters::RELATION_CHALLENGE_WORD_COUNT;
@@ -852,14 +706,14 @@ mod tests {
         );
         let traces = TreeVec::new(vec![preprocessed, trace, interaction]);
         let trace_polys = traces.map_cols(|column| column.interpolate());
-        let eval = Eval {
-            log_size: preprocessing.log_size(),
-            proof_kind: kind,
-            challenge_relations,
-            verifier_input_relations,
-            randomness_relations,
-            circuit_relations,
-        };
+        let eval = eval_for_proof_kind(
+            preprocessing.log_size(),
+            kind,
+            &challenge_relations,
+            &verifier_input_relations,
+            &randomness_relations,
+            &circuit_relations,
+        );
         assert_constraints_on_polys(
             &trace_polys,
             CanonicCoset::new(preprocessing.log_size()),

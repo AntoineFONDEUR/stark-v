@@ -15,15 +15,9 @@ use stwo::core::fields::qm31::QM31;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::simd::column::BaseColumn;
-use stwo::prover::backend::simd::m31::PackedM31;
-use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, RelationEntry,
-};
-use stwo_macros::define_component_tables;
 
 use crate::circuit::use_counts_for_outputs;
 use crate::relations::RecursionRelations;
@@ -51,29 +45,6 @@ const NODE_ID_COLUMN: usize = 8;
 const USE_COUNT_COLUMN: usize = 9;
 const WORD_INDEX_COLUMN: usize = 10;
 const PREPROCESSED_COLUMN_COUNT: usize = 11;
-
-const PREPROCESSED_COLUMN_IDS: [&str; PREPROCESSED_COLUMN_COUNT] = [
-    "recursion_vm_claim_semantics_input_row_mask",
-    "recursion_vm_claim_semantics_input_claim_mask",
-    "recursion_vm_claim_semantics_input_statement_mask",
-    "recursion_vm_claim_semantics_input_selector_mask",
-    "recursion_vm_claim_semantics_input_private_mask",
-    "recursion_vm_claim_semantics_input_io_digest_mask",
-    "recursion_vm_claim_semantics_input_io_kind",
-    "recursion_vm_claim_semantics_input_circuit_id",
-    "recursion_vm_claim_semantics_input_node_id",
-    "recursion_vm_claim_semantics_input_use_count",
-    "recursion_vm_claim_semantics_input_word_index",
-];
-
-define_component_tables! {
-    vm_public_claim_semantics_input: {
-        committed: { value },
-        constraints: {},
-    },
-}
-
-use prover_columns::VmPublicClaimSemanticsInputColumns;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InputSource {
@@ -179,10 +150,7 @@ impl VmPublicClaimSemanticsInputPreprocessed {
     }
 
     pub fn column_ids() -> Vec<PreProcessedColumnId> {
-        PREPROCESSED_COLUMN_IDS
-            .iter()
-            .map(|id| PreProcessedColumnId { id: (*id).into() })
-            .collect()
+        preprocessed_column_ids()
     }
 
     pub fn gen_columns(
@@ -217,94 +185,109 @@ impl VmPublicClaimSemanticsInputPreprocessed {
     }
 }
 
-pub type Component = FrameworkComponent<Eval>;
-
+/// Relations used by the macro-generated semantic-circuit input component.
 #[derive(Clone)]
-pub struct Eval {
-    pub log_size: u32,
-    pub proof_kind: ProofKind,
-    pub claim_relations: VmPublicClaimInputRelations,
-    pub statement_relations: StatementInputRelations,
-    pub circuit_relations: RecursionRelations,
-    pub io_hash_relations: VmPublicIoHashRelations,
+pub struct VmPublicClaimSemanticsInputComponentRelations {
+    pub claim_word: super::vm_public_claim_input_air::VmPublicClaimWordRelation,
+    pub statement_word: super::statement_input_air::StatementWordRelation,
+    pub digest: super::vm_public_io_hash_air::VmPublicIoDigestRelation,
+    pub wire: crate::relations::WireRelation,
 }
 
-impl FrameworkEval for Eval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
-
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
-
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = VmPublicClaimSemanticsInputColumns::from_eval(&mut eval);
-        let ids = VmPublicClaimSemanticsInputPreprocessed::column_ids();
-        let row_mask = eval.get_preprocessed_column(ids[ROW_MASK_COLUMN].clone());
-        let claim_mask = eval.get_preprocessed_column(ids[CLAIM_MASK_COLUMN].clone());
-        let statement_mask = eval.get_preprocessed_column(ids[STATEMENT_MASK_COLUMN].clone());
-        let selector_mask = eval.get_preprocessed_column(ids[SELECTOR_MASK_COLUMN].clone());
-        let private_mask = eval.get_preprocessed_column(ids[PRIVATE_MASK_COLUMN].clone());
-        let io_digest_mask = eval.get_preprocessed_column(ids[IO_DIGEST_MASK_COLUMN].clone());
-        let io_kind = eval.get_preprocessed_column(ids[IO_KIND_COLUMN].clone());
-        let circuit_id = eval.get_preprocessed_column(ids[CIRCUIT_ID_COLUMN].clone());
-        let node_id = eval.get_preprocessed_column(ids[NODE_ID_COLUMN].clone());
-        let use_count = eval.get_preprocessed_column(ids[USE_COUNT_COLUMN].clone());
-        let word_index = eval.get_preprocessed_column(ids[WORD_INDEX_COLUMN].clone());
-        eval.add_constraint(cols.enabler.clone() - row_mask.clone());
-
-        let segment = E::F::from(BaseField::from(u32::from(
-            self.proof_kind == ProofKind::SegmentLeaf,
-        )));
-        let one = E::F::from(BaseField::from(1));
-        let witness_mask =
-            claim_mask.clone() + statement_mask.clone() + private_mask + io_digest_mask.clone();
-        eval.add_constraint(witness_mask * (one - segment.clone()) * cols.value.clone());
-        eval.add_constraint(selector_mask * (cols.value.clone() - segment.clone()));
-
-        eval.add_to_relation(RelationEntry::new(
-            &self.claim_relations.claim_word,
-            -E::EF::from(segment.clone() * claim_mask),
-            &[
-                E::F::from(BaseField::from(VM_CLAIM_SEMANTICS_SCOPE)),
-                word_index.clone(),
-                cols.value.clone(),
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.statement_relations.statement_word,
-            -E::EF::from(segment.clone() * statement_mask),
-            &[
-                E::F::from(BaseField::from(VM_CLAIM_STATEMENT_SCOPE)),
-                word_index.clone(),
-                cols.value.clone(),
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.io_hash_relations.digest,
-            -E::EF::from(segment * io_digest_mask),
-            &[io_kind, word_index, cols.value.clone()],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.circuit_relations.wire,
-            E::EF::from(row_mask * use_count),
-            &[
-                circuit_id,
-                node_id,
-                cols.value,
-                E::F::from(BaseField::from(0)),
-                E::F::from(BaseField::from(0)),
-                E::F::from(BaseField::from(0)),
-            ],
-        ));
-
-        eval.finalize_logup_in_pairs();
-        eval
+impl VmPublicClaimSemanticsInputComponentRelations {
+    /// Combine each input owner with the shared arithmetic wire relation.
+    pub fn new(
+        claim_relations: &VmPublicClaimInputRelations,
+        statement_relations: &StatementInputRelations,
+        circuit_relations: &RecursionRelations,
+        io_hash_relations: &VmPublicIoHashRelations,
+    ) -> Self {
+        Self {
+            claim_word: claim_relations.claim_word.clone(),
+            statement_word: statement_relations.statement_word.clone(),
+            digest: io_hash_relations.digest.clone(),
+            wire: circuit_relations.wire.clone(),
+        }
     }
 }
 
-/// Generates claim, statement, and circuit-wire interaction fractions.
+stwo_macros::define_air_fns! {
+    max_degree: 3,
+    embedded: [],
+    embedded_component: true,
+    embedded_enabler_boolean: false,
+    embedded_relations:
+        crate::vm_public_claim_semantics_input_air::VmPublicClaimSemanticsInputComponentRelations,
+    logup_batch: 2,
+    embedded_preprocessed: {
+        row_mask: "recursion_vm_claim_semantics_input_row_mask",
+        claim_mask: "recursion_vm_claim_semantics_input_claim_mask",
+        statement_mask: "recursion_vm_claim_semantics_input_statement_mask",
+        selector_mask: "recursion_vm_claim_semantics_input_selector_mask",
+        private_mask: "recursion_vm_claim_semantics_input_private_mask",
+        io_digest_mask: "recursion_vm_claim_semantics_input_io_digest_mask",
+        io_kind: "recursion_vm_claim_semantics_input_io_kind",
+        circuit_id: "recursion_vm_claim_semantics_input_circuit_id",
+        node_id: "recursion_vm_claim_semantics_input_node_id",
+        use_count: "recursion_vm_claim_semantics_input_use_count",
+        word_index: "recursion_vm_claim_semantics_input_word_index",
+    },
+    embedded_params: [segment_active, claim_scope, statement_scope],
+
+    relation claim_word(3);
+    relation statement_word(3);
+    relation digest(3);
+    relation wire(6);
+
+    fn vm_public_claim_semantics_input(
+        value,
+        row_mask, claim_mask, statement_mask, selector_mask, private_mask,
+        io_digest_mask, io_kind, circuit_id, node_id, use_count, word_index,
+        segment_active, claim_scope, statement_scope,
+    ) {
+        let witness_mask = claim_mask + statement_mask + private_mask + io_digest_mask;
+
+        constrain enabler - row_mask;
+        constrain witness_mask * (1 - segment_active) * value;
+        constrain selector_mask * (value - segment_active);
+
+        consume(segment_active * claim_mask) claim_word(claim_scope, word_index, value);
+        consume(segment_active * statement_mask) statement_word(
+            statement_scope, word_index, value,
+        );
+        consume(segment_active * io_digest_mask) digest(io_kind, word_index, value);
+        emit(row_mask * use_count) wire(circuit_id, node_id, value, 0, 0, 0);
+
+        return value;
+    }
+}
+
+pub use component::air::{Component, Eval};
+
+/// Construct the generated evaluator for the selected universal proof kind.
+pub fn eval_for_proof_kind(
+    log_size: u32,
+    proof_kind: ProofKind,
+    claim_relations: &VmPublicClaimInputRelations,
+    statement_relations: &StatementInputRelations,
+    circuit_relations: &RecursionRelations,
+    io_hash_relations: &VmPublicIoHashRelations,
+) -> Eval {
+    Eval {
+        log_size,
+        segment_active: BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        claim_scope: BaseField::from(VM_CLAIM_SEMANTICS_SCOPE),
+        statement_scope: BaseField::from(VM_CLAIM_STATEMENT_SCOPE),
+        relations: VmPublicClaimSemanticsInputComponentRelations::new(
+            claim_relations,
+            statement_relations,
+            circuit_relations,
+            io_hash_relations,
+        ),
+    }
+}
+
+/// Generate claim, statement, digest, and circuit-wire interaction fractions.
 pub fn gen_interaction_trace(
     trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     preprocessed: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
@@ -317,73 +300,19 @@ pub fn gen_interaction_trace(
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     QM31,
 ) {
-    let cols = VmPublicClaimSemanticsInputColumns::from_iter(
-        trace.iter().map(|evaluation| &evaluation.values.data),
-    );
-    let pp = preprocessed
-        .iter()
-        .map(|column| &column.values.data)
-        .collect::<Vec<_>>();
-    let simd_size = cols.enabler.len();
-    let log_size = trace[0].domain.log_size();
-    let segment = BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf));
-    let negative_claim = (0..simd_size)
-        .map(|row| -PackedQM31::from(pp[CLAIM_MASK_COLUMN][row] * segment))
-        .collect::<Vec<_>>();
-    let negative_statement = (0..simd_size)
-        .map(|row| -PackedQM31::from(pp[STATEMENT_MASK_COLUMN][row] * segment))
-        .collect::<Vec<_>>();
-    let wire_multiplicity = (0..simd_size)
-        .map(|row| PackedQM31::from(pp[ROW_MASK_COLUMN][row] * pp[USE_COUNT_COLUMN][row]))
-        .collect::<Vec<_>>();
-    let negative_io_digest = (0..simd_size)
-        .map(|row| -PackedQM31::from(pp[IO_DIGEST_MASK_COLUMN][row] * segment))
-        .collect::<Vec<_>>();
-    let claim_scope =
-        vec![PackedM31::broadcast(BaseField::from(VM_CLAIM_SEMANTICS_SCOPE)); simd_size];
-    let statement_scope =
-        vec![PackedM31::broadcast(BaseField::from(VM_CLAIM_STATEMENT_SCOPE)); simd_size];
-    let zeros = vec![PackedM31::broadcast(BaseField::from(0)); simd_size];
-    let claim_denom = combine!(
-        claim_relations.claim_word,
-        [claim_scope, pp[WORD_INDEX_COLUMN], cols.value]
-    );
-    let statement_denom = combine!(
-        statement_relations.statement_word,
-        [statement_scope, pp[WORD_INDEX_COLUMN], cols.value]
-    );
-    let wire_denom = combine!(
-        circuit_relations.wire,
-        [
-            pp[CIRCUIT_ID_COLUMN],
-            pp[NODE_ID_COLUMN],
-            cols.value,
-            zeros,
-            zeros,
-            zeros
-        ]
-    );
-    let io_digest_denom = combine!(
-        io_hash_relations.digest,
-        [pp[IO_KIND_COLUMN], pp[WORD_INDEX_COLUMN], cols.value]
-    );
-
-    let mut logup_gen = LogupTraceGenerator::new(log_size);
-    write_pair!(
-        &negative_claim,
-        &claim_denom,
-        &negative_statement,
-        &statement_denom,
-        logup_gen
-    );
-    write_pair!(
-        &negative_io_digest,
-        &io_digest_denom,
-        &wire_multiplicity,
-        &wire_denom,
-        logup_gen
-    );
-    logup_gen.finalize_last()
+    component::witness::gen_interaction_trace(
+        trace,
+        preprocessed,
+        BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        BaseField::from(VM_CLAIM_SEMANTICS_SCOPE),
+        BaseField::from(VM_CLAIM_STATEMENT_SCOPE),
+        &VmPublicClaimSemanticsInputComponentRelations::new(
+            claim_relations,
+            statement_relations,
+            circuit_relations,
+            io_hash_relations,
+        ),
+    )
 }
 
 /// Materializes input-node values after verifying the reference structure.
@@ -515,7 +444,7 @@ impl std::error::Error for VmPublicClaimSemanticsInputError {}
 mod tests {
     use rstest::rstest;
     use stwo::core::pcs::TreeVec;
-    use stwo_constraint_framework::assert_constraints_on_polys;
+    use stwo_constraint_framework::{FrameworkEval, assert_constraints_on_polys};
 
     use super::*;
     use crate::statement::SPAN_STATEMENT_CANONICAL_WORDS;
@@ -592,14 +521,14 @@ mod tests {
         );
         let traces = TreeVec::new(vec![preprocessed, trace, interaction]);
         let trace_polys = traces.map_cols(|column| column.interpolate());
-        let eval = Eval {
-            log_size: preprocessing.log_size(),
-            proof_kind: kind,
-            claim_relations,
-            statement_relations,
-            circuit_relations,
-            io_hash_relations,
-        };
+        let eval = eval_for_proof_kind(
+            preprocessing.log_size(),
+            kind,
+            &claim_relations,
+            &statement_relations,
+            &circuit_relations,
+            &io_hash_relations,
+        );
         assert_constraints_on_polys(
             &trace_polys,
             CanonicCoset::new(preprocessing.log_size()),

@@ -19,15 +19,10 @@ use stwo::core::fields::qm31::QM31;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::simd::column::BaseColumn;
-use stwo::prover::backend::simd::m31::PackedM31;
-use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, RelationEntry, relation,
-};
-use stwo_macros::define_component_tables;
+use stwo_constraint_framework::relation;
 
 use super::vm_public_claim::{
     VmPublicClaimError, VmPublicClaimShape, VmPublicClaimWordKind,
@@ -39,7 +34,6 @@ use prover::public_data::PublicData;
 
 const MIN_LOG_SIZE: u32 = 4;
 const MAX_LOG_SIZE: u32 = 30;
-const U16_BYTE_BASE: u32 = 1 << 8;
 
 const ROW_MASK_COLUMN: usize = 0;
 const WORD_INDEX_COLUMN: usize = 1;
@@ -53,19 +47,6 @@ const OUTPUT_IO_MASK_COLUMN: usize = 8;
 const OUTPUT_IO_INDEX_COLUMN: usize = 9;
 const PREPROCESSED_COLUMN_COUNT: usize = 10;
 
-const PREPROCESSED_COLUMN_IDS: [&str; PREPROCESSED_COLUMN_COUNT] = [
-    "recursion_vm_public_claim_input_row_mask",
-    "recursion_vm_public_claim_input_word_index",
-    "recursion_vm_public_claim_input_constant_mask",
-    "recursion_vm_public_claim_input_boolean_mask",
-    "recursion_vm_public_claim_input_u16_mask",
-    "recursion_vm_public_claim_input_constant",
-    "recursion_vm_public_claim_input_input_io_mask",
-    "recursion_vm_public_claim_input_input_io_index",
-    "recursion_vm_public_claim_input_output_io_mask",
-    "recursion_vm_public_claim_input_output_io_index",
-];
-
 /// Scope consumed by the VM claim-to-statement semantic circuit.
 pub const VM_CLAIM_SEMANTICS_SCOPE: u32 = 0;
 /// Scope consumed by the Poseidon2 claim-word hash.
@@ -76,15 +57,6 @@ pub const VM_PUBLIC_LOGUP_SCOPE: u32 = 2;
 pub const VM_PUBLIC_INPUT_KIND: u32 = 0;
 /// Public-output digest lane in [`VmPublicIoWordRelation`].
 pub const VM_PUBLIC_OUTPUT_KIND: u32 = 1;
-
-define_component_tables! {
-    vm_public_claim_input: {
-        committed: { value, low_byte, high_byte },
-        constraints: {},
-    },
-}
-
-use prover_columns::VmPublicClaimInputColumns;
 
 // One fixed claim word, separated by its only permitted consumer.
 relation!(VmPublicClaimWordRelation, 3);
@@ -159,10 +131,7 @@ impl VmPublicClaimInputPreprocessed {
     }
 
     pub fn column_ids() -> Vec<PreProcessedColumnId> {
-        PREPROCESSED_COLUMN_IDS
-            .iter()
-            .map(|id| PreProcessedColumnId { id: (*id).into() })
-            .collect()
+        preprocessed_column_ids()
     }
 
     pub fn gen_columns(
@@ -206,119 +175,113 @@ impl VmPublicClaimInputPreprocessed {
     }
 }
 
-pub type Component = FrameworkComponent<Eval>;
-
+/// Relation instances used by the macro-generated public-claim input component.
 #[derive(Clone)]
-pub struct Eval {
-    pub log_size: u32,
-    pub proof_kind: ProofKind,
-    pub claim_relations: VmPublicClaimInputRelations,
-    pub vm_relations: Relations,
+pub struct VmPublicClaimInputComponentRelations {
+    pub claim_word: VmPublicClaimWordRelation,
+    pub claim_byte: VmPublicClaimByteRelation,
+    pub io_word: VmPublicIoWordRelation,
+    pub range_check_8_8: air::relations::relation_types::range_check_8_8,
 }
 
-impl FrameworkEval for Eval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
-
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
-
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = VmPublicClaimInputColumns::from_eval(&mut eval);
-        let ids = VmPublicClaimInputPreprocessed::column_ids();
-        let row_mask = eval.get_preprocessed_column(ids[ROW_MASK_COLUMN].clone());
-        let word_index = eval.get_preprocessed_column(ids[WORD_INDEX_COLUMN].clone());
-        let constant_mask = eval.get_preprocessed_column(ids[CONSTANT_MASK_COLUMN].clone());
-        let boolean_mask = eval.get_preprocessed_column(ids[BOOLEAN_MASK_COLUMN].clone());
-        let u16_mask = eval.get_preprocessed_column(ids[U16_MASK_COLUMN].clone());
-        let constant = eval.get_preprocessed_column(ids[CONSTANT_COLUMN].clone());
-        let input_io_mask = eval.get_preprocessed_column(ids[INPUT_IO_MASK_COLUMN].clone());
-        let input_io_index = eval.get_preprocessed_column(ids[INPUT_IO_INDEX_COLUMN].clone());
-        let output_io_mask = eval.get_preprocessed_column(ids[OUTPUT_IO_MASK_COLUMN].clone());
-        let output_io_index = eval.get_preprocessed_column(ids[OUTPUT_IO_INDEX_COLUMN].clone());
-        eval.add_constraint(cols.enabler.clone() - row_mask.clone());
-
-        let segment = E::F::from(BaseField::from(u32::from(
-            self.proof_kind == ProofKind::SegmentLeaf,
-        )));
-        let one = E::F::from(BaseField::from(1));
-        let active = row_mask * segment;
-        let active_u16 = active.clone() * u16_mask;
-        eval.add_constraint((one.clone() - active.clone()) * cols.value.clone());
-        eval.add_constraint(active.clone() * constant_mask * (cols.value.clone() - constant));
-        eval.add_constraint(
-            active.clone() * boolean_mask * cols.value.clone() * (one.clone() - cols.value.clone()),
-        );
-        eval.add_constraint(
-            active_u16.clone()
-                * (cols.value.clone()
-                    - cols.low_byte.clone()
-                    - cols.high_byte.clone() * BaseField::from(U16_BYTE_BASE)),
-        );
-        eval.add_constraint((one.clone() - active_u16.clone()) * cols.low_byte.clone());
-        eval.add_constraint((one - active_u16.clone()) * cols.high_byte.clone());
-
-        for scope in [
-            VM_CLAIM_SEMANTICS_SCOPE,
-            VM_CLAIM_HASH_SCOPE,
-            VM_PUBLIC_LOGUP_SCOPE,
-        ] {
-            eval.add_to_relation(RelationEntry::new(
-                &self.claim_relations.claim_word,
-                E::EF::from(active.clone()),
-                &[
-                    E::F::from(BaseField::from(scope)),
-                    word_index.clone(),
-                    cols.value.clone(),
-                ],
-            ));
+impl VmPublicClaimInputComponentRelations {
+    /// Combine claim ownership and VM range-check relation instances.
+    pub fn new(claim_relations: &VmPublicClaimInputRelations, vm_relations: &Relations) -> Self {
+        Self {
+            claim_word: claim_relations.claim_word.clone(),
+            claim_byte: claim_relations.claim_byte.clone(),
+            io_word: claim_relations.io_word.clone(),
+            range_check_8_8: vm_relations.range_check_8_8.clone(),
         }
-        eval.add_to_relation(RelationEntry::new(
-            &self.claim_relations.io_word,
-            E::EF::from(active.clone() * input_io_mask),
-            &[
-                E::F::from(BaseField::from(VM_PUBLIC_INPUT_KIND)),
-                input_io_index,
-                cols.value.clone(),
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.claim_relations.io_word,
-            E::EF::from(active.clone() * output_io_mask),
-            &[
-                E::F::from(BaseField::from(VM_PUBLIC_OUTPUT_KIND)),
-                output_io_index,
-                cols.value.clone(),
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.vm_relations.range_check_8_8,
-            -E::EF::from(active_u16.clone()),
-            &[cols.low_byte.clone(), cols.high_byte.clone()],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.claim_relations.claim_byte,
-            E::EF::from(active_u16.clone()),
-            &[
-                word_index.clone(),
-                E::F::from(BaseField::from(0)),
-                cols.low_byte,
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.claim_relations.claim_byte,
-            E::EF::from(active_u16),
-            &[word_index, E::F::from(BaseField::from(1)), cols.high_byte],
-        ));
-
-        eval.finalize_logup_in_pairs();
-        eval
     }
 }
 
-/// Generates scoped claim words, public bytes, IO words, and range consumers.
+stwo_macros::define_air_fns! {
+    max_degree: 3,
+    embedded: [],
+    embedded_component: true,
+    embedded_enabler_boolean: false,
+    embedded_relations:
+        crate::vm_public_claim_input_air::VmPublicClaimInputComponentRelations,
+    logup_batch: 2,
+    embedded_preprocessed: {
+        row_mask: "recursion_vm_public_claim_input_row_mask",
+        word_index: "recursion_vm_public_claim_input_word_index",
+        constant_mask: "recursion_vm_public_claim_input_constant_mask",
+        boolean_mask: "recursion_vm_public_claim_input_boolean_mask",
+        u16_mask: "recursion_vm_public_claim_input_u16_mask",
+        constant_value: "recursion_vm_public_claim_input_constant",
+        input_io_mask: "recursion_vm_public_claim_input_input_io_mask",
+        input_io_index: "recursion_vm_public_claim_input_input_io_index",
+        output_io_mask: "recursion_vm_public_claim_input_output_io_mask",
+        output_io_index: "recursion_vm_public_claim_input_output_io_index",
+    },
+    embedded_params: [
+        segment_active, semantics_scope, hash_scope, public_logup_scope,
+        input_kind, output_kind, low_byte_index, high_byte_index,
+    ],
+
+    relation claim_word(3);
+    relation claim_byte(3);
+    relation io_word(3);
+    relation range_check_8_8(2);
+
+    fn vm_public_claim_input(
+        value, low_byte, high_byte,
+        row_mask, word_index, constant_mask, boolean_mask, u16_mask, constant_value,
+        input_io_mask, input_io_index, output_io_mask, output_io_index,
+        segment_active, semantics_scope, hash_scope, public_logup_scope,
+        input_kind, output_kind, low_byte_index, high_byte_index,
+    ) {
+        let active = row_mask * segment_active;
+        let active_boolean = boolean_mask * segment_active;
+        let active_u16 = u16_mask * segment_active;
+
+        constrain enabler - row_mask;
+        constrain (1 - active) * value;
+        constrain active * constant_mask * (value - constant_value);
+        constrain active_boolean * value * (1 - value);
+        constrain active_u16 * (value - low_byte - high_byte * 256);
+        constrain (1 - active_u16) * low_byte;
+        constrain (1 - active_u16) * high_byte;
+
+        emit(active) claim_word(semantics_scope, word_index, value);
+        emit(active) claim_word(hash_scope, word_index, value);
+        emit(active) claim_word(public_logup_scope, word_index, value);
+        emit(active * input_io_mask) io_word(input_kind, input_io_index, value);
+        emit(active * output_io_mask) io_word(output_kind, output_io_index, value);
+        consume(active_u16) range_check_8_8(low_byte, high_byte);
+        emit(active_u16) claim_byte(word_index, low_byte_index, low_byte);
+        emit(active_u16) claim_byte(word_index, high_byte_index, high_byte);
+
+        return value;
+    }
+}
+
+pub use component::air::{Component, Eval};
+
+/// Construct the generated evaluator for the selected universal proof kind.
+pub fn eval_for_proof_kind(
+    log_size: u32,
+    proof_kind: ProofKind,
+    claim_relations: &VmPublicClaimInputRelations,
+    vm_relations: &Relations,
+) -> Eval {
+    Eval {
+        log_size,
+        segment_active: BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        semantics_scope: BaseField::from(VM_CLAIM_SEMANTICS_SCOPE),
+        hash_scope: BaseField::from(VM_CLAIM_HASH_SCOPE),
+        public_logup_scope: BaseField::from(VM_PUBLIC_LOGUP_SCOPE),
+        input_kind: BaseField::from(VM_PUBLIC_INPUT_KIND),
+        output_kind: BaseField::from(VM_PUBLIC_OUTPUT_KIND),
+        low_byte_index: BaseField::from(0),
+        high_byte_index: BaseField::from(1),
+        relations: VmPublicClaimInputComponentRelations::new(claim_relations, vm_relations),
+    }
+}
+
+/// Generate scoped claim words, public bytes, IO words, and range consumers.
 pub fn gen_interaction_trace(
     trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     preprocessed: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
@@ -329,95 +292,19 @@ pub fn gen_interaction_trace(
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     QM31,
 ) {
-    let cols = VmPublicClaimInputColumns::from_iter(
-        trace.iter().map(|evaluation| &evaluation.values.data),
-    );
-    let pp = preprocessed
-        .iter()
-        .map(|column| &column.values.data)
-        .collect::<Vec<_>>();
-    let simd_size = cols.enabler.len();
-    let log_size = trace[0].domain.log_size();
-    let segment = BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf));
-    let active = (0..simd_size)
-        .map(|row| PackedQM31::from(pp[ROW_MASK_COLUMN][row] * segment))
-        .collect::<Vec<_>>();
-    let active_u16 = (0..simd_size)
-        .map(|row| active[row] * PackedQM31::from(pp[U16_MASK_COLUMN][row]))
-        .collect::<Vec<_>>();
-    let negative_u16 = active_u16.iter().map(|value| -*value).collect::<Vec<_>>();
-    let input_io_active = (0..simd_size)
-        .map(|row| active[row] * PackedQM31::from(pp[INPUT_IO_MASK_COLUMN][row]))
-        .collect::<Vec<_>>();
-    let output_io_active = (0..simd_size)
-        .map(|row| active[row] * PackedQM31::from(pp[OUTPUT_IO_MASK_COLUMN][row]))
-        .collect::<Vec<_>>();
-    let semantics_scope =
-        vec![PackedM31::broadcast(BaseField::from(VM_CLAIM_SEMANTICS_SCOPE)); simd_size];
-    let hash_scope = vec![PackedM31::broadcast(BaseField::from(VM_CLAIM_HASH_SCOPE)); simd_size];
-    let public_logup_scope =
-        vec![PackedM31::broadcast(BaseField::from(VM_PUBLIC_LOGUP_SCOPE)); simd_size];
-    let semantics_denom = combine!(
-        claim_relations.claim_word,
-        [semantics_scope, pp[WORD_INDEX_COLUMN], cols.value]
-    );
-    let hash_denom = combine!(
-        claim_relations.claim_word,
-        [hash_scope, pp[WORD_INDEX_COLUMN], cols.value]
-    );
-    let public_logup_denom = combine!(
-        claim_relations.claim_word,
-        [public_logup_scope, pp[WORD_INDEX_COLUMN], cols.value]
-    );
-    let range_denom = combine!(
-        vm_relations.range_check_8_8,
-        [cols.low_byte, cols.high_byte]
-    );
-    let input_kind = vec![PackedM31::broadcast(BaseField::from(VM_PUBLIC_INPUT_KIND)); simd_size];
-    let output_kind = vec![PackedM31::broadcast(BaseField::from(VM_PUBLIC_OUTPUT_KIND)); simd_size];
-    let input_io_denom = combine!(
-        claim_relations.io_word,
-        [input_kind, pp[INPUT_IO_INDEX_COLUMN], cols.value]
-    );
-    let output_io_denom = combine!(
-        claim_relations.io_word,
-        [output_kind, pp[OUTPUT_IO_INDEX_COLUMN], cols.value]
-    );
-    let low_byte_index = vec![PackedM31::broadcast(BaseField::from(0)); simd_size];
-    let high_byte_index = vec![PackedM31::broadcast(BaseField::from(1)); simd_size];
-    let low_byte_denom = combine!(
-        claim_relations.claim_byte,
-        [pp[WORD_INDEX_COLUMN], low_byte_index, cols.low_byte]
-    );
-    let high_byte_denom = combine!(
-        claim_relations.claim_byte,
-        [pp[WORD_INDEX_COLUMN], high_byte_index, cols.high_byte]
-    );
-
-    let mut logup_gen = LogupTraceGenerator::new(log_size);
-    write_pair!(&active, &semantics_denom, &active, &hash_denom, logup_gen);
-    write_pair!(
-        &active,
-        &public_logup_denom,
-        &input_io_active,
-        &input_io_denom,
-        logup_gen
-    );
-    write_pair!(
-        &output_io_active,
-        &output_io_denom,
-        &negative_u16,
-        &range_denom,
-        logup_gen
-    );
-    write_pair!(
-        &active_u16,
-        &low_byte_denom,
-        &active_u16,
-        &high_byte_denom,
-        logup_gen
-    );
-    logup_gen.finalize_last()
+    component::witness::gen_interaction_trace(
+        trace,
+        preprocessed,
+        BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        BaseField::from(VM_CLAIM_SEMANTICS_SCOPE),
+        BaseField::from(VM_CLAIM_HASH_SCOPE),
+        BaseField::from(VM_PUBLIC_LOGUP_SCOPE),
+        BaseField::from(VM_PUBLIC_INPUT_KIND),
+        BaseField::from(VM_PUBLIC_OUTPUT_KIND),
+        BaseField::from(0),
+        BaseField::from(1),
+        &VmPublicClaimInputComponentRelations::new(claim_relations, vm_relations),
+    )
 }
 
 fn input_io_index(shape: VmPublicClaimShape, claim_index: usize) -> Option<u32> {
@@ -469,20 +356,19 @@ pub fn register_range_check_multiplicities(
     proof_kind: ProofKind,
     counters: &mut prover::relations::Counters,
 ) {
-    let cols = VmPublicClaimInputColumns::from_iter(
-        trace.iter().map(|evaluation| &evaluation.values.data),
-    );
+    let low_byte = &trace[2].values.data;
+    let high_byte = &trace[3].values.data;
     let pp = preprocessed
         .iter()
         .map(|column| &column.values.data)
         .collect::<Vec<_>>();
     let segment = BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf));
-    let multiplicities = (0..cols.enabler.len())
+    let multiplicities = (0..trace[0].values.data.len())
         .map(|row| -(pp[ROW_MASK_COLUMN][row] * pp[U16_MASK_COLUMN][row] * segment))
         .collect::<Vec<_>>();
     counters.range_check_8_8.register_many(
         &multiplicities,
-        &[cols.low_byte.as_slice(), cols.high_byte.as_slice()],
+        &[low_byte.as_slice(), high_byte.as_slice()],
     );
 }
 
@@ -578,7 +464,7 @@ mod tests {
     use stwo::core::fields::m31::M31;
     use stwo::core::pcs::TreeVec;
     use stwo::prover::backend::Column;
-    use stwo_constraint_framework::assert_constraints_on_polys;
+    use stwo_constraint_framework::{FrameworkEval, assert_constraints_on_polys};
 
     use super::*;
     use crate::vm_public_claim::tests::{public_data, shape};
@@ -602,12 +488,12 @@ mod tests {
             gen_interaction_trace(&trace, &preprocessed, kind, &claim_relations, &vm_relations);
         let traces = TreeVec::new(vec![preprocessed, trace, interaction]);
         let trace_polys = traces.map_cols(|column| column.interpolate());
-        let eval = Eval {
-            log_size: preprocessing.log_size(),
-            proof_kind: kind,
-            claim_relations,
-            vm_relations,
-        };
+        let eval = eval_for_proof_kind(
+            preprocessing.log_size(),
+            kind,
+            &claim_relations,
+            &vm_relations,
+        );
         assert_constraints_on_polys(
             &trace_polys,
             CanonicCoset::new(preprocessing.log_size()),

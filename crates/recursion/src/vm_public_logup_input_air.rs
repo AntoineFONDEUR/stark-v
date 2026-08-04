@@ -16,15 +16,9 @@ use stwo::core::fields::qm31::QM31;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::simd::column::BaseColumn;
-use stwo::prover::backend::simd::m31::PackedM31;
-use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, RelationEntry,
-};
-use stwo_macros::define_component_tables;
 
 use crate::circuit::use_counts_for_outputs;
 use crate::recorder::Op;
@@ -55,29 +49,6 @@ const USE_COUNT_COLUMN: usize = 8;
 const SOURCE_INDEX_0_COLUMN: usize = 9;
 const SOURCE_INDEX_1_COLUMN: usize = 10;
 const PREPROCESSED_COLUMN_COUNT: usize = 11;
-
-const PREPROCESSED_COLUMN_IDS: [&str; PREPROCESSED_COLUMN_COUNT] = [
-    "recursion_vm_public_logup_input_row_mask",
-    "recursion_vm_public_logup_input_claim_word_mask",
-    "recursion_vm_public_logup_input_claim_byte_mask",
-    "recursion_vm_public_logup_input_challenge_mask",
-    "recursion_vm_public_logup_input_claimed_sum_mask",
-    "recursion_vm_public_logup_input_selector_mask",
-    "recursion_vm_public_logup_input_circuit_id",
-    "recursion_vm_public_logup_input_node_id",
-    "recursion_vm_public_logup_input_use_count",
-    "recursion_vm_public_logup_input_source_index_0",
-    "recursion_vm_public_logup_input_source_index_1",
-];
-
-define_component_tables! {
-    vm_public_logup_input: {
-        committed: { value },
-        constraints: {},
-    },
-}
-
-use prover_columns::VmPublicLogupInputColumns;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PreprocessedRow {
@@ -187,10 +158,7 @@ impl VmPublicLogupInputPreprocessed {
     }
 
     pub fn column_ids() -> Vec<PreProcessedColumnId> {
-        PREPROCESSED_COLUMN_IDS
-            .iter()
-            .map(|id| PreProcessedColumnId { id: (*id).into() })
-            .collect()
+        preprocessed_column_ids()
     }
 
     pub fn gen_columns(
@@ -333,109 +301,124 @@ fn expected_input_count(
         .ok_or(VmPublicLogupInputError::RowCountOverflow)
 }
 
-pub type Component = FrameworkComponent<Eval>;
-
+/// Relations used by the macro-generated public-LogUp input component.
 #[derive(Clone)]
-pub struct Eval {
-    pub log_size: u32,
-    pub proof_kind: ProofKind,
-    pub claim_relations: VmPublicClaimInputRelations,
-    pub challenge_relations: RelationChallengeRelations,
-    pub verifier_input_relations: VerifierInputRelations,
-    pub circuit_relations: RecursionRelations,
+pub struct VmPublicLogupInputComponentRelations {
+    pub claim_word: super::vm_public_claim_input_air::VmPublicClaimWordRelation,
+    pub claim_byte: super::vm_public_claim_input_air::VmPublicClaimByteRelation,
+    pub challenge_word: super::relation_challenge_air::RelationChallengeWordRelation,
+    pub verifier_input_word: super::transcript_payload_air::VerifierInputWordRelation,
+    pub wire: crate::relations::WireRelation,
 }
 
-impl FrameworkEval for Eval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
-
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
-
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = VmPublicLogupInputColumns::from_eval(&mut eval);
-        let ids = VmPublicLogupInputPreprocessed::column_ids();
-        let row_mask = eval.get_preprocessed_column(ids[ROW_MASK_COLUMN].clone());
-        let claim_word_mask = eval.get_preprocessed_column(ids[CLAIM_WORD_MASK_COLUMN].clone());
-        let claim_byte_mask = eval.get_preprocessed_column(ids[CLAIM_BYTE_MASK_COLUMN].clone());
-        let challenge_mask = eval.get_preprocessed_column(ids[CHALLENGE_MASK_COLUMN].clone());
-        let claimed_sum_mask = eval.get_preprocessed_column(ids[CLAIMED_SUM_MASK_COLUMN].clone());
-        let selector_mask = eval.get_preprocessed_column(ids[SELECTOR_MASK_COLUMN].clone());
-        let circuit_id = eval.get_preprocessed_column(ids[CIRCUIT_ID_COLUMN].clone());
-        let node_id = eval.get_preprocessed_column(ids[NODE_ID_COLUMN].clone());
-        let use_count = eval.get_preprocessed_column(ids[USE_COUNT_COLUMN].clone());
-        let source_index_0 = eval.get_preprocessed_column(ids[SOURCE_INDEX_0_COLUMN].clone());
-        let source_index_1 = eval.get_preprocessed_column(ids[SOURCE_INDEX_1_COLUMN].clone());
-        eval.add_constraint(cols.enabler.clone() - row_mask.clone());
-
-        let segment = E::F::from(BaseField::from(u32::from(
-            self.proof_kind == ProofKind::SegmentLeaf,
-        )));
-        let one = E::F::from(BaseField::from(1));
-        let witness_mask = row_mask.clone() - selector_mask.clone();
-        eval.add_constraint(witness_mask * (one - segment.clone()) * cols.value.clone());
-        eval.add_constraint(selector_mask * (cols.value.clone() - segment.clone()));
-
-        eval.add_to_relation(RelationEntry::new(
-            &self.claim_relations.claim_word,
-            -E::EF::from(segment.clone() * claim_word_mask),
-            &[
-                E::F::from(BaseField::from(VM_PUBLIC_LOGUP_SCOPE)),
-                source_index_0.clone(),
-                cols.value.clone(),
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.claim_relations.claim_byte,
-            -E::EF::from(segment.clone() * claim_byte_mask),
-            &[
-                source_index_0.clone(),
-                source_index_1.clone(),
-                cols.value.clone(),
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.challenge_relations.word,
-            -E::EF::from(segment.clone() * challenge_mask),
-            &[
-                E::F::from(BaseField::from(SEGMENT_VERIFIER_ID)),
-                E::F::from(BaseField::from(VM_PUBLIC_LOGUP_CHALLENGE_SCOPE)),
-                source_index_0.clone(),
-                source_index_1.clone(),
-                cols.value.clone(),
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.verifier_input_relations.input_word,
-            -E::EF::from(segment * claimed_sum_mask),
-            &[
-                E::F::from(BaseField::from(SEGMENT_VERIFIER_ID)),
-                E::F::from(BaseField::from(VerifierInputKind::ClaimedSum.as_u32())),
-                source_index_0,
-                source_index_1,
-                cols.value.clone(),
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.circuit_relations.wire,
-            E::EF::from(row_mask * use_count),
-            &[
-                circuit_id,
-                node_id,
-                cols.value,
-                E::F::from(BaseField::from(0)),
-                E::F::from(BaseField::from(0)),
-                E::F::from(BaseField::from(0)),
-            ],
-        ));
-        eval.finalize_logup_in_pairs();
-        eval
+impl VmPublicLogupInputComponentRelations {
+    /// Combine every source owner with the shared arithmetic wire relation.
+    pub fn new(
+        claim_relations: &VmPublicClaimInputRelations,
+        challenge_relations: &RelationChallengeRelations,
+        verifier_input_relations: &VerifierInputRelations,
+        circuit_relations: &RecursionRelations,
+    ) -> Self {
+        Self {
+            claim_word: claim_relations.claim_word.clone(),
+            claim_byte: claim_relations.claim_byte.clone(),
+            challenge_word: challenge_relations.word.clone(),
+            verifier_input_word: verifier_input_relations.input_word.clone(),
+            wire: circuit_relations.wire.clone(),
+        }
     }
 }
 
-/// Generates source consumers and exact circuit-wire producers.
+stwo_macros::define_air_fns! {
+    max_degree: 3,
+    embedded: [],
+    embedded_component: true,
+    embedded_enabler_boolean: false,
+    embedded_relations:
+        crate::vm_public_logup_input_air::VmPublicLogupInputComponentRelations,
+    logup_batch: 2,
+    embedded_preprocessed: {
+        row_mask: "recursion_vm_public_logup_input_row_mask",
+        claim_word_mask: "recursion_vm_public_logup_input_claim_word_mask",
+        claim_byte_mask: "recursion_vm_public_logup_input_claim_byte_mask",
+        challenge_mask: "recursion_vm_public_logup_input_challenge_mask",
+        claimed_sum_mask: "recursion_vm_public_logup_input_claimed_sum_mask",
+        selector_mask: "recursion_vm_public_logup_input_selector_mask",
+        circuit_id: "recursion_vm_public_logup_input_circuit_id",
+        node_id: "recursion_vm_public_logup_input_node_id",
+        use_count: "recursion_vm_public_logup_input_use_count",
+        source_index_0: "recursion_vm_public_logup_input_source_index_0",
+        source_index_1: "recursion_vm_public_logup_input_source_index_1",
+    },
+    embedded_params: [
+        segment_active, claim_scope, verifier_id, challenge_scope, claimed_sum_kind,
+    ],
+
+    relation claim_word(3);
+    relation claim_byte(3);
+    relation challenge_word(5);
+    relation verifier_input_word(5);
+    relation wire(6);
+
+    fn vm_public_logup_input(
+        value,
+        row_mask, claim_word_mask, claim_byte_mask, challenge_mask,
+        claimed_sum_mask, selector_mask, circuit_id, node_id, use_count,
+        source_index_0, source_index_1,
+        segment_active, claim_scope, verifier_id, challenge_scope, claimed_sum_kind,
+    ) {
+        let witness_mask = row_mask - selector_mask;
+
+        constrain enabler - row_mask;
+        constrain witness_mask * (1 - segment_active) * value;
+        constrain selector_mask * (value - segment_active);
+
+        consume(segment_active * claim_word_mask) claim_word(
+            claim_scope, source_index_0, value,
+        );
+        consume(segment_active * claim_byte_mask) claim_byte(
+            source_index_0, source_index_1, value,
+        );
+        consume(segment_active * challenge_mask) challenge_word(
+            verifier_id, challenge_scope, source_index_0, source_index_1, value,
+        );
+        consume(segment_active * claimed_sum_mask) verifier_input_word(
+            verifier_id, claimed_sum_kind, source_index_0, source_index_1, value,
+        );
+        emit(row_mask * use_count) wire(circuit_id, node_id, value, 0, 0, 0);
+
+        return value;
+    }
+}
+
+pub use component::air::{Component, Eval};
+
+/// Construct the generated evaluator for the selected universal proof kind.
+pub fn eval_for_proof_kind(
+    log_size: u32,
+    proof_kind: ProofKind,
+    claim_relations: &VmPublicClaimInputRelations,
+    challenge_relations: &RelationChallengeRelations,
+    verifier_input_relations: &VerifierInputRelations,
+    circuit_relations: &RecursionRelations,
+) -> Eval {
+    Eval {
+        log_size,
+        segment_active: BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        claim_scope: BaseField::from(VM_PUBLIC_LOGUP_SCOPE),
+        verifier_id: BaseField::from(SEGMENT_VERIFIER_ID),
+        challenge_scope: BaseField::from(VM_PUBLIC_LOGUP_CHALLENGE_SCOPE),
+        claimed_sum_kind: BaseField::from(VerifierInputKind::ClaimedSum.as_u32()),
+        relations: VmPublicLogupInputComponentRelations::new(
+            claim_relations,
+            challenge_relations,
+            verifier_input_relations,
+            circuit_relations,
+        ),
+    }
+}
+
+/// Generate source consumers and exact circuit-wire producers.
 pub fn gen_interaction_trace(
     trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     preprocessed: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
@@ -448,99 +431,21 @@ pub fn gen_interaction_trace(
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     QM31,
 ) {
-    let cols = VmPublicLogupInputColumns::from_iter(
-        trace.iter().map(|evaluation| &evaluation.values.data),
-    );
-    let pp = preprocessed
-        .iter()
-        .map(|column| &column.values.data)
-        .collect::<Vec<_>>();
-    let simd_size = cols.enabler.len();
-    let log_size = trace[0].domain.log_size();
-    let segment = BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf));
-    let negative_source = |mask: usize| {
-        (0..simd_size)
-            .map(|row| -PackedQM31::from(pp[mask][row] * segment))
-            .collect::<Vec<_>>()
-    };
-    let negative_claim_word = negative_source(CLAIM_WORD_MASK_COLUMN);
-    let negative_claim_byte = negative_source(CLAIM_BYTE_MASK_COLUMN);
-    let negative_challenge = negative_source(CHALLENGE_MASK_COLUMN);
-    let negative_claimed_sum = negative_source(CLAIMED_SUM_MASK_COLUMN);
-    let wire_multiplicity = (0..simd_size)
-        .map(|row| PackedQM31::from(pp[ROW_MASK_COLUMN][row] * pp[USE_COUNT_COLUMN][row]))
-        .collect::<Vec<_>>();
-    let claim_scope = vec![PackedM31::broadcast(BaseField::from(VM_PUBLIC_LOGUP_SCOPE)); simd_size];
-    let verifier_id = vec![PackedM31::broadcast(BaseField::from(SEGMENT_VERIFIER_ID)); simd_size];
-    let challenge_scope =
-        vec![PackedM31::broadcast(BaseField::from(VM_PUBLIC_LOGUP_CHALLENGE_SCOPE)); simd_size];
-    let claimed_sum_kind =
-        vec![
-            PackedM31::broadcast(BaseField::from(VerifierInputKind::ClaimedSum.as_u32()));
-            simd_size
-        ];
-    let zeros = vec![PackedM31::broadcast(BaseField::from(0)); simd_size];
-    let claim_word_denom = combine!(
-        claim_relations.claim_word,
-        [claim_scope, pp[SOURCE_INDEX_0_COLUMN], cols.value]
-    );
-    let claim_byte_denom = combine!(
-        claim_relations.claim_byte,
-        [
-            pp[SOURCE_INDEX_0_COLUMN],
-            pp[SOURCE_INDEX_1_COLUMN],
-            cols.value
-        ]
-    );
-    let challenge_denom = combine!(
-        challenge_relations.word,
-        [
-            &verifier_id,
-            challenge_scope,
-            pp[SOURCE_INDEX_0_COLUMN],
-            pp[SOURCE_INDEX_1_COLUMN],
-            cols.value
-        ]
-    );
-    let claimed_sum_denom = combine!(
-        verifier_input_relations.input_word,
-        [
-            verifier_id,
-            claimed_sum_kind,
-            pp[SOURCE_INDEX_0_COLUMN],
-            pp[SOURCE_INDEX_1_COLUMN],
-            cols.value
-        ]
-    );
-    let wire_denom = combine!(
-        circuit_relations.wire,
-        [
-            pp[CIRCUIT_ID_COLUMN],
-            pp[NODE_ID_COLUMN],
-            cols.value,
-            zeros,
-            zeros,
-            zeros
-        ]
-    );
-
-    let mut logup_gen = LogupTraceGenerator::new(log_size);
-    write_pair!(
-        &negative_claim_word,
-        &claim_word_denom,
-        &negative_claim_byte,
-        &claim_byte_denom,
-        logup_gen
-    );
-    write_pair!(
-        &negative_challenge,
-        &challenge_denom,
-        &negative_claimed_sum,
-        &claimed_sum_denom,
-        logup_gen
-    );
-    write_col!(&wire_multiplicity, &wire_denom, logup_gen);
-    logup_gen.finalize_last()
+    component::witness::gen_interaction_trace(
+        trace,
+        preprocessed,
+        BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        BaseField::from(VM_PUBLIC_LOGUP_SCOPE),
+        BaseField::from(SEGMENT_VERIFIER_ID),
+        BaseField::from(VM_PUBLIC_LOGUP_CHALLENGE_SCOPE),
+        BaseField::from(VerifierInputKind::ClaimedSum.as_u32()),
+        &VmPublicLogupInputComponentRelations::new(
+            claim_relations,
+            challenge_relations,
+            verifier_input_relations,
+            circuit_relations,
+        ),
+    )
 }
 
 /// Materializes input values after proving that witness structure is canonical.
@@ -696,7 +601,7 @@ mod tests {
     use rstest::rstest;
     use stwo::core::fields::qm31::SecureField;
     use stwo::core::pcs::TreeVec;
-    use stwo_constraint_framework::assert_constraints_on_polys;
+    use stwo_constraint_framework::{FrameworkEval, assert_constraints_on_polys};
 
     use super::*;
     use crate::vm_public_claim::{canonical_vm_public_claim_words, tests as claim_tests};
@@ -772,14 +677,14 @@ mod tests {
         );
         let traces = TreeVec::new(vec![preprocessed, trace, interaction]);
         let trace_polys = traces.map_cols(|column| column.interpolate());
-        let eval = Eval {
-            log_size: preprocessing.log_size(),
-            proof_kind: kind,
-            claim_relations,
-            challenge_relations,
-            verifier_input_relations,
-            circuit_relations,
-        };
+        let eval = eval_for_proof_kind(
+            preprocessing.log_size(),
+            kind,
+            &claim_relations,
+            &challenge_relations,
+            &verifier_input_relations,
+            &circuit_relations,
+        );
         assert_constraints_on_polys(
             &trace_polys,
             CanonicCoset::new(preprocessing.log_size()),

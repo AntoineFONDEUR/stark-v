@@ -813,74 +813,74 @@ impl RosterCollector {
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[10], claimed_sum(), {
             let log_size = log_size();
-            super::statement_input_air::Eval {
+            super::statement_input_air::eval_for_proof_kind(
                 log_size,
-                proof_kind: kind,
-                input_relations: relations.verifier_input.clone(),
-                statement_relations: relations.statement_input.clone(),
-            }
+                kind,
+                &relations.verifier_input,
+                &relations.statement_input,
+            )
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[11], claimed_sum(), {
             let log_size = log_size();
-            super::statement_semantics_input_air::Eval {
+            super::statement_semantics_input_air::eval_for_proof_kind(
                 log_size,
-                proof_kind: kind,
-                statement_relations: relations.statement_input.clone(),
-                circuit_relations: relations.recursion.clone(),
-                vm_relations: relations.vm.clone(),
-            }
+                kind,
+                &relations.statement_input,
+                &relations.recursion,
+                &relations.vm,
+            )
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[12], claimed_sum(), {
             let log_size = log_size();
-            super::vm_public_claim_input_air::Eval {
+            super::vm_public_claim_input_air::eval_for_proof_kind(
                 log_size,
-                proof_kind: kind,
-                claim_relations: relations.vm_public_claim_input.clone(),
-                vm_relations: relations.vm.clone(),
-            }
+                kind,
+                &relations.vm_public_claim_input,
+                &relations.vm,
+            )
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[13], claimed_sum(), {
             let log_size = log_size();
-            super::vm_public_claim_hash_air::Eval {
+            super::vm_public_claim_hash_air::eval_for_proof_kind(
                 log_size,
-                proof_kind: kind,
-                vm_relations: relations.vm.clone(),
-                claim_input_relations: relations.vm_public_claim_input.clone(),
-                hash_relations: relations.vm_public_claim_hash.clone(),
-                verifier_input_relations: relations.verifier_input.clone(),
-            }
+                kind,
+                &relations.vm,
+                &relations.vm_public_claim_input,
+                &relations.vm_public_claim_hash,
+                &relations.verifier_input,
+            )
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[14], claimed_sum(), {
             let log_size = log_size();
-            super::vm_public_io_hash_air::Eval {
+            super::vm_public_io_hash_air::eval_for_proof_kind(
                 log_size,
-                proof_kind: kind,
-                vm_relations: relations.vm.clone(),
-                claim_relations: relations.vm_public_claim_input.clone(),
-                io_hash_relations: relations.vm_public_io_hash.clone(),
-            }
+                kind,
+                &relations.vm,
+                &relations.vm_public_claim_input,
+                &relations.vm_public_io_hash,
+            )
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[15], claimed_sum(), {
             let log_size = log_size();
-            super::vm_public_claim_semantics_input_air::Eval {
+            super::vm_public_claim_semantics_input_air::eval_for_proof_kind(
                 log_size,
-                proof_kind: kind,
-                claim_relations: relations.vm_public_claim_input.clone(),
-                statement_relations: relations.statement_input.clone(),
-                circuit_relations: relations.recursion.clone(),
-                io_hash_relations: relations.vm_public_io_hash.clone(),
-            }
+                kind,
+                &relations.vm_public_claim_input,
+                &relations.statement_input,
+                &relations.recursion,
+                &relations.vm_public_io_hash,
+            )
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[16], claimed_sum(), {
             let log_size = log_size();
-            super::vm_public_logup_input_air::Eval {
+            super::vm_public_logup_input_air::eval_for_proof_kind(
                 log_size,
-                proof_kind: kind,
-                claim_relations: relations.vm_public_claim_input.clone(),
-                challenge_relations: relations.relation_challenge.clone(),
-                verifier_input_relations: relations.verifier_input.clone(),
-                circuit_relations: relations.recursion.clone(),
-            }
+                kind,
+                &relations.vm_public_claim_input,
+                &relations.relation_challenge,
+                &relations.verifier_input,
+                &relations.recursion,
+            )
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[17], claimed_sum(), {
             let log_size = log_size();
@@ -892,14 +892,14 @@ impl RosterCollector {
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[18], claimed_sum(), {
             let log_size = log_size();
-            super::vm_air_composition_input_air::Eval {
+            super::vm_air_composition_input_air::eval_for_proof_kind(
                 log_size,
-                proof_kind: kind,
-                challenge_relations: relations.relation_challenge.clone(),
-                verifier_input_relations: relations.verifier_input.clone(),
-                randomness_relations: relations.verifier_randomness.clone(),
-                circuit_relations: relations.recursion.clone(),
-            }
+                kind,
+                &relations.relation_challenge,
+                &relations.verifier_input,
+                &relations.verifier_randomness,
+                &relations.recursion,
+            )
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[19], claimed_sum(), {
             let log_size = log_size();

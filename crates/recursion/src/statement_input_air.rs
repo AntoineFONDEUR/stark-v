@@ -20,16 +20,10 @@ use stwo::core::fields::qm31::QM31;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::simd::column::BaseColumn;
-use stwo::prover::backend::simd::m31::PackedM31;
-use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
-    relation,
-};
-use stwo_macros::define_component_tables;
+use stwo_constraint_framework::{Relation, relation};
 
 use super::control_air::{
     LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
@@ -53,29 +47,11 @@ const STATEMENT_SCOPE_COLUMN: usize = 4;
 const WORD_INDEX_COLUMN: usize = 5;
 const PREPROCESSED_COLUMN_COUNT: usize = 6;
 
-const PREPROCESSED_COLUMN_IDS: [&str; PREPROCESSED_COLUMN_COUNT] = [
-    "recursion_statement_input_row_mask",
-    "recursion_statement_input_segment_mask",
-    "recursion_statement_input_binary_mask",
-    "recursion_statement_input_verifier_id",
-    "recursion_statement_input_scope",
-    "recursion_statement_input_word_index",
-];
-
 pub const SEGMENT_STATEMENT_SCOPE: u32 = 0;
 pub const LEFT_STATEMENT_SCOPE: u32 = 1;
 pub const RIGHT_STATEMENT_SCOPE: u32 = 2;
 pub const PARENT_STATEMENT_SCOPE: u32 = 3;
 pub const VM_CLAIM_STATEMENT_SCOPE: u32 = 4;
-
-define_component_tables! {
-    statement_input: {
-        committed: { value },
-        constraints: {},
-    },
-}
-
-use prover_columns::StatementInputColumns;
 
 // One scoped canonical statement word: scope, word index, and value.
 relation!(StatementWordRelation, 3);
@@ -171,10 +147,7 @@ impl StatementInputPreprocessed {
     }
 
     pub fn column_ids() -> Vec<PreProcessedColumnId> {
-        PREPROCESSED_COLUMN_IDS
-            .iter()
-            .map(|id| PreProcessedColumnId { id: (*id).into() })
-            .collect()
+        preprocessed_column_ids()
     }
 
     pub fn gen_columns(
@@ -250,74 +223,91 @@ fn append_lane_rows(
     Ok(())
 }
 
-pub type Component = FrameworkComponent<Eval>;
-
+/// Relation instances used by the macro-generated statement input component.
 #[derive(Clone)]
-pub struct Eval {
-    pub log_size: u32,
-    pub proof_kind: ProofKind,
-    pub input_relations: VerifierInputRelations,
-    pub statement_relations: StatementInputRelations,
+pub struct StatementInputComponentRelations {
+    pub input_word: super::transcript_payload_air::VerifierInputWordRelation,
+    pub statement_word: StatementWordRelation,
 }
 
-impl FrameworkEval for Eval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
-
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
-
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = StatementInputColumns::from_eval(&mut eval);
-        let column_ids = StatementInputPreprocessed::column_ids();
-        let row_mask = eval.get_preprocessed_column(column_ids[ROW_MASK_COLUMN].clone());
-        let segment_mask = eval.get_preprocessed_column(column_ids[SEGMENT_MASK_COLUMN].clone());
-        let binary_mask = eval.get_preprocessed_column(column_ids[BINARY_MASK_COLUMN].clone());
-        let verifier_id = eval.get_preprocessed_column(column_ids[VERIFIER_ID_COLUMN].clone());
-        let statement_scope =
-            eval.get_preprocessed_column(column_ids[STATEMENT_SCOPE_COLUMN].clone());
-        let word_index = eval.get_preprocessed_column(column_ids[WORD_INDEX_COLUMN].clone());
-        eval.add_constraint(cols.enabler.clone() - row_mask.clone());
-
-        let segment_active = BaseField::from(u32::from(self.proof_kind == ProofKind::SegmentLeaf));
-        let binary_active = BaseField::from(u32::from(self.proof_kind == ProofKind::BinaryNode));
-        let active = segment_mask.clone() * segment_active + binary_mask * binary_active;
-        eval.add_constraint((row_mask - active.clone()) * cols.value.clone());
-
-        eval.add_to_relation(RelationEntry::new(
-            &self.input_relations.input_word,
-            -E::EF::from(active.clone()),
-            &[
-                verifier_id,
-                E::F::from(BaseField::from(VerifierInputKind::Statement.as_u32())),
-                E::F::from(BaseField::from(0)),
-                word_index.clone(),
-                cols.value.clone(),
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.statement_relations.statement_word,
-            E::EF::from(active),
-            &[statement_scope, word_index.clone(), cols.value.clone()],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.statement_relations.statement_word,
-            E::EF::from(segment_mask * segment_active),
-            &[
-                E::F::from(BaseField::from(VM_CLAIM_STATEMENT_SCOPE)),
-                word_index,
-                cols.value,
-            ],
-        ));
-
-        eval.finalize_logup_in_pairs();
-        eval
+impl StatementInputComponentRelations {
+    /// Combine verifier-input and scoped-statement relation instances.
+    pub fn new(
+        input_relations: &VerifierInputRelations,
+        statement_relations: &StatementInputRelations,
+    ) -> Self {
+        Self {
+            input_word: input_relations.input_word.clone(),
+            statement_word: statement_relations.statement_word.clone(),
+        }
     }
 }
 
-/// Generates the input-consumer and scoped-statement relation fractions.
+stwo_macros::define_air_fns! {
+    max_degree: 3,
+    embedded: [],
+    embedded_component: true,
+    embedded_enabler_boolean: false,
+    embedded_relations: crate::statement_input_air::StatementInputComponentRelations,
+    logup_batch: 2,
+    embedded_preprocessed: {
+        row_mask: "recursion_statement_input_row_mask",
+        segment_mask: "recursion_statement_input_segment_mask",
+        binary_mask: "recursion_statement_input_binary_mask",
+        verifier_id: "recursion_statement_input_verifier_id",
+        statement_scope: "recursion_statement_input_scope",
+        word_index: "recursion_statement_input_word_index",
+    },
+    embedded_params: [
+        segment_active, binary_active, statement_input_kind, input_item, vm_claim_scope,
+    ],
+
+    relation input_word(5);
+    relation statement_word(3);
+
+    fn statement_input(
+        value,
+        row_mask, segment_mask, binary_mask, verifier_id, statement_scope, word_index,
+        segment_active, binary_active, statement_input_kind, input_item, vm_claim_scope,
+    ) {
+        let active = segment_mask * segment_active + binary_mask * binary_active;
+
+        constrain enabler - row_mask;
+        constrain (row_mask - active) * value;
+
+        consume(active) input_word(
+            verifier_id, statement_input_kind, input_item, word_index, value,
+        );
+        emit(active) statement_word(statement_scope, word_index, value);
+        emit(segment_mask * segment_active) statement_word(
+            vm_claim_scope, word_index, value,
+        );
+
+        return value;
+    }
+}
+
+pub use component::air::{Component, Eval};
+
+/// Construct the generated evaluator with verifier-owned routing constants.
+pub fn eval_for_proof_kind(
+    log_size: u32,
+    proof_kind: ProofKind,
+    input_relations: &VerifierInputRelations,
+    statement_relations: &StatementInputRelations,
+) -> Eval {
+    Eval {
+        log_size,
+        segment_active: BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        binary_active: BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        statement_input_kind: BaseField::from(VerifierInputKind::Statement.as_u32()),
+        input_item: BaseField::from(0),
+        vm_claim_scope: BaseField::from(VM_CLAIM_STATEMENT_SCOPE),
+        relations: StatementInputComponentRelations::new(input_relations, statement_relations),
+    }
+}
+
+/// Generate verifier-input consumers and scoped-statement producers.
 pub fn gen_interaction_trace(
     trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     preprocessed: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
@@ -328,71 +318,19 @@ pub fn gen_interaction_trace(
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     QM31,
 ) {
-    let cols =
-        StatementInputColumns::from_iter(trace.iter().map(|evaluation| &evaluation.values.data));
-    let pp = preprocessed
-        .iter()
-        .map(|column| &column.values.data)
-        .collect::<Vec<_>>();
-    let simd_size = cols.enabler.len();
-    let log_size = trace[0].domain.log_size();
-    let segment_active = BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf));
-    let binary_active = BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode));
-    let active: Vec<PackedQM31> = (0..simd_size)
-        .map(|row| {
-            PackedQM31::from(
-                pp[SEGMENT_MASK_COLUMN][row] * segment_active
-                    + pp[BINARY_MASK_COLUMN][row] * binary_active,
-            )
-        })
-        .collect();
-    let neg_active = active.iter().map(|value| -*value).collect::<Vec<_>>();
-    let source_kind =
-        vec![
-            PackedM31::broadcast(BaseField::from(VerifierInputKind::Statement.as_u32(),));
-            simd_size
-        ];
-    let zero = vec![PackedM31::broadcast(BaseField::from(0)); simd_size];
-    let input_denom = combine!(
-        input_relations.input_word,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            source_kind,
-            zero,
-            pp[WORD_INDEX_COLUMN],
-            cols.value
-        ]
-    );
-    let statement_denom = combine!(
-        statement_relations.statement_word,
-        [
-            pp[STATEMENT_SCOPE_COLUMN],
-            pp[WORD_INDEX_COLUMN],
-            cols.value
-        ]
-    );
-    let vm_claim_scope =
-        vec![PackedM31::broadcast(BaseField::from(VM_CLAIM_STATEMENT_SCOPE)); simd_size];
-    let vm_claim_denom = combine!(
-        statement_relations.statement_word,
-        [vm_claim_scope, pp[WORD_INDEX_COLUMN], cols.value]
-    );
-    let vm_claim_active = (0..simd_size)
-        .map(|row| PackedQM31::from(pp[SEGMENT_MASK_COLUMN][row] * segment_active))
-        .collect::<Vec<_>>();
-
-    let mut logup_gen = LogupTraceGenerator::new(log_size);
-    write_pair!(
-        &neg_active,
-        &input_denom,
-        &active,
-        &statement_denom,
-        logup_gen
-    );
-    write_col!(&vm_claim_active, &vm_claim_denom, logup_gen);
-    logup_gen.finalize_last()
+    component::witness::gen_interaction_trace(
+        trace,
+        preprocessed,
+        BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        BaseField::from(VerifierInputKind::Statement.as_u32()),
+        BaseField::from(0),
+        BaseField::from(VM_CLAIM_STATEMENT_SCOPE),
+        &StatementInputComponentRelations::new(input_relations, statement_relations),
+    )
 }
 
+/// Statement inputs needed by the selected universal verifier mode.
 /// Statement inputs needed by the selected universal verifier mode.
 #[derive(Clone, Copy)]
 pub enum StatementInputWitness<'a> {
@@ -594,7 +532,7 @@ mod tests {
     use prover::poseidon2_channel::Poseidon2M31Channel;
     use rstest::rstest;
     use stwo::core::pcs::TreeVec;
-    use stwo_constraint_framework::assert_constraints_on_polys;
+    use stwo_constraint_framework::{FrameworkEval, assert_constraints_on_polys};
 
     use super::*;
     use crate::kernel::{VerifierControlPlan, VerifierProgramSpec, VerifierSchema};
@@ -739,12 +677,12 @@ mod tests {
         );
         let traces = TreeVec::new(vec![preprocessed, trace, interaction]);
         let trace_polys = traces.map_cols(|column| column.interpolate());
-        let eval = Eval {
-            log_size: preprocessing.log_size(),
-            proof_kind: kind,
-            input_relations,
-            statement_relations,
-        };
+        let eval = eval_for_proof_kind(
+            preprocessing.log_size(),
+            kind,
+            &input_relations,
+            &statement_relations,
+        );
         assert_constraints_on_polys(
             &trace_polys,
             CanonicCoset::new(preprocessing.log_size()),
@@ -870,12 +808,12 @@ mod tests {
     fn statement_input_constraint_profile_stays_cubic() {
         use stwo_constraint_framework::expr::ExprEvaluator;
 
-        let eval = Eval {
-            log_size: 4,
-            proof_kind: ProofKind::SegmentLeaf,
-            input_relations: VerifierInputRelations::dummy(),
-            statement_relations: StatementInputRelations::dummy(),
-        };
+        let eval = eval_for_proof_kind(
+            4,
+            ProofKind::SegmentLeaf,
+            &VerifierInputRelations::dummy(),
+            &StatementInputRelations::dummy(),
+        );
         let degrees = eval
             .evaluate(ExprEvaluator::new())
             .constraint_degree_bounds();

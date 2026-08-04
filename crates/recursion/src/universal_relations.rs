@@ -467,74 +467,74 @@ mod tests {
         );
         usage_of(
             &mut usage,
-            super::super::statement_input_air::Eval {
-                log_size: LOG_SIZE,
-                proof_kind: KIND,
-                input_relations: relations.verifier_input.clone(),
-                statement_relations: relations.statement_input.clone(),
-            },
+            super::super::statement_input_air::eval_for_proof_kind(
+                LOG_SIZE,
+                KIND,
+                &relations.verifier_input,
+                &relations.statement_input,
+            ),
         );
         usage_of(
             &mut usage,
-            super::super::statement_semantics_input_air::Eval {
-                log_size: LOG_SIZE,
-                proof_kind: KIND,
-                statement_relations: relations.statement_input.clone(),
-                circuit_relations: relations.recursion.clone(),
-                vm_relations: relations.vm.clone(),
-            },
+            super::super::statement_semantics_input_air::eval_for_proof_kind(
+                LOG_SIZE,
+                KIND,
+                &relations.statement_input,
+                &relations.recursion,
+                &relations.vm,
+            ),
         );
         usage_of(
             &mut usage,
-            super::super::vm_public_claim_input_air::Eval {
-                log_size: LOG_SIZE,
-                proof_kind: KIND,
-                claim_relations: relations.vm_public_claim_input.clone(),
-                vm_relations: relations.vm.clone(),
-            },
+            super::super::vm_public_claim_input_air::eval_for_proof_kind(
+                LOG_SIZE,
+                KIND,
+                &relations.vm_public_claim_input,
+                &relations.vm,
+            ),
         );
         usage_of(
             &mut usage,
-            super::super::vm_public_claim_hash_air::Eval {
-                log_size: LOG_SIZE,
-                proof_kind: KIND,
-                vm_relations: relations.vm.clone(),
-                claim_input_relations: relations.vm_public_claim_input.clone(),
-                hash_relations: relations.vm_public_claim_hash.clone(),
-                verifier_input_relations: relations.verifier_input.clone(),
-            },
+            super::super::vm_public_claim_hash_air::eval_for_proof_kind(
+                LOG_SIZE,
+                KIND,
+                &relations.vm,
+                &relations.vm_public_claim_input,
+                &relations.vm_public_claim_hash,
+                &relations.verifier_input,
+            ),
         );
         usage_of(
             &mut usage,
-            super::super::vm_public_io_hash_air::Eval {
-                log_size: LOG_SIZE,
-                proof_kind: KIND,
-                vm_relations: relations.vm.clone(),
-                claim_relations: relations.vm_public_claim_input.clone(),
-                io_hash_relations: relations.vm_public_io_hash.clone(),
-            },
+            super::super::vm_public_io_hash_air::eval_for_proof_kind(
+                LOG_SIZE,
+                KIND,
+                &relations.vm,
+                &relations.vm_public_claim_input,
+                &relations.vm_public_io_hash,
+            ),
         );
         usage_of(
             &mut usage,
-            super::super::vm_public_claim_semantics_input_air::Eval {
-                log_size: LOG_SIZE,
-                proof_kind: KIND,
-                claim_relations: relations.vm_public_claim_input.clone(),
-                statement_relations: relations.statement_input.clone(),
-                circuit_relations: relations.recursion.clone(),
-                io_hash_relations: relations.vm_public_io_hash.clone(),
-            },
+            super::super::vm_public_claim_semantics_input_air::eval_for_proof_kind(
+                LOG_SIZE,
+                KIND,
+                &relations.vm_public_claim_input,
+                &relations.statement_input,
+                &relations.recursion,
+                &relations.vm_public_io_hash,
+            ),
         );
         usage_of(
             &mut usage,
-            super::super::vm_public_logup_input_air::Eval {
-                log_size: LOG_SIZE,
-                proof_kind: KIND,
-                claim_relations: relations.vm_public_claim_input.clone(),
-                challenge_relations: relations.relation_challenge.clone(),
-                verifier_input_relations: relations.verifier_input.clone(),
-                circuit_relations: relations.recursion.clone(),
-            },
+            super::super::vm_public_logup_input_air::eval_for_proof_kind(
+                LOG_SIZE,
+                KIND,
+                &relations.vm_public_claim_input,
+                &relations.relation_challenge,
+                &relations.verifier_input,
+                &relations.recursion,
+            ),
         );
         usage_of(
             &mut usage,
@@ -546,14 +546,14 @@ mod tests {
         );
         usage_of(
             &mut usage,
-            super::super::vm_air_composition_input_air::Eval {
-                log_size: LOG_SIZE,
-                proof_kind: KIND,
-                challenge_relations: relations.relation_challenge.clone(),
-                verifier_input_relations: relations.verifier_input.clone(),
-                randomness_relations: relations.verifier_randomness.clone(),
-                circuit_relations: relations.recursion.clone(),
-            },
+            super::super::vm_air_composition_input_air::eval_for_proof_kind(
+                LOG_SIZE,
+                KIND,
+                &relations.relation_challenge,
+                &relations.verifier_input,
+                &relations.verifier_randomness,
+                &relations.recursion,
+            ),
         );
         usage_of(
             &mut usage,

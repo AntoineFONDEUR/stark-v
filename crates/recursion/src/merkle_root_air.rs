@@ -15,15 +15,9 @@ use stwo::core::fields::qm31::QM31;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::simd::column::BaseColumn;
-use stwo::prover::backend::simd::m31::PackedM31;
-use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
-};
-use stwo_macros::define_component_tables;
 
 use super::control_air::{
     LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
@@ -51,29 +45,6 @@ const ITEM_COLUMN: usize = 5;
 const TREE_ID_COLUMN: usize = 6;
 const PATH_COUNT_COLUMN: usize = 7;
 const PREPROCESSED_COLUMN_COUNT: usize = 8;
-
-const PREPROCESSED_COLUMN_IDS: [&str; PREPROCESSED_COLUMN_COUNT] = [
-    "recursion_merkle_root_row_mask",
-    "recursion_merkle_root_segment_mask",
-    "recursion_merkle_root_binary_mask",
-    "recursion_merkle_root_verifier_id",
-    "recursion_merkle_root_input_kind",
-    "recursion_merkle_root_item",
-    "recursion_merkle_root_tree_id",
-    "recursion_merkle_root_path_count",
-];
-
-define_component_tables! {
-    merkle_root: {
-        committed: {
-            digest_0, digest_1, digest_2, digest_3,
-            digest_4, digest_5, digest_6, digest_7,
-        },
-        constraints: {},
-    },
-}
-
-use prover_columns::MerkleRootColumns;
 
 /// Transcript commitment class backing one Merkle root.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,10 +150,7 @@ impl MerkleRootPreprocessed {
     }
 
     pub fn column_ids() -> Vec<PreProcessedColumnId> {
-        PREPROCESSED_COLUMN_IDS
-            .iter()
-            .map(|id| PreProcessedColumnId { id: (*id).into() })
-            .collect()
+        preprocessed_column_ids()
     }
 
     pub fn gen_columns(
@@ -296,93 +264,104 @@ fn canonical_usize(field: &'static str, item: usize) -> Result<u32, MerkleRootEr
         .map_err(|_| MerkleRootError::IndexNotCanonical { field, value })
 }
 
-pub type Component = FrameworkComponent<Eval>;
-
-/// Consumes transcript roots and emits one root node per fixed query path.
+/// Relations used by the macro-generated Merkle-root ownership component.
 #[derive(Clone)]
-pub struct Eval {
-    pub log_size: u32,
-    pub proof_kind: ProofKind,
-    pub verifier_input_relations: VerifierInputRelations,
-    pub recursion_relations: RecursionRelations,
+pub struct MerkleRootComponentRelations {
+    pub input_word: super::transcript_payload_air::VerifierInputWordRelation,
+    pub merkle_node: crate::relations::MerkleNodeRelation,
 }
 
-impl FrameworkEval for Eval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
-
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
-
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = MerkleRootColumns::from_eval(&mut eval);
-        let ids = MerkleRootPreprocessed::column_ids();
-        let row_mask = eval.get_preprocessed_column(ids[ROW_MASK_COLUMN].clone());
-        let segment_mask = eval.get_preprocessed_column(ids[SEGMENT_MASK_COLUMN].clone());
-        let binary_mask = eval.get_preprocessed_column(ids[BINARY_MASK_COLUMN].clone());
-        let verifier_id = eval.get_preprocessed_column(ids[VERIFIER_ID_COLUMN].clone());
-        let input_kind = eval.get_preprocessed_column(ids[INPUT_KIND_COLUMN].clone());
-        let item = eval.get_preprocessed_column(ids[ITEM_COLUMN].clone());
-        let tree_id = eval.get_preprocessed_column(ids[TREE_ID_COLUMN].clone());
-        let path_count = eval.get_preprocessed_column(ids[PATH_COUNT_COLUMN].clone());
-        let segment = E::F::from(BaseField::from(u32::from(
-            self.proof_kind == ProofKind::SegmentLeaf,
-        )));
-        let binary = E::F::from(BaseField::from(u32::from(
-            self.proof_kind == ProofKind::BinaryNode,
-        )));
-        let active = row_mask * (segment_mask * segment + binary_mask * binary);
-        let one = E::F::from(BaseField::from(1));
-        let digest = digest_columns(&cols);
-
-        eval.add_constraint(cols.enabler.clone() - active.clone());
-        for word in &digest {
-            eval.add_constraint((one.clone() - active.clone()) * word.clone());
+impl MerkleRootComponentRelations {
+    /// Combine transcript root words with the shared path-node relation.
+    pub fn new(
+        verifier_input_relations: &VerifierInputRelations,
+        recursion_relations: &RecursionRelations,
+    ) -> Self {
+        Self {
+            input_word: verifier_input_relations.input_word.clone(),
+            merkle_node: recursion_relations.merkle_node.clone(),
         }
-        for (limb, word) in digest.iter().enumerate() {
-            eval.add_to_relation(RelationEntry::new(
-                &self.verifier_input_relations.input_word,
-                -E::EF::from(active.clone()),
-                &[
-                    verifier_id.clone(),
-                    input_kind.clone(),
-                    item.clone(),
-                    E::F::from(BaseField::from(
-                        u32::try_from(limb).expect("digest limb fits u32"),
-                    )),
-                    word.clone(),
-                ],
-            ));
-        }
-        let mut node_tuple = vec![
-            tree_id,
-            E::F::from(BaseField::from(0)),
-            E::F::from(BaseField::from(0)),
-        ];
-        node_tuple.extend(digest);
-        eval.add_to_relation(RelationEntry::new(
-            &self.recursion_relations.merkle_node,
-            E::EF::from(active * path_count),
-            &node_tuple,
-        ));
-        eval.finalize_logup_in_pairs();
-        eval
     }
 }
 
-fn digest_columns<F: Clone>(cols: &MerkleRootColumns<F>) -> [F; DIGEST_WORDS] {
-    [
-        cols.digest_0.clone(),
-        cols.digest_1.clone(),
-        cols.digest_2.clone(),
-        cols.digest_3.clone(),
-        cols.digest_4.clone(),
-        cols.digest_5.clone(),
-        cols.digest_6.clone(),
-        cols.digest_7.clone(),
-    ]
+stwo_macros::define_air_fns! {
+    max_degree: 3,
+    embedded: [],
+    embedded_component: true,
+    embedded_enabler_boolean: false,
+    embedded_relations: crate::merkle_root_air::MerkleRootComponentRelations,
+    logup_batch: 2,
+    embedded_preprocessed: {
+        row_mask: "recursion_merkle_root_row_mask",
+        segment_mask: "recursion_merkle_root_segment_mask",
+        binary_mask: "recursion_merkle_root_binary_mask",
+        verifier_id: "recursion_merkle_root_verifier_id",
+        input_kind: "recursion_merkle_root_input_kind",
+        item: "recursion_merkle_root_item",
+        tree_id: "recursion_merkle_root_tree_id",
+        path_count: "recursion_merkle_root_path_count",
+    },
+    embedded_params: [segment_active, binary_active],
+
+    relation input_word(5);
+    relation merkle_node(11);
+
+    fn merkle_root(
+        digest_0, digest_1, digest_2, digest_3,
+        digest_4, digest_5, digest_6, digest_7,
+        row_mask, segment_mask, binary_mask, verifier_id,
+        input_kind, item, tree_id, path_count,
+        segment_active, binary_active,
+    ) {
+        // Trusted lane masks are disjoint subsets of the row mask.
+        let active = segment_mask * segment_active + binary_mask * binary_active;
+
+        constrain enabler - active;
+        constrain (1 - active) * digest_0;
+        constrain (1 - active) * digest_1;
+        constrain (1 - active) * digest_2;
+        constrain (1 - active) * digest_3;
+        constrain (1 - active) * digest_4;
+        constrain (1 - active) * digest_5;
+        constrain (1 - active) * digest_6;
+        constrain (1 - active) * digest_7;
+
+        consume(active) input_word(verifier_id, input_kind, item, 0, digest_0);
+        consume(active) input_word(verifier_id, input_kind, item, 1, digest_1);
+        consume(active) input_word(verifier_id, input_kind, item, 2, digest_2);
+        consume(active) input_word(verifier_id, input_kind, item, 3, digest_3);
+        consume(active) input_word(verifier_id, input_kind, item, 4, digest_4);
+        consume(active) input_word(verifier_id, input_kind, item, 5, digest_5);
+        consume(active) input_word(verifier_id, input_kind, item, 6, digest_6);
+        consume(active) input_word(verifier_id, input_kind, item, 7, digest_7);
+        emit(active * path_count) merkle_node(
+            tree_id, 0, 0,
+            digest_0, digest_1, digest_2, digest_3,
+            digest_4, digest_5, digest_6, digest_7,
+        );
+
+        return (
+            digest_0, digest_1, digest_2, digest_3,
+            digest_4, digest_5, digest_6, digest_7,
+        );
+    }
+}
+
+pub use component::air::{Component, Eval};
+
+/// Construct the generated root evaluator for the selected proof kind.
+pub fn eval_for_proof_kind(
+    log_size: u32,
+    proof_kind: ProofKind,
+    verifier_input_relations: &VerifierInputRelations,
+    recursion_relations: &RecursionRelations,
+) -> Eval {
+    Eval {
+        log_size,
+        segment_active: BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        binary_active: BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        relations: MerkleRootComponentRelations::new(verifier_input_relations, recursion_relations),
+    }
 }
 
 /// Trace and FRI roots carried by one fixed inner proof.
@@ -518,7 +497,7 @@ fn select_digest(
         .transpose()
 }
 
-/// Generates transcript-root consumers and multiplicity-weighted path roots.
+/// Generate transcript-root consumers and multiplicity-weighted path roots.
 pub fn gen_interaction_trace(
     trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     preprocessed: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
@@ -529,96 +508,13 @@ pub fn gen_interaction_trace(
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     QM31,
 ) {
-    let cols = MerkleRootColumns::from_iter(trace.iter().map(|column| &column.values.data));
-    let pp = preprocessed
-        .iter()
-        .map(|column| &column.values.data)
-        .collect::<Vec<_>>();
-    let digest = digest_columns(&cols);
-    let size = cols.enabler.len();
-    let segment = BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf));
-    let binary = BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode));
-    let active = (0..size)
-        .map(|row| {
-            PackedQM31::from(
-                pp[ROW_MASK_COLUMN][row]
-                    * (pp[SEGMENT_MASK_COLUMN][row] * segment
-                        + pp[BINARY_MASK_COLUMN][row] * binary),
-            )
-        })
-        .collect::<Vec<_>>();
-    let negative_active = active.iter().map(|value| -*value).collect::<Vec<_>>();
-    let input_denominators = (0..DIGEST_WORDS)
-        .map(|limb_index| {
-            let limb = PackedM31::broadcast(BaseField::from(
-                u32::try_from(limb_index).expect("digest limb fits u32"),
-            ));
-            (0..size)
-                .map(|row| {
-                    verifier_input_relations.input_word.combine(&[
-                        pp[VERIFIER_ID_COLUMN][row],
-                        pp[INPUT_KIND_COLUMN][row],
-                        pp[ITEM_COLUMN][row],
-                        limb,
-                        digest[limb_index][row],
-                    ])
-                })
-                .collect::<Vec<PackedQM31>>()
-        })
-        .collect::<Vec<_>>();
-    let zero = PackedM31::broadcast(BaseField::from(0));
-    let node_denominator = (0..size)
-        .map(|row| {
-            recursion_relations.merkle_node.combine(&[
-                pp[TREE_ID_COLUMN][row],
-                zero,
-                zero,
-                digest[0][row],
-                digest[1][row],
-                digest[2][row],
-                digest[3][row],
-                digest[4][row],
-                digest[5][row],
-                digest[6][row],
-                digest[7][row],
-            ])
-        })
-        .collect::<Vec<PackedQM31>>();
-    let node_numerator = (0..size)
-        .map(|row| active[row] * pp[PATH_COUNT_COLUMN][row])
-        .collect::<Vec<_>>();
-
-    let mut logup = LogupTraceGenerator::new(trace[0].domain.log_size());
-    write_pair!(
-        &negative_active,
-        &input_denominators[0],
-        &negative_active,
-        &input_denominators[1],
-        logup
-    );
-    write_pair!(
-        &negative_active,
-        &input_denominators[2],
-        &negative_active,
-        &input_denominators[3],
-        logup
-    );
-    write_pair!(
-        &negative_active,
-        &input_denominators[4],
-        &negative_active,
-        &input_denominators[5],
-        logup
-    );
-    write_pair!(
-        &negative_active,
-        &input_denominators[6],
-        &negative_active,
-        &input_denominators[7],
-        logup
-    );
-    write_col!(&node_numerator, &node_denominator, logup);
-    logup.finalize_last()
+    component::witness::gen_interaction_trace(
+        trace,
+        preprocessed,
+        BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        &MerkleRootComponentRelations::new(verifier_input_relations, recursion_relations),
+    )
 }
 
 /// Invalid root geometry, namespace, or universal witness.
@@ -679,7 +575,7 @@ mod tests {
     use stwo::core::fields::m31::M31;
     use stwo::core::pcs::TreeVec;
     use stwo::prover::backend::Column;
-    use stwo_constraint_framework::assert_constraints_on_polys;
+    use stwo_constraint_framework::{FrameworkEval, Relation, assert_constraints_on_polys};
 
     use super::*;
     use crate::protocol::{OptionalM31Word, PcsParameters};
@@ -780,12 +676,12 @@ mod tests {
         );
         let traces = TreeVec::new(vec![preprocessed, trace, interaction]);
         let polys = traces.map_cols(|column| column.interpolate());
-        let eval = Eval {
-            log_size: preprocessing.log_size(),
-            proof_kind: kind,
-            verifier_input_relations,
-            recursion_relations,
-        };
+        let eval = eval_for_proof_kind(
+            preprocessing.log_size(),
+            kind,
+            &verifier_input_relations,
+            &recursion_relations,
+        );
         assert_constraints_on_polys(
             &polys,
             CanonicCoset::new(preprocessing.log_size()),

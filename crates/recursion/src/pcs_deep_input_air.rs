@@ -17,15 +17,10 @@ use stwo::core::fields::qm31::QM31;
 use stwo::core::poly::circle::{CanonicCoset, MAX_CIRCLE_DOMAIN_LOG_SIZE};
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::simd::column::BaseColumn;
-use stwo::prover::backend::simd::m31::PackedM31;
-use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, RelationEntry, relation,
-};
-use stwo_macros::define_component_tables;
+use stwo_constraint_framework::relation;
 
 use super::control_air::{
     LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
@@ -63,36 +58,6 @@ const SOURCE_INDEX_0_COLUMN: usize = 15;
 const SOURCE_INDEX_1_COLUMN: usize = 16;
 const SOURCE_INDEX_2_COLUMN: usize = 17;
 const PREPROCESSED_COLUMN_COUNT: usize = 18;
-
-const PREPROCESSED_COLUMN_IDS: [&str; PREPROCESSED_COLUMN_COUNT] = [
-    "recursion_pcs_deep_input_row_mask",
-    "recursion_pcs_deep_input_segment_mask",
-    "recursion_pcs_deep_input_binary_mask",
-    "recursion_pcs_deep_input_sampled_value_mask",
-    "recursion_pcs_deep_input_queried_value_mask",
-    "recursion_pcs_deep_input_oods_seed_mask",
-    "recursion_pcs_deep_input_deep_randomness_mask",
-    "recursion_pcs_deep_input_query_bit_mask",
-    "recursion_pcs_deep_input_query_position_mask",
-    "recursion_pcs_deep_input_answer_mask",
-    "recursion_pcs_deep_input_selector_mask",
-    "recursion_pcs_deep_input_verifier_id",
-    "recursion_pcs_deep_input_circuit_id",
-    "recursion_pcs_deep_input_node_id",
-    "recursion_pcs_deep_input_use_count",
-    "recursion_pcs_deep_input_source_index_0",
-    "recursion_pcs_deep_input_source_index_1",
-    "recursion_pcs_deep_input_source_index_2",
-];
-
-define_component_tables! {
-    pcs_deep_input: {
-        committed: { value },
-        constraints: {},
-    },
-}
-
-use prover_columns::PcsDeepInputColumns;
 
 // The first FRI layer consumes each secure DEEP answer through four typed words.
 relation!(PcsDeepAnswerWordRelation, 4);
@@ -253,10 +218,7 @@ impl PcsDeepInputPreprocessed {
     }
 
     pub fn column_ids() -> Vec<PreProcessedColumnId> {
-        PREPROCESSED_COLUMN_IDS
-            .iter()
-            .map(|id| PreProcessedColumnId { id: (*id).into() })
-            .collect()
+        preprocessed_column_ids()
     }
 
     pub fn gen_columns(
@@ -446,160 +408,159 @@ fn expected_input_count(circuit: &PcsDeepCircuit) -> Result<usize, PcsDeepInputE
         .ok_or(PcsDeepInputError::RowCountOverflow)
 }
 
-pub type Component = FrameworkComponent<Eval>;
-
-/// Fixed input ownership constraints for all universal verifier lanes.
+/// Relations used by the macro-generated PCS DEEP boundary component.
 #[derive(Clone)]
-pub struct Eval {
-    pub log_size: u32,
-    pub proof_kind: ProofKind,
-    pub verifier_input_relations: VerifierInputRelations,
-    pub trace_relations: TraceMerkleRelations,
-    pub randomness_relations: VerifierRandomnessRelations,
-    pub query_relations: QueryPositionRelations,
-    pub deep_relations: PcsDeepRelations,
-    pub circuit_relations: RecursionRelations,
+pub struct PcsDeepInputComponentRelations {
+    pub verifier_input_word: super::transcript_payload_air::VerifierInputWordRelation,
+    pub trace_value: super::trace_merkle_air::TraceQueryValueRelation,
+    pub randomness_word: super::verifier_randomness_air::VerifierRandomnessWordRelation,
+    pub query_bit_value: super::query_position_air::QueryBitValueRelation,
+    pub query_position: super::query_position_air::QueryPositionRelation,
+    pub answer_word: PcsDeepAnswerWordRelation,
+    pub wire: crate::relations::WireRelation,
 }
 
-impl FrameworkEval for Eval {
-    fn log_size(&self) -> u32 {
-        self.log_size
+impl PcsDeepInputComponentRelations {
+    /// Combine every authenticated source, answer export, and circuit wire.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        verifier_input_relations: &VerifierInputRelations,
+        trace_relations: &TraceMerkleRelations,
+        randomness_relations: &VerifierRandomnessRelations,
+        query_relations: &QueryPositionRelations,
+        deep_relations: &PcsDeepRelations,
+        circuit_relations: &RecursionRelations,
+    ) -> Self {
+        Self {
+            verifier_input_word: verifier_input_relations.input_word.clone(),
+            trace_value: trace_relations.value.clone(),
+            randomness_word: randomness_relations.word.clone(),
+            query_bit_value: query_relations.bit_value.clone(),
+            query_position: query_relations.position.clone(),
+            answer_word: deep_relations.answer_word.clone(),
+            wire: circuit_relations.wire.clone(),
+        }
     }
+}
 
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
+stwo_macros::define_air_fns! {
+    max_degree: 3,
+    embedded: [],
+    embedded_component: true,
+    embedded_enabler_boolean: false,
+    embedded_relations: crate::pcs_deep_input_air::PcsDeepInputComponentRelations,
+    logup_batch: 2,
+    embedded_preprocessed: {
+        row_mask: "recursion_pcs_deep_input_row_mask",
+        segment_mask: "recursion_pcs_deep_input_segment_mask",
+        binary_mask: "recursion_pcs_deep_input_binary_mask",
+        sampled_value_mask: "recursion_pcs_deep_input_sampled_value_mask",
+        queried_value_mask: "recursion_pcs_deep_input_queried_value_mask",
+        oods_seed_mask: "recursion_pcs_deep_input_oods_seed_mask",
+        deep_randomness_mask: "recursion_pcs_deep_input_deep_randomness_mask",
+        query_bit_mask: "recursion_pcs_deep_input_query_bit_mask",
+        query_position_mask: "recursion_pcs_deep_input_query_position_mask",
+        answer_mask: "recursion_pcs_deep_input_answer_mask",
+        selector_mask: "recursion_pcs_deep_input_selector_mask",
+        verifier_id: "recursion_pcs_deep_input_verifier_id",
+        circuit_id: "recursion_pcs_deep_input_circuit_id",
+        node_id: "recursion_pcs_deep_input_node_id",
+        use_count: "recursion_pcs_deep_input_use_count",
+        source_index_0: "recursion_pcs_deep_input_source_index_0",
+        source_index_1: "recursion_pcs_deep_input_source_index_1",
+        source_index_2: "recursion_pcs_deep_input_source_index_2",
+    },
+    embedded_params: [
+        segment_active, binary_active, sampled_value_kind, oods_point_kind,
+        deep_randomness_kind, deep_position_kind,
+    ],
 
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = PcsDeepInputColumns::from_eval(&mut eval);
-        let ids = PcsDeepInputPreprocessed::column_ids();
-        let pp = |eval: &mut E, column: usize| eval.get_preprocessed_column(ids[column].clone());
-        let row_mask = pp(&mut eval, ROW_MASK_COLUMN);
-        let segment_mask = pp(&mut eval, SEGMENT_MASK_COLUMN);
-        let binary_mask = pp(&mut eval, BINARY_MASK_COLUMN);
-        let sampled_mask = pp(&mut eval, SAMPLED_VALUE_MASK_COLUMN);
-        let queried_mask = pp(&mut eval, QUERIED_VALUE_MASK_COLUMN);
-        let oods_mask = pp(&mut eval, OODS_SEED_MASK_COLUMN);
-        let randomness_mask = pp(&mut eval, DEEP_RANDOMNESS_MASK_COLUMN);
-        let bit_mask = pp(&mut eval, QUERY_BIT_MASK_COLUMN);
-        let position_mask = pp(&mut eval, QUERY_POSITION_MASK_COLUMN);
-        let answer_mask = pp(&mut eval, ANSWER_MASK_COLUMN);
-        let selector_mask = pp(&mut eval, SELECTOR_MASK_COLUMN);
-        let verifier_id = pp(&mut eval, VERIFIER_ID_COLUMN);
-        let circuit_id = pp(&mut eval, CIRCUIT_ID_COLUMN);
-        let node_id = pp(&mut eval, NODE_ID_COLUMN);
-        let use_count = pp(&mut eval, USE_COUNT_COLUMN);
-        let source_0 = pp(&mut eval, SOURCE_INDEX_0_COLUMN);
-        let source_1 = pp(&mut eval, SOURCE_INDEX_1_COLUMN);
-        let source_2 = pp(&mut eval, SOURCE_INDEX_2_COLUMN);
-        let segment = E::F::from(BaseField::from(u32::from(
-            self.proof_kind == ProofKind::SegmentLeaf,
-        )));
-        let binary = E::F::from(BaseField::from(u32::from(
-            self.proof_kind == ProofKind::BinaryNode,
-        )));
-        let active = segment_mask * segment + binary_mask * binary;
-        let one = E::F::from(BaseField::from(1));
+    relation verifier_input_word(5);
+    relation trace_value(5);
+    relation randomness_word(5);
+    relation query_bit_value(4);
+    relation query_position(6);
+    relation answer_word(4);
+    relation wire(6);
 
-        eval.add_constraint(cols.enabler.clone() - row_mask.clone());
-        eval.add_constraint(
-            (row_mask.clone() - selector_mask.clone())
-                * (one - active.clone())
-                * cols.value.clone(),
+    fn pcs_deep_input(
+        value,
+        row_mask, segment_mask, binary_mask, sampled_value_mask, queried_value_mask,
+        oods_seed_mask, deep_randomness_mask, query_bit_mask, query_position_mask,
+        answer_mask, selector_mask, verifier_id, circuit_id, node_id, use_count,
+        source_index_0, source_index_1, source_index_2,
+        segment_active, binary_active, sampled_value_kind, oods_point_kind,
+        deep_randomness_kind, deep_position_kind,
+    ) {
+        let active = segment_mask * segment_active + binary_mask * binary_active;
+        let witness_mask = row_mask - selector_mask;
+
+        constrain enabler - row_mask;
+        constrain witness_mask * (1 - active) * value;
+        constrain selector_mask * (value - active);
+
+        consume(active * sampled_value_mask) verifier_input_word(
+            verifier_id, sampled_value_kind, source_index_0, source_index_1, value,
         );
-        eval.add_constraint(selector_mask * (cols.value.clone() - active.clone()));
+        consume(active * queried_value_mask) trace_value(
+            verifier_id, source_index_0, source_index_1, source_index_2, value,
+        );
+        consume(active * oods_seed_mask) randomness_word(
+            verifier_id, oods_point_kind, source_index_0, source_index_1, value,
+        );
+        consume(active * deep_randomness_mask) randomness_word(
+            verifier_id, deep_randomness_kind, source_index_0, source_index_1, value,
+        );
+        consume(active * query_bit_mask) query_bit_value(
+            verifier_id, source_index_0, source_index_1, value,
+        );
+        consume(active * query_position_mask) query_position(
+            verifier_id, deep_position_kind, 0, source_index_0, value, 0,
+        );
+        emit(active * answer_mask) answer_word(
+            verifier_id, source_index_0, source_index_1, value,
+        );
+        emit(row_mask * use_count) wire(circuit_id, node_id, value, 0, 0, 0);
 
-        eval.add_to_relation(RelationEntry::new(
-            &self.verifier_input_relations.input_word,
-            -E::EF::from(active.clone() * sampled_mask),
-            &[
-                verifier_id.clone(),
-                E::F::from(BaseField::from(VerifierInputKind::SampledValue.as_u32())),
-                source_0.clone(),
-                source_1.clone(),
-                cols.value.clone(),
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.trace_relations.value,
-            -E::EF::from(active.clone() * queried_mask),
-            &[
-                verifier_id.clone(),
-                source_0.clone(),
-                source_1.clone(),
-                source_2.clone(),
-                cols.value.clone(),
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.randomness_relations.word,
-            -E::EF::from(active.clone() * oods_mask),
-            &[
-                verifier_id.clone(),
-                E::F::from(BaseField::from(VerifierRandomnessKind::OodsPoint.as_u32())),
-                source_0.clone(),
-                source_1.clone(),
-                cols.value.clone(),
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.randomness_relations.word,
-            -E::EF::from(active.clone() * randomness_mask),
-            &[
-                verifier_id.clone(),
-                E::F::from(BaseField::from(
-                    VerifierRandomnessKind::DeepRandomness.as_u32(),
-                )),
-                source_0.clone(),
-                source_1.clone(),
-                cols.value.clone(),
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.query_relations.bit_value,
-            -E::EF::from(active.clone() * bit_mask),
-            &[
-                verifier_id.clone(),
-                source_0.clone(),
-                source_1.clone(),
-                cols.value.clone(),
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.query_relations.position,
-            -E::EF::from(active.clone() * position_mask),
-            &[
-                verifier_id.clone(),
-                E::F::from(BaseField::from(QueryPositionKind::Deep.as_u32())),
-                E::F::from(BaseField::from(0)),
-                source_0.clone(),
-                cols.value.clone(),
-                E::F::from(BaseField::from(0)),
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.deep_relations.answer_word,
-            E::EF::from(active * answer_mask),
-            &[verifier_id, source_0, source_1, cols.value.clone()],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.circuit_relations.wire,
-            E::EF::from(row_mask * use_count),
-            &[
-                circuit_id,
-                node_id,
-                cols.value,
-                E::F::from(BaseField::from(0)),
-                E::F::from(BaseField::from(0)),
-                E::F::from(BaseField::from(0)),
-            ],
-        ));
-        eval.finalize_logup_in_pairs();
-        eval
+        return value;
     }
 }
 
-/// Generates semantic source consumers, answer producers, and circuit wires.
+pub use component::air::{Component, Eval};
+
+/// Construct the generated DEEP boundary evaluator for the selected proof kind.
+#[allow(clippy::too_many_arguments)]
+pub fn eval_for_proof_kind(
+    log_size: u32,
+    proof_kind: ProofKind,
+    verifier_input_relations: &VerifierInputRelations,
+    trace_relations: &TraceMerkleRelations,
+    randomness_relations: &VerifierRandomnessRelations,
+    query_relations: &QueryPositionRelations,
+    deep_relations: &PcsDeepRelations,
+    circuit_relations: &RecursionRelations,
+) -> Eval {
+    Eval {
+        log_size,
+        segment_active: BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        binary_active: BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        sampled_value_kind: BaseField::from(VerifierInputKind::SampledValue.as_u32()),
+        oods_point_kind: BaseField::from(VerifierRandomnessKind::OodsPoint.as_u32()),
+        deep_randomness_kind: BaseField::from(VerifierRandomnessKind::DeepRandomness.as_u32()),
+        deep_position_kind: BaseField::from(QueryPositionKind::Deep.as_u32()),
+        relations: PcsDeepInputComponentRelations::new(
+            verifier_input_relations,
+            trace_relations,
+            randomness_relations,
+            query_relations,
+            deep_relations,
+            circuit_relations,
+        ),
+    }
+}
+
+/// Generate semantic source consumers, answer producers, and circuit wires.
+#[allow(clippy::too_many_arguments)]
 pub fn gen_interaction_trace(
     trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     preprocessed: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
@@ -614,165 +575,24 @@ pub fn gen_interaction_trace(
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     QM31,
 ) {
-    let cols = PcsDeepInputColumns::from_iter(trace.iter().map(|column| &column.values.data));
-    let pp = preprocessed
-        .iter()
-        .map(|column| &column.values.data)
-        .collect::<Vec<_>>();
-    let size = cols.enabler.len();
-    let segment = BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf));
-    let binary = BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode));
-    let active = (0..size)
-        .map(|row| {
-            PackedQM31::from(
-                pp[SEGMENT_MASK_COLUMN][row] * segment + pp[BINARY_MASK_COLUMN][row] * binary,
-            )
-        })
-        .collect::<Vec<_>>();
-    let negative = |mask: usize| {
-        (0..size)
-            .map(|row| -active[row] * pp[mask][row])
-            .collect::<Vec<_>>()
-    };
-    let sampled_numerator = negative(SAMPLED_VALUE_MASK_COLUMN);
-    let queried_numerator = negative(QUERIED_VALUE_MASK_COLUMN);
-    let oods_numerator = negative(OODS_SEED_MASK_COLUMN);
-    let randomness_numerator = negative(DEEP_RANDOMNESS_MASK_COLUMN);
-    let bit_numerator = negative(QUERY_BIT_MASK_COLUMN);
-    let position_numerator = negative(QUERY_POSITION_MASK_COLUMN);
-    let answer_numerator = (0..size)
-        .map(|row| active[row] * pp[ANSWER_MASK_COLUMN][row])
-        .collect::<Vec<_>>();
-    let wire_numerator = (0..size)
-        .map(|row| PackedQM31::from(pp[ROW_MASK_COLUMN][row] * pp[USE_COUNT_COLUMN][row]))
-        .collect::<Vec<_>>();
-    let zeros = vec![PackedM31::broadcast(BaseField::from(0)); size];
-    let sampled_kind =
-        vec![PackedM31::broadcast(BaseField::from(VerifierInputKind::SampledValue.as_u32())); size];
-    let oods_kind =
-        vec![
-            PackedM31::broadcast(BaseField::from(VerifierRandomnessKind::OodsPoint.as_u32()));
-            size
-        ];
-    let randomness_kind = vec![
-        PackedM31::broadcast(BaseField::from(
-            VerifierRandomnessKind::DeepRandomness.as_u32(),
-        ));
-        size
-    ];
-    let deep_kind =
-        vec![PackedM31::broadcast(BaseField::from(QueryPositionKind::Deep.as_u32())); size];
-    let sampled_denominator = combine!(
-        verifier_input_relations.input_word,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            sampled_kind,
-            pp[SOURCE_INDEX_0_COLUMN],
-            pp[SOURCE_INDEX_1_COLUMN],
-            cols.value
-        ]
-    );
-    let queried_denominator = combine!(
-        trace_relations.value,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            pp[SOURCE_INDEX_0_COLUMN],
-            pp[SOURCE_INDEX_1_COLUMN],
-            pp[SOURCE_INDEX_2_COLUMN],
-            cols.value
-        ]
-    );
-    let oods_denominator = combine!(
-        randomness_relations.word,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            oods_kind,
-            &zeros,
-            pp[SOURCE_INDEX_1_COLUMN],
-            cols.value
-        ]
-    );
-    let randomness_denominator = combine!(
-        randomness_relations.word,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            randomness_kind,
-            &zeros,
-            pp[SOURCE_INDEX_1_COLUMN],
-            cols.value
-        ]
-    );
-    let bit_denominator = combine!(
-        query_relations.bit_value,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            pp[SOURCE_INDEX_0_COLUMN],
-            pp[SOURCE_INDEX_1_COLUMN],
-            cols.value
-        ]
-    );
-    let position_denominator = combine!(
-        query_relations.position,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            deep_kind,
-            &zeros,
-            pp[SOURCE_INDEX_0_COLUMN],
-            cols.value,
-            &zeros
-        ]
-    );
-    let answer_denominator = combine!(
-        deep_relations.answer_word,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            pp[SOURCE_INDEX_0_COLUMN],
-            pp[SOURCE_INDEX_1_COLUMN],
-            cols.value
-        ]
-    );
-    let wire_denominator = combine!(
-        circuit_relations.wire,
-        [
-            pp[CIRCUIT_ID_COLUMN],
-            pp[NODE_ID_COLUMN],
-            cols.value,
-            &zeros,
-            &zeros,
-            zeros
-        ]
-    );
-
-    let mut logup = LogupTraceGenerator::new(trace[0].domain.log_size());
-    write_pair!(
-        &sampled_numerator,
-        &sampled_denominator,
-        &queried_numerator,
-        &queried_denominator,
-        logup
-    );
-    write_pair!(
-        &oods_numerator,
-        &oods_denominator,
-        &randomness_numerator,
-        &randomness_denominator,
-        logup
-    );
-    write_pair!(
-        &bit_numerator,
-        &bit_denominator,
-        &position_numerator,
-        &position_denominator,
-        logup
-    );
-    write_pair!(
-        &answer_numerator,
-        &answer_denominator,
-        &wire_numerator,
-        &wire_denominator,
-        logup
-    );
-    logup.finalize_last()
+    component::witness::gen_interaction_trace(
+        trace,
+        preprocessed,
+        BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        BaseField::from(VerifierInputKind::SampledValue.as_u32()),
+        BaseField::from(VerifierRandomnessKind::OodsPoint.as_u32()),
+        BaseField::from(VerifierRandomnessKind::DeepRandomness.as_u32()),
+        BaseField::from(QueryPositionKind::Deep.as_u32()),
+        &PcsDeepInputComponentRelations::new(
+            verifier_input_relations,
+            trace_relations,
+            randomness_relations,
+            query_relations,
+            deep_relations,
+            circuit_relations,
+        ),
+    )
 }
 
 /// Materializes every lane after checking fixed circuit and mode assignments.
@@ -977,7 +797,7 @@ mod tests {
     use stwo::core::circle::CirclePointIndex;
     use stwo::core::fields::qm31::SecureField;
     use stwo::core::pcs::TreeVec;
-    use stwo_constraint_framework::assert_constraints_on_polys;
+    use stwo_constraint_framework::{FrameworkEval, assert_constraints_on_polys};
 
     use super::*;
     use crate::pcs_deep_circuit::{
@@ -1114,16 +934,16 @@ mod tests {
         );
         let traces = TreeVec::new(vec![preprocessed, trace, interaction]);
         let polys = traces.map_cols(|column| column.interpolate());
-        let eval = Eval {
-            log_size: preprocessing.log_size(),
-            proof_kind: kind,
-            verifier_input_relations,
-            trace_relations,
-            randomness_relations,
-            query_relations,
-            deep_relations,
-            circuit_relations,
-        };
+        let eval = eval_for_proof_kind(
+            preprocessing.log_size(),
+            kind,
+            &verifier_input_relations,
+            &trace_relations,
+            &randomness_relations,
+            &query_relations,
+            &deep_relations,
+            &circuit_relations,
+        );
         assert_constraints_on_polys(
             &polys,
             CanonicCoset::new(preprocessing.log_size()),

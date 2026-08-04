@@ -565,109 +565,109 @@ mod tests {
         );
         usage_of(
             &mut usage,
-            super::super::query_position_air::BitsEval {
-                log_size: LOG_SIZE,
-                proof_kind: KIND,
-                randomness_relations: relations.verifier_randomness.clone(),
-                query_relations: relations.query_position.clone(),
-            },
+            super::super::query_position_air::bits_eval_for_proof_kind(
+                LOG_SIZE,
+                KIND,
+                &relations.verifier_randomness,
+                &relations.query_position,
+            ),
         );
         usage_of(
             &mut usage,
-            super::super::query_position_air::MappingEval {
-                log_size: LOG_SIZE,
-                proof_kind: KIND,
-                query_relations: relations.query_position.clone(),
-            },
+            super::super::query_position_air::mapping_eval_for_proof_kind(
+                LOG_SIZE,
+                KIND,
+                &relations.query_position,
+            ),
         );
         usage_of(
             &mut usage,
-            super::super::merkle_root_air::Eval {
-                log_size: LOG_SIZE,
-                proof_kind: KIND,
-                verifier_input_relations: relations.verifier_input.clone(),
-                recursion_relations: relations.recursion.clone(),
-            },
+            super::super::merkle_root_air::eval_for_proof_kind(
+                LOG_SIZE,
+                KIND,
+                &relations.verifier_input,
+                &relations.recursion,
+            ),
         );
         usage_of(
             &mut usage,
-            super::super::trace_merkle_air::Eval {
-                log_size: LOG_SIZE,
-                proof_kind: KIND,
-                vm_relations: relations.vm.clone(),
-                control_relations: relations.control.clone(),
-                query_relations: relations.query_position.clone(),
-                trace_relations: relations.trace_merkle.clone(),
-                recursion_relations: relations.recursion.clone(),
-            },
+            super::super::trace_merkle_air::eval_for_proof_kind(
+                LOG_SIZE,
+                KIND,
+                &relations.vm,
+                &relations.control,
+                &relations.query_position,
+                &relations.trace_merkle,
+                &relations.recursion,
+            ),
         );
         usage_of(
             &mut usage,
-            super::super::pcs_deep_input_air::Eval {
-                log_size: LOG_SIZE,
-                proof_kind: KIND,
-                verifier_input_relations: relations.verifier_input.clone(),
-                trace_relations: relations.trace_merkle.clone(),
-                randomness_relations: relations.verifier_randomness.clone(),
-                query_relations: relations.query_position.clone(),
-                deep_relations: relations.pcs_deep.clone(),
-                circuit_relations: relations.recursion.clone(),
-            },
+            super::super::pcs_deep_input_air::eval_for_proof_kind(
+                LOG_SIZE,
+                KIND,
+                &relations.verifier_input,
+                &relations.trace_merkle,
+                &relations.verifier_randomness,
+                &relations.query_position,
+                &relations.pcs_deep,
+                &relations.recursion,
+            ),
         );
         usage_of(
             &mut usage,
-            super::super::fri_merkle_air::LeafEval {
-                log_size: LOG_SIZE,
-                proof_kind: KIND,
-                vm_relations: relations.vm.clone(),
-                fri_relations: relations.fri_merkle.clone(),
-                recursion_relations: relations.recursion.clone(),
-            },
+            super::super::fri_merkle_air::leaf_eval_for_proof_kind(
+                LOG_SIZE,
+                KIND,
+                &relations.vm,
+                &relations.fri_merkle,
+                &relations.recursion,
+            ),
         );
         usage_of(
             &mut usage,
-            super::super::fri_merkle_air::NodeEval {
-                log_size: LOG_SIZE,
-                proof_kind: KIND,
-                vm_relations: relations.vm.clone(),
-                fri_relations: relations.fri_merkle.clone(),
-                recursion_relations: relations.recursion.clone(),
-            },
+            super::super::fri_merkle_air::node_eval_for_proof_kind(
+                LOG_SIZE,
+                KIND,
+                &relations.vm,
+                &relations.fri_merkle,
+                &relations.recursion,
+            ),
         );
         usage_of(
             &mut usage,
-            super::super::fri_merkle_air::AnchorEval {
-                log_size: LOG_SIZE,
-                proof_kind: KIND,
-                control_relations: relations.control.clone(),
-                query_relations: relations.query_position.clone(),
-                fri_relations: relations.fri_merkle.clone(),
-                recursion_relations: relations.recursion.clone(),
-            },
+            super::super::fri_merkle_air::anchor_eval_for_proof_kind(
+                LOG_SIZE,
+                KIND,
+                &relations.control,
+                &relations.query_position,
+                &relations.fri_merkle,
+                &relations.recursion,
+            ),
         );
         usage_of(
             &mut usage,
-            super::super::fri_verifier_control_air::Eval {
-                log_size: LOG_SIZE,
-                proof_kind: KIND,
-                control_relations: relations.control.clone(),
-                query_relations: relations.query_position.clone(),
-                route_relations: relations.fri_verifier_route.clone(),
-            },
+            super::super::fri_verifier_control_air::eval_for_proof_kind(
+                LOG_SIZE,
+                KIND,
+                &relations.control,
+                &relations.query_position,
+                &relations.fri_verifier_route,
+            ),
         );
         usage_of(
             &mut usage,
-            super::super::fri_verifier_input_air::Eval {
-                log_size: LOG_SIZE,
-                proof_kind: KIND,
-                verifier_input_relations: relations.verifier_input.clone(),
-                randomness_relations: relations.verifier_randomness.clone(),
-                query_relations: relations.query_position.clone(),
-                deep_relations: relations.pcs_deep.clone(),
-                fri_merkle_relations: relations.fri_merkle.clone(),
-                route_relations: relations.fri_verifier_route.clone(),
-                circuit_relations: relations.recursion.clone(),
-            },
+            super::super::fri_verifier_input_air::eval_for_proof_kind(
+                LOG_SIZE,
+                KIND,
+                &relations.verifier_input,
+                &relations.verifier_randomness,
+                &relations.query_position,
+                &relations.pcs_deep,
+                &relations.fri_merkle,
+                &relations.fri_verifier_route,
+                &relations.recursion,
+            ),
         );
         usage_of(
             &mut usage,

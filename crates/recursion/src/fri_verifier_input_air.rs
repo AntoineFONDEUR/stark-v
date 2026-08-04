@@ -17,15 +17,10 @@ use stwo::core::fields::qm31::QM31;
 use stwo::core::poly::circle::{CanonicCoset, MAX_CIRCLE_DOMAIN_LOG_SIZE};
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::simd::column::BaseColumn;
-use stwo::prover::backend::simd::m31::PackedM31;
-use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, RelationEntry, relation,
-};
-use stwo_macros::define_component_tables;
+use stwo_constraint_framework::relation;
 
 use super::control_air::{
     LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
@@ -66,38 +61,6 @@ const SOURCE_INDEX_1_COLUMN: usize = 17;
 const SOURCE_INDEX_2_COLUMN: usize = 18;
 const SOURCE_INDEX_3_COLUMN: usize = 19;
 const PREPROCESSED_COLUMN_COUNT: usize = 20;
-
-const PREPROCESSED_COLUMN_IDS: [&str; PREPROCESSED_COLUMN_COUNT] = [
-    "recursion_fri_verifier_input_row_mask",
-    "recursion_fri_verifier_input_segment_mask",
-    "recursion_fri_verifier_input_binary_mask",
-    "recursion_fri_verifier_input_deep_answer_mask",
-    "recursion_fri_verifier_input_authenticated_value_mask",
-    "recursion_fri_verifier_input_alpha_mask",
-    "recursion_fri_verifier_input_query_bit_mask",
-    "recursion_fri_verifier_input_fri_position_mask",
-    "recursion_fri_verifier_input_fri_offset_mask",
-    "recursion_fri_verifier_input_last_position_mask",
-    "recursion_fri_verifier_input_coefficient_mask",
-    "recursion_fri_verifier_input_selector_mask",
-    "recursion_fri_verifier_input_verifier_id",
-    "recursion_fri_verifier_input_circuit_id",
-    "recursion_fri_verifier_input_node_id",
-    "recursion_fri_verifier_input_use_count",
-    "recursion_fri_verifier_input_source_index_0",
-    "recursion_fri_verifier_input_source_index_1",
-    "recursion_fri_verifier_input_source_index_2",
-    "recursion_fri_verifier_input_source_index_3",
-];
-
-define_component_tables! {
-    fri_verifier_input: {
-        committed: { value },
-        constraints: {},
-    },
-}
-
-use prover_columns::FriVerifierInputColumns;
 
 /// Scalar fields exported by the trusted FRI route adapter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -273,10 +236,7 @@ impl FriVerifierInputPreprocessed {
     }
 
     pub fn column_ids() -> Vec<PreProcessedColumnId> {
-        PREPROCESSED_COLUMN_IDS
-            .iter()
-            .map(|id| PreProcessedColumnId { id: (*id).into() })
-            .collect()
+        preprocessed_column_ids()
     }
 
     pub fn gen_columns(
@@ -493,176 +453,172 @@ fn into_evaluations(
         .collect()
 }
 
-pub type Component = FrameworkComponent<Eval>;
-
-/// Fixed input ownership constraints for all universal verifier lanes.
+/// Relations used by the macro-generated FRI verifier input component.
 #[derive(Clone)]
-pub struct Eval {
-    pub log_size: u32,
-    pub proof_kind: ProofKind,
-    pub verifier_input_relations: VerifierInputRelations,
-    pub randomness_relations: VerifierRandomnessRelations,
-    pub query_relations: QueryPositionRelations,
-    pub deep_relations: PcsDeepRelations,
-    pub fri_merkle_relations: FriMerkleRelations,
-    pub route_relations: FriVerifierRouteRelations,
-    pub circuit_relations: RecursionRelations,
+pub struct FriVerifierInputComponentRelations {
+    pub verifier_input_word: super::transcript_payload_air::VerifierInputWordRelation,
+    pub randomness_word: super::verifier_randomness_air::VerifierRandomnessWordRelation,
+    pub query_bit_value: super::query_position_air::QueryBitValueRelation,
+    pub deep_answer_word: super::pcs_deep_input_air::PcsDeepAnswerWordRelation,
+    pub fri_value_word: super::fri_merkle_air::FriMerkleValueWordRelation,
+    pub route_word: FriVerifierRouteWordRelation,
+    pub wire: crate::relations::WireRelation,
 }
 
-impl FrameworkEval for Eval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
-
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
-
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = FriVerifierInputColumns::from_eval(&mut eval);
-        let ids = FriVerifierInputPreprocessed::column_ids();
-        let pp = |eval: &mut E, column: usize| eval.get_preprocessed_column(ids[column].clone());
-        let row_mask = pp(&mut eval, ROW_MASK_COLUMN);
-        let segment_mask = pp(&mut eval, SEGMENT_MASK_COLUMN);
-        let binary_mask = pp(&mut eval, BINARY_MASK_COLUMN);
-        let deep_mask = pp(&mut eval, DEEP_ANSWER_MASK_COLUMN);
-        let value_mask = pp(&mut eval, AUTHENTICATED_VALUE_MASK_COLUMN);
-        let alpha_mask = pp(&mut eval, FRI_ALPHA_MASK_COLUMN);
-        let bit_mask = pp(&mut eval, QUERY_BIT_MASK_COLUMN);
-        let position_mask = pp(&mut eval, FRI_POSITION_MASK_COLUMN);
-        let offset_mask = pp(&mut eval, FRI_OFFSET_MASK_COLUMN);
-        let last_mask = pp(&mut eval, LAST_POSITION_MASK_COLUMN);
-        let coefficient_mask = pp(&mut eval, COEFFICIENT_MASK_COLUMN);
-        let selector_mask = pp(&mut eval, SELECTOR_MASK_COLUMN);
-        let verifier_id = pp(&mut eval, VERIFIER_ID_COLUMN);
-        let circuit_id = pp(&mut eval, CIRCUIT_ID_COLUMN);
-        let node_id = pp(&mut eval, NODE_ID_COLUMN);
-        let use_count = pp(&mut eval, USE_COUNT_COLUMN);
-        let source_0 = pp(&mut eval, SOURCE_INDEX_0_COLUMN);
-        let source_1 = pp(&mut eval, SOURCE_INDEX_1_COLUMN);
-        let source_2 = pp(&mut eval, SOURCE_INDEX_2_COLUMN);
-        let source_3 = pp(&mut eval, SOURCE_INDEX_3_COLUMN);
-        let segment = E::F::from(BaseField::from(u32::from(
-            self.proof_kind == ProofKind::SegmentLeaf,
-        )));
-        let binary = E::F::from(BaseField::from(u32::from(
-            self.proof_kind == ProofKind::BinaryNode,
-        )));
-        let active = segment_mask * segment + binary_mask * binary;
-        let one = E::F::from(BaseField::from(1));
-        let zero = E::F::from(BaseField::from(0));
-
-        eval.add_constraint(cols.enabler.clone() - row_mask.clone());
-        eval.add_constraint(
-            (row_mask.clone() - selector_mask.clone())
-                * (one - active.clone())
-                * cols.value.clone(),
-        );
-        eval.add_constraint(selector_mask * (cols.value.clone() - active.clone()));
-
-        eval.add_to_relation(RelationEntry::new(
-            &self.deep_relations.answer_word,
-            -E::EF::from(active.clone() * deep_mask),
-            &[
-                verifier_id.clone(),
-                source_0.clone(),
-                source_1.clone(),
-                cols.value.clone(),
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.fri_merkle_relations.value_word,
-            -E::EF::from(active.clone() * value_mask),
-            &[
-                verifier_id.clone(),
-                source_0.clone(),
-                source_1.clone(),
-                source_2.clone(),
-                source_3.clone(),
-                cols.value.clone(),
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.randomness_relations.word,
-            -E::EF::from(active.clone() * alpha_mask),
-            &[
-                verifier_id.clone(),
-                E::F::from(BaseField::from(VerifierRandomnessKind::FriAlpha.as_u32())),
-                source_0.clone(),
-                source_1.clone(),
-                cols.value.clone(),
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.query_relations.bit_value,
-            -E::EF::from(active.clone() * bit_mask),
-            &[
-                verifier_id.clone(),
-                source_0.clone(),
-                source_1.clone(),
-                cols.value.clone(),
-            ],
-        ));
-        for (mask, field) in [
-            (position_mask, FriVerifierRouteField::Position),
-            (offset_mask, FriVerifierRouteField::Offset),
-        ] {
-            eval.add_to_relation(RelationEntry::new(
-                &self.route_relations.word,
-                -E::EF::from(active.clone() * mask),
-                &[
-                    verifier_id.clone(),
-                    E::F::from(BaseField::from(QueryPositionKind::FriFold.as_u32())),
-                    source_0.clone(),
-                    source_1.clone(),
-                    E::F::from(BaseField::from(field.as_u32())),
-                    cols.value.clone(),
-                ],
-            ));
+impl FriVerifierInputComponentRelations {
+    /// Combine every semantic input source with its exact circuit-wire use.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        verifier_input_relations: &VerifierInputRelations,
+        randomness_relations: &VerifierRandomnessRelations,
+        query_relations: &QueryPositionRelations,
+        deep_relations: &PcsDeepRelations,
+        fri_merkle_relations: &FriMerkleRelations,
+        route_relations: &FriVerifierRouteRelations,
+        circuit_relations: &RecursionRelations,
+    ) -> Self {
+        Self {
+            verifier_input_word: verifier_input_relations.input_word.clone(),
+            randomness_word: randomness_relations.word.clone(),
+            query_bit_value: query_relations.bit_value.clone(),
+            deep_answer_word: deep_relations.answer_word.clone(),
+            fri_value_word: fri_merkle_relations.value_word.clone(),
+            route_word: route_relations.word.clone(),
+            wire: circuit_relations.wire.clone(),
         }
-        eval.add_to_relation(RelationEntry::new(
-            &self.route_relations.word,
-            -E::EF::from(active.clone() * last_mask),
-            &[
-                verifier_id.clone(),
-                E::F::from(BaseField::from(QueryPositionKind::LastLayer.as_u32())),
-                zero.clone(),
-                source_0.clone(),
-                E::F::from(BaseField::from(FriVerifierRouteField::Position.as_u32())),
-                cols.value.clone(),
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.verifier_input_relations.input_word,
-            -E::EF::from(active.clone() * coefficient_mask),
-            &[
-                verifier_id.clone(),
-                E::F::from(BaseField::from(
-                    VerifierInputKind::LastLayerCoefficient.as_u32(),
-                )),
-                source_0,
-                source_1,
-                cols.value.clone(),
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.circuit_relations.wire,
-            E::EF::from(row_mask * use_count),
-            &[
-                circuit_id,
-                node_id,
-                cols.value,
-                zero.clone(),
-                zero.clone(),
-                zero,
-            ],
-        ));
-        eval.finalize_logup_in_pairs();
-        eval
     }
 }
 
-/// Generates semantic consumers and circuit-wire producers.
+stwo_macros::define_air_fns! {
+    max_degree: 3,
+    embedded: [],
+    embedded_component: true,
+    embedded_enabler_boolean: false,
+    embedded_relations: crate::fri_verifier_input_air::FriVerifierInputComponentRelations,
+    logup_batch: 2,
+    embedded_preprocessed: {
+        row_mask: "recursion_fri_verifier_input_row_mask",
+        segment_mask: "recursion_fri_verifier_input_segment_mask",
+        binary_mask: "recursion_fri_verifier_input_binary_mask",
+        deep_answer_mask: "recursion_fri_verifier_input_deep_answer_mask",
+        authenticated_value_mask: "recursion_fri_verifier_input_authenticated_value_mask",
+        alpha_mask: "recursion_fri_verifier_input_alpha_mask",
+        query_bit_mask: "recursion_fri_verifier_input_query_bit_mask",
+        fri_position_mask: "recursion_fri_verifier_input_fri_position_mask",
+        fri_offset_mask: "recursion_fri_verifier_input_fri_offset_mask",
+        last_position_mask: "recursion_fri_verifier_input_last_position_mask",
+        coefficient_mask: "recursion_fri_verifier_input_coefficient_mask",
+        selector_mask: "recursion_fri_verifier_input_selector_mask",
+        verifier_id: "recursion_fri_verifier_input_verifier_id",
+        circuit_id: "recursion_fri_verifier_input_circuit_id",
+        node_id: "recursion_fri_verifier_input_node_id",
+        use_count: "recursion_fri_verifier_input_use_count",
+        source_index_0: "recursion_fri_verifier_input_source_index_0",
+        source_index_1: "recursion_fri_verifier_input_source_index_1",
+        source_index_2: "recursion_fri_verifier_input_source_index_2",
+        source_index_3: "recursion_fri_verifier_input_source_index_3",
+    },
+    embedded_params: [
+        segment_active, binary_active, fri_alpha_kind, fri_fold_kind,
+        last_layer_kind, position_field, offset_field, coefficient_kind,
+    ],
+
+    relation verifier_input_word(5);
+    relation randomness_word(5);
+    relation query_bit_value(4);
+    relation deep_answer_word(4);
+    relation fri_value_word(6);
+    relation route_word(6);
+    relation wire(6);
+
+    fn fri_verifier_input(
+        value,
+        row_mask, segment_mask, binary_mask, deep_answer_mask,
+        authenticated_value_mask, alpha_mask, query_bit_mask, fri_position_mask,
+        fri_offset_mask, last_position_mask, coefficient_mask, selector_mask,
+        verifier_id, circuit_id, node_id, use_count,
+        source_index_0, source_index_1, source_index_2, source_index_3,
+        segment_active, binary_active, fri_alpha_kind, fri_fold_kind,
+        last_layer_kind, position_field, offset_field, coefficient_kind,
+    ) {
+        let active = segment_mask * segment_active + binary_mask * binary_active;
+        let witness_mask = row_mask - selector_mask;
+
+        constrain enabler - row_mask;
+        constrain witness_mask * (1 - active) * value;
+        constrain selector_mask * (value - active);
+
+        consume(active * deep_answer_mask) deep_answer_word(
+            verifier_id, source_index_0, source_index_1, value,
+        );
+        consume(active * authenticated_value_mask) fri_value_word(
+            verifier_id, source_index_0, source_index_1,
+            source_index_2, source_index_3, value,
+        );
+        consume(active * alpha_mask) randomness_word(
+            verifier_id, fri_alpha_kind, source_index_0, source_index_1, value,
+        );
+        consume(active * query_bit_mask) query_bit_value(
+            verifier_id, source_index_0, source_index_1, value,
+        );
+        consume(active * fri_position_mask) route_word(
+            verifier_id, fri_fold_kind, source_index_0, source_index_1,
+            position_field, value,
+        );
+        consume(active * fri_offset_mask) route_word(
+            verifier_id, fri_fold_kind, source_index_0, source_index_1,
+            offset_field, value,
+        );
+        consume(active * last_position_mask) route_word(
+            verifier_id, last_layer_kind, 0, source_index_0, position_field, value,
+        );
+        consume(active * coefficient_mask) verifier_input_word(
+            verifier_id, coefficient_kind, source_index_0, source_index_1, value,
+        );
+        emit(row_mask * use_count) wire(circuit_id, node_id, value, 0, 0, 0);
+
+        return value;
+    }
+}
+
+pub use component::air::{Component, Eval};
+
+/// Construct the generated FRI verifier input evaluator for the selected proof kind.
+#[allow(clippy::too_many_arguments)]
+pub fn eval_for_proof_kind(
+    log_size: u32,
+    proof_kind: ProofKind,
+    verifier_input_relations: &VerifierInputRelations,
+    randomness_relations: &VerifierRandomnessRelations,
+    query_relations: &QueryPositionRelations,
+    deep_relations: &PcsDeepRelations,
+    fri_merkle_relations: &FriMerkleRelations,
+    route_relations: &FriVerifierRouteRelations,
+    circuit_relations: &RecursionRelations,
+) -> Eval {
+    Eval {
+        log_size,
+        segment_active: BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        binary_active: BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        fri_alpha_kind: BaseField::from(VerifierRandomnessKind::FriAlpha.as_u32()),
+        fri_fold_kind: BaseField::from(QueryPositionKind::FriFold.as_u32()),
+        last_layer_kind: BaseField::from(QueryPositionKind::LastLayer.as_u32()),
+        position_field: BaseField::from(FriVerifierRouteField::Position.as_u32()),
+        offset_field: BaseField::from(FriVerifierRouteField::Offset.as_u32()),
+        coefficient_kind: BaseField::from(VerifierInputKind::LastLayerCoefficient.as_u32()),
+        relations: FriVerifierInputComponentRelations::new(
+            verifier_input_relations,
+            randomness_relations,
+            query_relations,
+            deep_relations,
+            fri_merkle_relations,
+            route_relations,
+            circuit_relations,
+        ),
+    }
+}
+
+/// Generate semantic consumers and circuit-wire producers.
 #[allow(clippy::too_many_arguments)]
 pub fn gen_interaction_trace(
     trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
@@ -679,184 +635,27 @@ pub fn gen_interaction_trace(
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     QM31,
 ) {
-    let cols = FriVerifierInputColumns::from_iter(trace.iter().map(|column| &column.values.data));
-    let pp = preprocessed
-        .iter()
-        .map(|column| &column.values.data)
-        .collect::<Vec<_>>();
-    let size = cols.enabler.len();
-    let segment = BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf));
-    let binary = BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode));
-    let active = (0..size)
-        .map(|row| {
-            PackedQM31::from(
-                pp[SEGMENT_MASK_COLUMN][row] * segment + pp[BINARY_MASK_COLUMN][row] * binary,
-            )
-        })
-        .collect::<Vec<_>>();
-    let negative = |mask: usize| {
-        (0..size)
-            .map(|row| -active[row] * pp[mask][row])
-            .collect::<Vec<_>>()
-    };
-    let deep_numerator = negative(DEEP_ANSWER_MASK_COLUMN);
-    let value_numerator = negative(AUTHENTICATED_VALUE_MASK_COLUMN);
-    let alpha_numerator = negative(FRI_ALPHA_MASK_COLUMN);
-    let bit_numerator = negative(QUERY_BIT_MASK_COLUMN);
-    let position_numerator = negative(FRI_POSITION_MASK_COLUMN);
-    let offset_numerator = negative(FRI_OFFSET_MASK_COLUMN);
-    let last_numerator = negative(LAST_POSITION_MASK_COLUMN);
-    let coefficient_numerator = negative(COEFFICIENT_MASK_COLUMN);
-    let wire_numerator = (0..size)
-        .map(|row| PackedQM31::from(pp[ROW_MASK_COLUMN][row] * pp[USE_COUNT_COLUMN][row]))
-        .collect::<Vec<_>>();
-    let zeros = vec![PackedM31::broadcast(BaseField::from(0)); size];
-    let fri_alpha_kind =
-        vec![
-            PackedM31::broadcast(BaseField::from(VerifierRandomnessKind::FriAlpha.as_u32()));
-            size
-        ];
-    let fri_fold_kind =
-        vec![PackedM31::broadcast(BaseField::from(QueryPositionKind::FriFold.as_u32())); size];
-    let fri_fold_offset_kind = fri_fold_kind.clone();
-    let last_kind =
-        vec![PackedM31::broadcast(BaseField::from(QueryPositionKind::LastLayer.as_u32())); size];
-    let position_field =
-        vec![PackedM31::broadcast(BaseField::from(FriVerifierRouteField::Position.as_u32())); size];
-    let last_position_field = position_field.clone();
-    let offset_field =
-        vec![PackedM31::broadcast(BaseField::from(FriVerifierRouteField::Offset.as_u32())); size];
-    let coefficient_kind = vec![
-        PackedM31::broadcast(BaseField::from(
-            VerifierInputKind::LastLayerCoefficient.as_u32(),
-        ));
-        size
-    ];
-    let deep_denominator = combine!(
-        deep_relations.answer_word,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            pp[SOURCE_INDEX_0_COLUMN],
-            pp[SOURCE_INDEX_1_COLUMN],
-            cols.value
-        ]
-    );
-    let value_denominator = combine!(
-        fri_merkle_relations.value_word,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            pp[SOURCE_INDEX_0_COLUMN],
-            pp[SOURCE_INDEX_1_COLUMN],
-            pp[SOURCE_INDEX_2_COLUMN],
-            pp[SOURCE_INDEX_3_COLUMN],
-            cols.value
-        ]
-    );
-    let alpha_denominator = combine!(
-        randomness_relations.word,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            fri_alpha_kind,
-            pp[SOURCE_INDEX_0_COLUMN],
-            pp[SOURCE_INDEX_1_COLUMN],
-            cols.value
-        ]
-    );
-    let bit_denominator = combine!(
-        query_relations.bit_value,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            pp[SOURCE_INDEX_0_COLUMN],
-            pp[SOURCE_INDEX_1_COLUMN],
-            cols.value
-        ]
-    );
-    let position_denominator = combine!(
-        route_relations.word,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            fri_fold_kind,
-            pp[SOURCE_INDEX_0_COLUMN],
-            pp[SOURCE_INDEX_1_COLUMN],
-            position_field,
-            cols.value
-        ]
-    );
-    let offset_denominator = combine!(
-        route_relations.word,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            fri_fold_offset_kind,
-            pp[SOURCE_INDEX_0_COLUMN],
-            pp[SOURCE_INDEX_1_COLUMN],
-            offset_field,
-            cols.value
-        ]
-    );
-    let last_denominator = combine!(
-        route_relations.word,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            last_kind,
-            &zeros,
-            pp[SOURCE_INDEX_0_COLUMN],
-            last_position_field,
-            cols.value
-        ]
-    );
-    let coefficient_denominator = combine!(
-        verifier_input_relations.input_word,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            coefficient_kind,
-            pp[SOURCE_INDEX_0_COLUMN],
-            pp[SOURCE_INDEX_1_COLUMN],
-            cols.value
-        ]
-    );
-    let wire_denominator = combine!(
-        circuit_relations.wire,
-        [
-            pp[CIRCUIT_ID_COLUMN],
-            pp[NODE_ID_COLUMN],
-            cols.value,
-            &zeros,
-            &zeros,
-            zeros
-        ]
-    );
-
-    let mut logup = LogupTraceGenerator::new(trace[0].domain.log_size());
-    write_pair!(
-        &deep_numerator,
-        &deep_denominator,
-        &value_numerator,
-        &value_denominator,
-        logup
-    );
-    write_pair!(
-        &alpha_numerator,
-        &alpha_denominator,
-        &bit_numerator,
-        &bit_denominator,
-        logup
-    );
-    write_pair!(
-        &position_numerator,
-        &position_denominator,
-        &offset_numerator,
-        &offset_denominator,
-        logup
-    );
-    write_pair!(
-        &last_numerator,
-        &last_denominator,
-        &coefficient_numerator,
-        &coefficient_denominator,
-        logup
-    );
-    write_col!(&wire_numerator, &wire_denominator, logup);
-    logup.finalize_last()
+    component::witness::gen_interaction_trace(
+        trace,
+        preprocessed,
+        BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        BaseField::from(VerifierRandomnessKind::FriAlpha.as_u32()),
+        BaseField::from(QueryPositionKind::FriFold.as_u32()),
+        BaseField::from(QueryPositionKind::LastLayer.as_u32()),
+        BaseField::from(FriVerifierRouteField::Position.as_u32()),
+        BaseField::from(FriVerifierRouteField::Offset.as_u32()),
+        BaseField::from(VerifierInputKind::LastLayerCoefficient.as_u32()),
+        &FriVerifierInputComponentRelations::new(
+            verifier_input_relations,
+            randomness_relations,
+            query_relations,
+            deep_relations,
+            fri_merkle_relations,
+            route_relations,
+            circuit_relations,
+        ),
+    )
 }
 
 /// Materializes every lane after checking fixed circuit and mode assignments.
@@ -1064,7 +863,7 @@ mod tests {
     use rstest::rstest;
     use stwo::core::fields::qm31::SecureField;
     use stwo::core::pcs::TreeVec;
-    use stwo_constraint_framework::assert_constraints_on_polys;
+    use stwo_constraint_framework::{FrameworkEval, assert_constraints_on_polys};
 
     use super::*;
     use crate::fri_verifier_circuit::{
@@ -1209,17 +1008,17 @@ mod tests {
         );
         let traces = TreeVec::new(vec![preprocessed, trace, interaction]);
         let polys = traces.map_cols(|column| column.interpolate());
-        let eval = Eval {
-            log_size: preprocessing.log_size(),
-            proof_kind: kind,
-            verifier_input_relations,
-            randomness_relations,
-            query_relations,
-            deep_relations,
-            fri_merkle_relations,
-            route_relations,
-            circuit_relations,
-        };
+        let eval = eval_for_proof_kind(
+            preprocessing.log_size(),
+            kind,
+            &verifier_input_relations,
+            &randomness_relations,
+            &query_relations,
+            &deep_relations,
+            &fri_merkle_relations,
+            &route_relations,
+            &circuit_relations,
+        );
         assert_constraints_on_polys(
             &polys,
             CanonicCoset::new(preprocessing.log_size()),

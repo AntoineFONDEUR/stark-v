@@ -13,7 +13,6 @@ use std::collections::BTreeMap;
 use air::digest::{Digest8, M31Word};
 use air::poseidon2::{T, poseidon2_traced_state};
 use air::trace::Poseidon2Table;
-use num_traits::One;
 use prover::relations::Relations;
 use simd::AlignedVec;
 use stwo::core::ColumnVec;
@@ -23,16 +22,10 @@ use stwo::core::poly::circle::{CanonicCoset, MAX_CIRCLE_DOMAIN_LOG_SIZE};
 use stwo::core::vcs_lifted::verifier::PACKED_LEAF_SIZE;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::simd::column::BaseColumn;
-use stwo::prover::backend::simd::m31::PackedM31;
-use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
-    relation,
-};
-use stwo_macros::define_component_tables;
+use stwo_constraint_framework::relation;
 
 use super::control_air::{
     ControlRelations, LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
@@ -55,8 +48,6 @@ const SECURE_WORDS: usize = 4;
 const LEAF_TAG: u32 = 1;
 const MIN_LOG_SIZE: u32 = 4;
 
-type LeafChunkMetadata<F> = [(F, F, F, F); RATE];
-
 const LEAF_ROW_MASK_COLUMN: usize = 0;
 const LEAF_SEGMENT_MASK_COLUMN: usize = 1;
 const LEAF_BINARY_MASK_COLUMN: usize = 2;
@@ -73,7 +64,9 @@ const LEAF_FIRST_MASK_COLUMN: usize = 12;
 const LEAF_LAST_MASK_COLUMN: usize = 13;
 const LEAF_CHUNKS_START: usize = 14;
 const LEAF_CHUNK_COLUMNS: usize = 4;
-const LEAF_PREPROCESSED_COLUMN_COUNT: usize = LEAF_CHUNKS_START + RATE * LEAF_CHUNK_COLUMNS;
+const LEAF_MERKLE_ENDPOINT_MASK_COLUMN: usize = LEAF_CHUNKS_START + RATE * LEAF_CHUNK_COLUMNS;
+const LEAF_LOCAL_ROOT_ENDPOINT_MASK_COLUMN: usize = LEAF_MERKLE_ENDPOINT_MASK_COLUMN + 1;
+const LEAF_PREPROCESSED_COLUMN_COUNT: usize = LEAF_LOCAL_ROOT_ENDPOINT_MASK_COLUMN + 1;
 
 const NODE_ROW_MASK_COLUMN: usize = 0;
 const NODE_SEGMENT_MASK_COLUMN: usize = 1;
@@ -99,76 +92,6 @@ const ANCHOR_CONTROL_ARG_1_COLUMN: usize = 12;
 const ANCHOR_CONTROL_ARG_2_COLUMN: usize = 13;
 const ANCHOR_CONTROL_ARG_3_COLUMN: usize = 14;
 const ANCHOR_PREPROCESSED_COLUMN_COUNT: usize = 15;
-
-const NODE_PREPROCESSED_COLUMN_IDS: [&str; NODE_PREPROCESSED_COLUMN_COUNT] = [
-    "recursion_fri_merkle_node_row_mask",
-    "recursion_fri_merkle_node_segment_mask",
-    "recursion_fri_merkle_node_binary_mask",
-    "recursion_fri_merkle_node_tree_id",
-    "recursion_fri_merkle_node_depth",
-    "recursion_fri_merkle_node_local_root_mask",
-];
-
-const ANCHOR_PREPROCESSED_COLUMN_IDS: [&str; ANCHOR_PREPROCESSED_COLUMN_COUNT] = [
-    "recursion_fri_merkle_anchor_row_mask",
-    "recursion_fri_merkle_anchor_segment_mask",
-    "recursion_fri_merkle_anchor_binary_mask",
-    "recursion_fri_merkle_anchor_verifier_id",
-    "recursion_fri_merkle_anchor_layer",
-    "recursion_fri_merkle_anchor_query",
-    "recursion_fri_merkle_anchor_tree_id",
-    "recursion_fri_merkle_anchor_path_depth",
-    "recursion_fri_merkle_anchor_leaf_count",
-    "recursion_fri_merkle_anchor_control_sequence",
-    "recursion_fri_merkle_anchor_control_tag",
-    "recursion_fri_merkle_anchor_control_arg_0",
-    "recursion_fri_merkle_anchor_control_arg_1",
-    "recursion_fri_merkle_anchor_control_arg_2",
-    "recursion_fri_merkle_anchor_control_arg_3",
-];
-
-define_component_tables! {
-    fri_merkle_leaf: {
-        committed: {
-            position,
-            previous_0, previous_1, previous_2, previous_3,
-            previous_4, previous_5, previous_6, previous_7,
-            previous_8, previous_9, previous_10, previous_11,
-            previous_12, previous_13, previous_14, previous_15,
-            chunk_0, chunk_1, chunk_2, chunk_3,
-            chunk_4, chunk_5, chunk_6, chunk_7,
-            output_0, output_1, output_2, output_3,
-            output_4, output_5, output_6, output_7,
-            output_8, output_9, output_10, output_11,
-            output_12, output_13, output_14, output_15,
-        },
-        constraints: {},
-    },
-    fri_merkle_node: {
-        committed: {
-            index,
-            left_0, left_1, left_2, left_3,
-            left_4, left_5, left_6, left_7,
-            right_0, right_1, right_2, right_3,
-            right_4, right_5, right_6, right_7,
-            parent_0, parent_1, parent_2, parent_3,
-            parent_4, parent_5, parent_6, parent_7,
-            output_8, output_9, output_10, output_11,
-            output_12, output_13, output_14, output_15,
-        },
-        constraints: {},
-    },
-    fri_merkle_anchor: {
-        committed: {
-            position,
-            digest_0, digest_1, digest_2, digest_3,
-            digest_4, digest_5, digest_6, digest_7,
-        },
-        constraints: {},
-    },
-}
-
-use prover_columns::{FriMerkleAnchorColumns, FriMerkleLeafColumns, FriMerkleNodeColumns};
 
 // One chained leaf sponge state: verifier, layer, query, packed leaf, step, state.
 relation!(FriMerkleLeafStateRelation, 21);
@@ -361,50 +284,15 @@ impl FriMerklePreprocessed {
     }
 
     pub fn leaf_column_ids() -> Vec<PreProcessedColumnId> {
-        let mut ids = [
-            "recursion_fri_merkle_leaf_row_mask",
-            "recursion_fri_merkle_leaf_segment_mask",
-            "recursion_fri_merkle_leaf_binary_mask",
-            "recursion_fri_merkle_leaf_verifier_id",
-            "recursion_fri_merkle_leaf_layer",
-            "recursion_fri_merkle_leaf_query",
-            "recursion_fri_merkle_leaf_packed_index",
-            "recursion_fri_merkle_leaf_count",
-            "recursion_fri_merkle_leaf_local_root_mask",
-            "recursion_fri_merkle_leaf_tree_id",
-            "recursion_fri_merkle_leaf_tree_height",
-            "recursion_fri_merkle_leaf_step",
-            "recursion_fri_merkle_leaf_first_mask",
-            "recursion_fri_merkle_leaf_last_mask",
-        ]
-        .into_iter()
-        .map(|id| PreProcessedColumnId { id: id.into() })
-        .collect::<Vec<_>>();
-        for slot in 0..RATE {
-            ids.extend([
-                PreProcessedColumnId {
-                    id: format!("recursion_fri_merkle_leaf_chunk_{slot}_source_mask"),
-                },
-                PreProcessedColumnId {
-                    id: format!("recursion_fri_merkle_leaf_chunk_{slot}_offset"),
-                },
-                PreProcessedColumnId {
-                    id: format!("recursion_fri_merkle_leaf_chunk_{slot}_word"),
-                },
-                PreProcessedColumnId {
-                    id: format!("recursion_fri_merkle_leaf_chunk_{slot}_constant"),
-                },
-            ]);
-        }
-        ids
+        fri_merkle_leaf_dsl::preprocessed_column_ids()
     }
 
     pub fn node_column_ids() -> Vec<PreProcessedColumnId> {
-        ids(&NODE_PREPROCESSED_COLUMN_IDS)
+        fri_merkle_node_dsl::preprocessed_column_ids()
     }
 
     pub fn anchor_column_ids() -> Vec<PreProcessedColumnId> {
-        ids(&ANCHOR_PREPROCESSED_COLUMN_IDS)
+        fri_merkle_anchor_dsl::preprocessed_column_ids()
     }
 
     pub fn gen_leaf_columns(
@@ -437,6 +325,12 @@ impl FriMerklePreprocessed {
                     LeafChunkSource::Constant(value) => columns[start + 3][index] = value,
                 }
             }
+            // Endpoint masks keep relation multiplicities within the DSL's
+            // degree budget while fixing the same trusted schedule predicate.
+            columns[LEAF_MERKLE_ENDPOINT_MASK_COLUMN][index] =
+                u32::from(row.last && row.leaf_count != 1);
+            columns[LEAF_LOCAL_ROOT_ENDPOINT_MASK_COLUMN][index] =
+                u32::from(row.last && row.leaf_count == 1);
         }
         into_evaluations(columns, self.leaf_log_size)
     }
@@ -714,13 +608,6 @@ fn canonical_usize(field: &'static str, value: usize) -> Result<u32, FriMerkleEr
         .map_err(|_| FriMerkleError::IndexNotCanonical { field, value })
 }
 
-fn ids<const N: usize>(names: &[&str; N]) -> Vec<PreProcessedColumnId> {
-    names
-        .iter()
-        .map(|id| PreProcessedColumnId { id: (*id).into() })
-        .collect()
-}
-
 fn zero_columns(count: usize, log_size: u32) -> Vec<AlignedVec<u32>> {
     let size = 1_usize << log_size;
     (0..count)
@@ -747,500 +634,590 @@ const fn leaf_chunk_column(slot: usize) -> usize {
     LEAF_CHUNKS_START + slot * LEAF_CHUNK_COLUMNS
 }
 
-pub type LeafComponent = FrameworkComponent<LeafEval>;
-pub type NodeComponent = FrameworkComponent<NodeEval>;
-pub type AnchorComponent = FrameworkComponent<AnchorEval>;
-
-/// Verifies fixed FRI leaf sponges and exports their authenticated words.
+/// Relations used by the macro-generated FRI leaf component.
 #[derive(Clone)]
-pub struct LeafEval {
-    pub log_size: u32,
-    pub proof_kind: ProofKind,
-    pub vm_relations: Relations,
-    pub fri_relations: FriMerkleRelations,
-    pub recursion_relations: RecursionRelations,
+pub struct FriMerkleLeafComponentRelations {
+    pub poseidon2_io: air::relations::relation_types::poseidon2_io,
+    pub value_word: FriMerkleValueWordRelation,
+    pub state: FriMerkleLeafStateRelation,
+    pub route: FriMerkleRouteRelation,
+    pub merkle_node: crate::relations::MerkleNodeRelation,
+    pub local_root: FriMerkleLocalRootRelation,
 }
 
-impl FrameworkEval for LeafEval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
-
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
-
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = FriMerkleLeafColumns::from_eval(&mut eval);
-        let ids = FriMerklePreprocessed::leaf_column_ids();
-        let row_mask = eval.get_preprocessed_column(ids[LEAF_ROW_MASK_COLUMN].clone());
-        let segment_mask = eval.get_preprocessed_column(ids[LEAF_SEGMENT_MASK_COLUMN].clone());
-        let binary_mask = eval.get_preprocessed_column(ids[LEAF_BINARY_MASK_COLUMN].clone());
-        let verifier_id = eval.get_preprocessed_column(ids[LEAF_VERIFIER_ID_COLUMN].clone());
-        let layer = eval.get_preprocessed_column(ids[LEAF_LAYER_COLUMN].clone());
-        let query = eval.get_preprocessed_column(ids[LEAF_QUERY_COLUMN].clone());
-        let packed_index = eval.get_preprocessed_column(ids[LEAF_PACKED_INDEX_COLUMN].clone());
-        let leaf_count = eval.get_preprocessed_column(ids[LEAF_COUNT_COLUMN].clone());
-        let local_root = eval.get_preprocessed_column(ids[LEAF_LOCAL_ROOT_MASK_COLUMN].clone());
-        let tree_id = eval.get_preprocessed_column(ids[LEAF_TREE_ID_COLUMN].clone());
-        let tree_height = eval.get_preprocessed_column(ids[LEAF_TREE_HEIGHT_COLUMN].clone());
-        let step = eval.get_preprocessed_column(ids[LEAF_STEP_COLUMN].clone());
-        let first = eval.get_preprocessed_column(ids[LEAF_FIRST_MASK_COLUMN].clone());
-        let last = eval.get_preprocessed_column(ids[LEAF_LAST_MASK_COLUMN].clone());
-        let chunk_metadata: LeafChunkMetadata<E::F> = core::array::from_fn(|slot| {
-            let start = leaf_chunk_column(slot);
-            (
-                eval.get_preprocessed_column(ids[start].clone()),
-                eval.get_preprocessed_column(ids[start + 1].clone()),
-                eval.get_preprocessed_column(ids[start + 2].clone()),
-                eval.get_preprocessed_column(ids[start + 3].clone()),
-            )
-        });
-        let previous = leaf_previous_columns(&cols);
-        let chunks = leaf_chunk_columns(&cols);
-        let output = leaf_output_columns(&cols);
-        let segment = E::F::from(BaseField::from(u32::from(
-            self.proof_kind == ProofKind::SegmentLeaf,
-        )));
-        let binary = E::F::from(BaseField::from(u32::from(
-            self.proof_kind == ProofKind::BinaryNode,
-        )));
-        let active = row_mask * (segment_mask * segment + binary_mask * binary);
-        let one = E::F::from(BaseField::from(1));
-        let final_active = active.clone() * last.clone();
-
-        eval.add_constraint(cols.enabler.clone() - active.clone());
-        for value in previous.iter().chain(&chunks).chain(&output) {
-            eval.add_constraint((one.clone() - active.clone()) * value.clone());
+impl FriMerkleLeafComponentRelations {
+    /// Combine leaf hashing, authenticated values, routing, and Merkle ownership.
+    pub fn new(
+        vm_relations: &Relations,
+        fri_relations: &FriMerkleRelations,
+        recursion_relations: &RecursionRelations,
+    ) -> Self {
+        Self {
+            poseidon2_io: vm_relations.poseidon2_io.clone(),
+            value_word: fri_relations.value_word.clone(),
+            state: fri_relations.state.clone(),
+            route: fri_relations.route.clone(),
+            merkle_node: recursion_relations.merkle_node.clone(),
+            local_root: fri_relations.local_root.clone(),
         }
-        eval.add_constraint((one.clone() - final_active.clone()) * cols.position.clone());
-        for (index, value) in previous.iter().enumerate() {
-            let initial = u32::from(index + 1 == T) * LEAF_TAG;
-            eval.add_constraint(
-                active.clone()
-                    * first.clone()
-                    * (value.clone() - E::F::from(BaseField::from(initial))),
+    }
+}
+
+mod fri_merkle_leaf_dsl {
+    stwo_macros::define_air_fns! {
+        max_degree: 3,
+        embedded: [],
+        embedded_component: true,
+        embedded_enabler_boolean: false,
+        embedded_relations: crate::fri_merkle_air::FriMerkleLeafComponentRelations,
+        logup_batch: 2,
+        embedded_preprocessed: {
+            row_mask: "recursion_fri_merkle_leaf_row_mask",
+            segment_mask: "recursion_fri_merkle_leaf_segment_mask",
+            binary_mask: "recursion_fri_merkle_leaf_binary_mask",
+            verifier_id: "recursion_fri_merkle_leaf_verifier_id",
+            layer: "recursion_fri_merkle_leaf_layer",
+            query: "recursion_fri_merkle_leaf_query",
+            packed_index: "recursion_fri_merkle_leaf_packed_index",
+            leaf_count: "recursion_fri_merkle_leaf_count",
+            local_root_mask: "recursion_fri_merkle_leaf_local_root_mask",
+            tree_id: "recursion_fri_merkle_leaf_tree_id",
+            tree_height: "recursion_fri_merkle_leaf_tree_height",
+            step: "recursion_fri_merkle_leaf_step",
+            first_mask: "recursion_fri_merkle_leaf_first_mask",
+            last_mask: "recursion_fri_merkle_leaf_last_mask",
+            chunk_0_source_mask: "recursion_fri_merkle_leaf_chunk_0_source_mask",
+            chunk_0_offset: "recursion_fri_merkle_leaf_chunk_0_offset",
+            chunk_0_word: "recursion_fri_merkle_leaf_chunk_0_word",
+            chunk_0_constant: "recursion_fri_merkle_leaf_chunk_0_constant",
+            chunk_1_source_mask: "recursion_fri_merkle_leaf_chunk_1_source_mask",
+            chunk_1_offset: "recursion_fri_merkle_leaf_chunk_1_offset",
+            chunk_1_word: "recursion_fri_merkle_leaf_chunk_1_word",
+            chunk_1_constant: "recursion_fri_merkle_leaf_chunk_1_constant",
+            chunk_2_source_mask: "recursion_fri_merkle_leaf_chunk_2_source_mask",
+            chunk_2_offset: "recursion_fri_merkle_leaf_chunk_2_offset",
+            chunk_2_word: "recursion_fri_merkle_leaf_chunk_2_word",
+            chunk_2_constant: "recursion_fri_merkle_leaf_chunk_2_constant",
+            chunk_3_source_mask: "recursion_fri_merkle_leaf_chunk_3_source_mask",
+            chunk_3_offset: "recursion_fri_merkle_leaf_chunk_3_offset",
+            chunk_3_word: "recursion_fri_merkle_leaf_chunk_3_word",
+            chunk_3_constant: "recursion_fri_merkle_leaf_chunk_3_constant",
+            chunk_4_source_mask: "recursion_fri_merkle_leaf_chunk_4_source_mask",
+            chunk_4_offset: "recursion_fri_merkle_leaf_chunk_4_offset",
+            chunk_4_word: "recursion_fri_merkle_leaf_chunk_4_word",
+            chunk_4_constant: "recursion_fri_merkle_leaf_chunk_4_constant",
+            chunk_5_source_mask: "recursion_fri_merkle_leaf_chunk_5_source_mask",
+            chunk_5_offset: "recursion_fri_merkle_leaf_chunk_5_offset",
+            chunk_5_word: "recursion_fri_merkle_leaf_chunk_5_word",
+            chunk_5_constant: "recursion_fri_merkle_leaf_chunk_5_constant",
+            chunk_6_source_mask: "recursion_fri_merkle_leaf_chunk_6_source_mask",
+            chunk_6_offset: "recursion_fri_merkle_leaf_chunk_6_offset",
+            chunk_6_word: "recursion_fri_merkle_leaf_chunk_6_word",
+            chunk_6_constant: "recursion_fri_merkle_leaf_chunk_6_constant",
+            chunk_7_source_mask: "recursion_fri_merkle_leaf_chunk_7_source_mask",
+            chunk_7_offset: "recursion_fri_merkle_leaf_chunk_7_offset",
+            chunk_7_word: "recursion_fri_merkle_leaf_chunk_7_word",
+            chunk_7_constant: "recursion_fri_merkle_leaf_chunk_7_constant",
+            merkle_endpoint_mask: "recursion_fri_merkle_leaf_merkle_endpoint_mask",
+            local_root_endpoint_mask: "recursion_fri_merkle_leaf_local_root_endpoint_mask",
+        },
+        embedded_params: [segment_active, binary_active, leaf_tag],
+
+        relation poseidon2_io(32);
+        relation value_word(6);
+        relation state(21);
+        relation route(4);
+        relation merkle_node(11);
+        relation local_root(11);
+
+        fn fri_merkle_leaf(
+            position,
+            previous_0, previous_1, previous_2, previous_3,
+            previous_4, previous_5, previous_6, previous_7,
+            previous_8, previous_9, previous_10, previous_11,
+            previous_12, previous_13, previous_14, previous_15,
+            chunk_0, chunk_1, chunk_2, chunk_3,
+            chunk_4, chunk_5, chunk_6, chunk_7,
+            output_0, output_1, output_2, output_3,
+            output_4, output_5, output_6, output_7,
+            output_8, output_9, output_10, output_11,
+            output_12, output_13, output_14, output_15,
+            row_mask, segment_mask, binary_mask, verifier_id, layer, query,
+            packed_index, leaf_count, local_root_mask, tree_id, tree_height,
+            step, first_mask, last_mask,
+            chunk_0_source_mask, chunk_0_offset, chunk_0_word, chunk_0_constant,
+            chunk_1_source_mask, chunk_1_offset, chunk_1_word, chunk_1_constant,
+            chunk_2_source_mask, chunk_2_offset, chunk_2_word, chunk_2_constant,
+            chunk_3_source_mask, chunk_3_offset, chunk_3_word, chunk_3_constant,
+            chunk_4_source_mask, chunk_4_offset, chunk_4_word, chunk_4_constant,
+            chunk_5_source_mask, chunk_5_offset, chunk_5_word, chunk_5_constant,
+            chunk_6_source_mask, chunk_6_offset, chunk_6_word, chunk_6_constant,
+            chunk_7_source_mask, chunk_7_offset, chunk_7_word, chunk_7_constant,
+            merkle_endpoint_mask, local_root_endpoint_mask,
+            segment_active, binary_active, leaf_tag,
+        ) {
+            // Trusted lane masks are disjoint subsets of the row mask.
+            let active = segment_mask * segment_active + binary_mask * binary_active;
+            let final_active = active * last_mask;
+            let leaf_index = position * leaf_count + packed_index;
+
+            constrain enabler - active;
+            constrain (1 - active) * previous_0;
+            constrain (1 - active) * previous_1;
+            constrain (1 - active) * previous_2;
+            constrain (1 - active) * previous_3;
+            constrain (1 - active) * previous_4;
+            constrain (1 - active) * previous_5;
+            constrain (1 - active) * previous_6;
+            constrain (1 - active) * previous_7;
+            constrain (1 - active) * previous_8;
+            constrain (1 - active) * previous_9;
+            constrain (1 - active) * previous_10;
+            constrain (1 - active) * previous_11;
+            constrain (1 - active) * previous_12;
+            constrain (1 - active) * previous_13;
+            constrain (1 - active) * previous_14;
+            constrain (1 - active) * previous_15;
+            constrain (1 - active) * chunk_0;
+            constrain (1 - active) * chunk_1;
+            constrain (1 - active) * chunk_2;
+            constrain (1 - active) * chunk_3;
+            constrain (1 - active) * chunk_4;
+            constrain (1 - active) * chunk_5;
+            constrain (1 - active) * chunk_6;
+            constrain (1 - active) * chunk_7;
+            constrain (1 - active) * output_0;
+            constrain (1 - active) * output_1;
+            constrain (1 - active) * output_2;
+            constrain (1 - active) * output_3;
+            constrain (1 - active) * output_4;
+            constrain (1 - active) * output_5;
+            constrain (1 - active) * output_6;
+            constrain (1 - active) * output_7;
+            constrain (1 - active) * output_8;
+            constrain (1 - active) * output_9;
+            constrain (1 - active) * output_10;
+            constrain (1 - active) * output_11;
+            constrain (1 - active) * output_12;
+            constrain (1 - active) * output_13;
+            constrain (1 - active) * output_14;
+            constrain (1 - active) * output_15;
+            constrain (1 - final_active) * position;
+            constrain active * first_mask * previous_0;
+            constrain active * first_mask * previous_1;
+            constrain active * first_mask * previous_2;
+            constrain active * first_mask * previous_3;
+            constrain active * first_mask * previous_4;
+            constrain active * first_mask * previous_5;
+            constrain active * first_mask * previous_6;
+            constrain active * first_mask * previous_7;
+            constrain active * first_mask * previous_8;
+            constrain active * first_mask * previous_9;
+            constrain active * first_mask * previous_10;
+            constrain active * first_mask * previous_11;
+            constrain active * first_mask * previous_12;
+            constrain active * first_mask * previous_13;
+            constrain active * first_mask * previous_14;
+            constrain active * first_mask * (previous_15 - leaf_tag);
+            constrain active * (1 - chunk_0_source_mask) * (chunk_0 - chunk_0_constant);
+            constrain active * (1 - chunk_1_source_mask) * (chunk_1 - chunk_1_constant);
+            constrain active * (1 - chunk_2_source_mask) * (chunk_2 - chunk_2_constant);
+            constrain active * (1 - chunk_3_source_mask) * (chunk_3 - chunk_3_constant);
+            constrain active * (1 - chunk_4_source_mask) * (chunk_4 - chunk_4_constant);
+            constrain active * (1 - chunk_5_source_mask) * (chunk_5 - chunk_5_constant);
+            constrain active * (1 - chunk_6_source_mask) * (chunk_6 - chunk_6_constant);
+            constrain active * (1 - chunk_7_source_mask) * (chunk_7 - chunk_7_constant);
+
+            consume(active) poseidon2_io(
+                previous_0 + chunk_0, previous_1 + chunk_1,
+                previous_2 + chunk_2, previous_3 + chunk_3,
+                previous_4 + chunk_4, previous_5 + chunk_5,
+                previous_6 + chunk_6, previous_7 + chunk_7,
+                previous_8, previous_9, previous_10, previous_11,
+                previous_12, previous_13, previous_14, previous_15,
+                output_0, output_1, output_2, output_3,
+                output_4, output_5, output_6, output_7,
+                output_8, output_9, output_10, output_11,
+                output_12, output_13, output_14, output_15,
+            );
+            emit(active * chunk_0_source_mask) value_word(
+                verifier_id, layer, query, chunk_0_offset, chunk_0_word, chunk_0,
+            );
+            emit(active * chunk_1_source_mask) value_word(
+                verifier_id, layer, query, chunk_1_offset, chunk_1_word, chunk_1,
+            );
+            emit(active * chunk_2_source_mask) value_word(
+                verifier_id, layer, query, chunk_2_offset, chunk_2_word, chunk_2,
+            );
+            emit(active * chunk_3_source_mask) value_word(
+                verifier_id, layer, query, chunk_3_offset, chunk_3_word, chunk_3,
+            );
+            emit(active * chunk_4_source_mask) value_word(
+                verifier_id, layer, query, chunk_4_offset, chunk_4_word, chunk_4,
+            );
+            emit(active * chunk_5_source_mask) value_word(
+                verifier_id, layer, query, chunk_5_offset, chunk_5_word, chunk_5,
+            );
+            emit(active * chunk_6_source_mask) value_word(
+                verifier_id, layer, query, chunk_6_offset, chunk_6_word, chunk_6,
+            );
+            emit(active * chunk_7_source_mask) value_word(
+                verifier_id, layer, query, chunk_7_offset, chunk_7_word, chunk_7,
+            );
+            consume(active * (1 - first_mask)) state(
+                verifier_id, layer, query, packed_index, step,
+                previous_0, previous_1, previous_2, previous_3,
+                previous_4, previous_5, previous_6, previous_7,
+                previous_8, previous_9, previous_10, previous_11,
+                previous_12, previous_13, previous_14, previous_15,
+            );
+            emit(active * (1 - last_mask)) state(
+                verifier_id, layer, query, packed_index, step + 1,
+                output_0, output_1, output_2, output_3,
+                output_4, output_5, output_6, output_7,
+                output_8, output_9, output_10, output_11,
+                output_12, output_13, output_14, output_15,
+            );
+            consume(final_active) route(verifier_id, layer, query, position);
+            consume(active * merkle_endpoint_mask) merkle_node(
+                tree_id, tree_height, leaf_index,
+                output_0, output_1, output_2, output_3,
+                output_4, output_5, output_6, output_7,
+            );
+            consume(active * local_root_endpoint_mask) local_root(
+                tree_id, tree_height, leaf_index,
+                output_0, output_1, output_2, output_3,
+                output_4, output_5, output_6, output_7,
+            );
+
+            return (
+                output_0, output_1, output_2, output_3,
+                output_4, output_5, output_6, output_7,
             );
         }
-        for (slot, chunk) in chunks.iter().enumerate() {
-            let (source_mask, _, _, constant) = &chunk_metadata[slot];
-            eval.add_constraint(
-                active.clone()
-                    * (one.clone() - source_mask.clone())
-                    * (chunk.clone() - constant.clone()),
+    }
+}
+
+/// Relations used by the macro-generated FRI internal-node component.
+#[derive(Clone)]
+pub struct FriMerkleNodeComponentRelations {
+    pub poseidon2_io: air::relations::relation_types::poseidon2_io,
+    pub merkle_node: crate::relations::MerkleNodeRelation,
+    pub local_root: FriMerkleLocalRootRelation,
+}
+
+impl FriMerkleNodeComponentRelations {
+    /// Combine node hashing with internal and local-root Merkle ownership.
+    pub fn new(
+        vm_relations: &Relations,
+        fri_relations: &FriMerkleRelations,
+        recursion_relations: &RecursionRelations,
+    ) -> Self {
+        Self {
+            poseidon2_io: vm_relations.poseidon2_io.clone(),
+            merkle_node: recursion_relations.merkle_node.clone(),
+            local_root: fri_relations.local_root.clone(),
+        }
+    }
+}
+
+mod fri_merkle_node_dsl {
+    stwo_macros::define_air_fns! {
+        max_degree: 3,
+        embedded: [],
+        embedded_component: true,
+        embedded_enabler_boolean: false,
+        embedded_relations: crate::fri_merkle_air::FriMerkleNodeComponentRelations,
+        logup_batch: 2,
+        embedded_preprocessed: {
+            row_mask: "recursion_fri_merkle_node_row_mask",
+            segment_mask: "recursion_fri_merkle_node_segment_mask",
+            binary_mask: "recursion_fri_merkle_node_binary_mask",
+            tree_id: "recursion_fri_merkle_node_tree_id",
+            depth: "recursion_fri_merkle_node_depth",
+            local_root_mask: "recursion_fri_merkle_node_local_root_mask",
+        },
+        embedded_params: [segment_active, binary_active],
+
+        relation poseidon2_io(32);
+        relation merkle_node(11);
+        relation local_root(11);
+
+        fn fri_merkle_node(
+            index,
+            left_0, left_1, left_2, left_3,
+            left_4, left_5, left_6, left_7,
+            right_0, right_1, right_2, right_3,
+            right_4, right_5, right_6, right_7,
+            parent_0, parent_1, parent_2, parent_3,
+            parent_4, parent_5, parent_6, parent_7,
+            output_8, output_9, output_10, output_11,
+            output_12, output_13, output_14, output_15,
+            row_mask, segment_mask, binary_mask, tree_id, depth, local_root_mask,
+            segment_active, binary_active,
+        ) {
+            // Trusted lane masks are disjoint subsets of the row mask.
+            let active = segment_mask * segment_active + binary_mask * binary_active;
+            let child_depth = depth + 1;
+            let left_index = index * 2;
+
+            constrain enabler - active;
+            constrain (1 - active) * index;
+            constrain (1 - active) * left_0;
+            constrain (1 - active) * left_1;
+            constrain (1 - active) * left_2;
+            constrain (1 - active) * left_3;
+            constrain (1 - active) * left_4;
+            constrain (1 - active) * left_5;
+            constrain (1 - active) * left_6;
+            constrain (1 - active) * left_7;
+            constrain (1 - active) * right_0;
+            constrain (1 - active) * right_1;
+            constrain (1 - active) * right_2;
+            constrain (1 - active) * right_3;
+            constrain (1 - active) * right_4;
+            constrain (1 - active) * right_5;
+            constrain (1 - active) * right_6;
+            constrain (1 - active) * right_7;
+            constrain (1 - active) * parent_0;
+            constrain (1 - active) * parent_1;
+            constrain (1 - active) * parent_2;
+            constrain (1 - active) * parent_3;
+            constrain (1 - active) * parent_4;
+            constrain (1 - active) * parent_5;
+            constrain (1 - active) * parent_6;
+            constrain (1 - active) * parent_7;
+            constrain (1 - active) * output_8;
+            constrain (1 - active) * output_9;
+            constrain (1 - active) * output_10;
+            constrain (1 - active) * output_11;
+            constrain (1 - active) * output_12;
+            constrain (1 - active) * output_13;
+            constrain (1 - active) * output_14;
+            constrain (1 - active) * output_15;
+
+            consume(active) poseidon2_io(
+                left_0, left_1, left_2, left_3,
+                left_4, left_5, left_6, left_7,
+                right_0, right_1, right_2, right_3,
+                right_4, right_5, right_6, right_7,
+                parent_0, parent_1, parent_2, parent_3,
+                parent_4, parent_5, parent_6, parent_7,
+                output_8, output_9, output_10, output_11,
+                output_12, output_13, output_14, output_15,
+            );
+            consume(active * (1 - local_root_mask)) merkle_node(
+                tree_id, depth, index,
+                parent_0, parent_1, parent_2, parent_3,
+                parent_4, parent_5, parent_6, parent_7,
+            );
+            consume(active * local_root_mask) local_root(
+                tree_id, depth, index,
+                parent_0, parent_1, parent_2, parent_3,
+                parent_4, parent_5, parent_6, parent_7,
+            );
+            emit(active) merkle_node(
+                tree_id, child_depth, left_index,
+                left_0, left_1, left_2, left_3,
+                left_4, left_5, left_6, left_7,
+            );
+            emit(active) merkle_node(
+                tree_id, child_depth, left_index + 1,
+                right_0, right_1, right_2, right_3,
+                right_4, right_5, right_6, right_7,
+            );
+
+            return (
+                parent_0, parent_1, parent_2, parent_3,
+                parent_4, parent_5, parent_6, parent_7,
             );
         }
-
-        let mut poseidon_tuple = Vec::with_capacity(2 * T);
-        for (index, value) in previous.iter().enumerate() {
-            poseidon_tuple.push(if index < RATE {
-                value.clone() + chunks[index].clone()
-            } else {
-                value.clone()
-            });
-        }
-        poseidon_tuple.extend(output.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.vm_relations.poseidon2_io,
-            -E::EF::from(active.clone()),
-            &poseidon_tuple,
-        ));
-
-        for (slot, chunk) in chunks.iter().enumerate() {
-            let (source_mask, offset, word, _) = &chunk_metadata[slot];
-            eval.add_to_relation(RelationEntry::new(
-                &self.fri_relations.value_word,
-                E::EF::from(active.clone() * source_mask.clone()),
-                &[
-                    verifier_id.clone(),
-                    layer.clone(),
-                    query.clone(),
-                    offset.clone(),
-                    word.clone(),
-                    chunk.clone(),
-                ],
-            ));
-        }
-
-        let mut previous_tuple = vec![
-            verifier_id.clone(),
-            layer.clone(),
-            query.clone(),
-            packed_index.clone(),
-            step.clone(),
-        ];
-        previous_tuple.extend(previous.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.fri_relations.state,
-            -E::EF::from(active.clone() * (one.clone() - first)),
-            &previous_tuple,
-        ));
-        let mut output_tuple = vec![
-            verifier_id.clone(),
-            layer.clone(),
-            query.clone(),
-            packed_index.clone(),
-            step + one.clone(),
-        ];
-        output_tuple.extend(output.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.fri_relations.state,
-            E::EF::from(active.clone() * (one.clone() - last)),
-            &output_tuple,
-        ));
-
-        eval.add_to_relation(RelationEntry::new(
-            &self.fri_relations.route,
-            -E::EF::from(final_active.clone()),
-            &[verifier_id, layer, query, cols.position.clone()],
-        ));
-        let leaf_index = cols.position.clone() * leaf_count + packed_index;
-        let mut leaf_tuple = vec![tree_id, tree_height, leaf_index];
-        leaf_tuple.extend(output[..DIGEST_WORDS].iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.recursion_relations.merkle_node,
-            -E::EF::from(final_active.clone() * (one.clone() - local_root.clone())),
-            &leaf_tuple,
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.fri_relations.local_root,
-            -E::EF::from(final_active * local_root),
-            &leaf_tuple,
-        ));
-
-        eval.finalize_logup_in_pairs();
-        eval
     }
 }
 
-/// Rebuilds every internal node of an authenticated FRI fold subset.
+/// Relations used by the macro-generated FRI path-anchor component.
 #[derive(Clone)]
-pub struct NodeEval {
-    pub log_size: u32,
-    pub proof_kind: ProofKind,
-    pub vm_relations: Relations,
-    pub fri_relations: FriMerkleRelations,
-    pub recursion_relations: RecursionRelations,
+pub struct FriMerkleAnchorComponentRelations {
+    pub query_position: super::query_position_air::QueryPositionRelation,
+    pub merkle_node: crate::relations::MerkleNodeRelation,
+    pub local_root: FriMerkleLocalRootRelation,
+    pub route: FriMerkleRouteRelation,
+    pub control_step: super::control_air::VerifierStepRelation,
 }
 
-impl FrameworkEval for NodeEval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
-
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
-
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = FriMerkleNodeColumns::from_eval(&mut eval);
-        let ids = FriMerklePreprocessed::node_column_ids();
-        let row_mask = eval.get_preprocessed_column(ids[NODE_ROW_MASK_COLUMN].clone());
-        let segment_mask = eval.get_preprocessed_column(ids[NODE_SEGMENT_MASK_COLUMN].clone());
-        let binary_mask = eval.get_preprocessed_column(ids[NODE_BINARY_MASK_COLUMN].clone());
-        let tree_id = eval.get_preprocessed_column(ids[NODE_TREE_ID_COLUMN].clone());
-        let depth = eval.get_preprocessed_column(ids[NODE_DEPTH_COLUMN].clone());
-        let local_root = eval.get_preprocessed_column(ids[NODE_LOCAL_ROOT_MASK_COLUMN].clone());
-        let left = node_left_columns(&cols);
-        let right = node_right_columns(&cols);
-        let parent = node_parent_columns(&cols);
-        let tail = node_tail_columns(&cols);
-        let segment = E::F::from(BaseField::from(u32::from(
-            self.proof_kind == ProofKind::SegmentLeaf,
-        )));
-        let binary = E::F::from(BaseField::from(u32::from(
-            self.proof_kind == ProofKind::BinaryNode,
-        )));
-        let active = row_mask * (segment_mask * segment + binary_mask * binary);
-        let one = E::F::from(BaseField::from(1));
-        let two = E::F::from(BaseField::from(2));
-
-        eval.add_constraint(cols.enabler.clone() - active.clone());
-        for value in core::iter::once(&cols.index)
-            .chain(left.iter())
-            .chain(&right)
-            .chain(&parent)
-            .chain(&tail)
-        {
-            eval.add_constraint((one.clone() - active.clone()) * value.clone());
+impl FriMerkleAnchorComponentRelations {
+    /// Combine query routing, path ownership, local roots, and verifier control.
+    pub fn new(
+        control_relations: &ControlRelations,
+        query_relations: &QueryPositionRelations,
+        fri_relations: &FriMerkleRelations,
+        recursion_relations: &RecursionRelations,
+    ) -> Self {
+        Self {
+            query_position: query_relations.position.clone(),
+            merkle_node: recursion_relations.merkle_node.clone(),
+            local_root: fri_relations.local_root.clone(),
+            route: fri_relations.route.clone(),
+            control_step: control_relations.step.clone(),
         }
-
-        let mut poseidon_tuple = Vec::with_capacity(2 * T);
-        poseidon_tuple.extend(left.iter().cloned());
-        poseidon_tuple.extend(right.iter().cloned());
-        poseidon_tuple.extend(parent.iter().cloned());
-        poseidon_tuple.extend(tail.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.vm_relations.poseidon2_io,
-            -E::EF::from(active.clone()),
-            &poseidon_tuple,
-        ));
-
-        let mut own_tuple = vec![tree_id.clone(), depth.clone(), cols.index.clone()];
-        own_tuple.extend(parent.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.recursion_relations.merkle_node,
-            -E::EF::from(active.clone() * (one.clone() - local_root.clone())),
-            &own_tuple,
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.fri_relations.local_root,
-            -E::EF::from(active.clone() * local_root),
-            &own_tuple,
-        ));
-
-        let child_depth = depth + one;
-        let left_index = cols.index.clone() * two;
-        let mut left_tuple = vec![tree_id.clone(), child_depth.clone(), left_index.clone()];
-        left_tuple.extend(left.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.recursion_relations.merkle_node,
-            E::EF::from(active.clone()),
-            &left_tuple,
-        ));
-        let mut right_tuple = vec![
-            tree_id,
-            child_depth,
-            left_index + E::F::from(BaseField::from(1)),
-        ];
-        right_tuple.extend(right.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.recursion_relations.merkle_node,
-            E::EF::from(active),
-            &right_tuple,
-        ));
-
-        eval.finalize_logup_in_pairs();
-        eval
     }
 }
 
-/// Binds each external FRI path endpoint to its routed local subtree.
-#[derive(Clone)]
-pub struct AnchorEval {
-    pub log_size: u32,
-    pub proof_kind: ProofKind,
-    pub control_relations: ControlRelations,
-    pub query_relations: QueryPositionRelations,
-    pub fri_relations: FriMerkleRelations,
-    pub recursion_relations: RecursionRelations,
-}
+mod fri_merkle_anchor_dsl {
+    stwo_macros::define_air_fns! {
+        max_degree: 3,
+        embedded: [],
+        embedded_component: true,
+        embedded_enabler_boolean: false,
+        embedded_relations: crate::fri_merkle_air::FriMerkleAnchorComponentRelations,
+        logup_batch: 2,
+        embedded_preprocessed: {
+            row_mask: "recursion_fri_merkle_anchor_row_mask",
+            segment_mask: "recursion_fri_merkle_anchor_segment_mask",
+            binary_mask: "recursion_fri_merkle_anchor_binary_mask",
+            verifier_id: "recursion_fri_merkle_anchor_verifier_id",
+            layer: "recursion_fri_merkle_anchor_layer",
+            query: "recursion_fri_merkle_anchor_query",
+            tree_id: "recursion_fri_merkle_anchor_tree_id",
+            path_depth: "recursion_fri_merkle_anchor_path_depth",
+            leaf_count: "recursion_fri_merkle_anchor_leaf_count",
+            control_sequence: "recursion_fri_merkle_anchor_control_sequence",
+            control_tag: "recursion_fri_merkle_anchor_control_tag",
+            control_arg_0: "recursion_fri_merkle_anchor_control_arg_0",
+            control_arg_1: "recursion_fri_merkle_anchor_control_arg_1",
+            control_arg_2: "recursion_fri_merkle_anchor_control_arg_2",
+            control_arg_3: "recursion_fri_merkle_anchor_control_arg_3",
+        },
+        embedded_params: [segment_active, binary_active, fri_merkle_kind],
 
-impl FrameworkEval for AnchorEval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
+        relation query_position(6);
+        relation merkle_node(11);
+        relation local_root(11);
+        relation route(4);
+        relation control_step(7);
 
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
+        fn fri_merkle_anchor(
+            position,
+            digest_0, digest_1, digest_2, digest_3,
+            digest_4, digest_5, digest_6, digest_7,
+            row_mask, segment_mask, binary_mask, verifier_id, layer, query,
+            tree_id, path_depth, leaf_count, control_sequence, control_tag,
+            control_arg_0, control_arg_1, control_arg_2, control_arg_3,
+            segment_active, binary_active, fri_merkle_kind,
+        ) {
+            // Trusted lane masks are disjoint subsets of the row mask.
+            let active = segment_mask * segment_active + binary_mask * binary_active;
 
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = FriMerkleAnchorColumns::from_eval(&mut eval);
-        let ids = FriMerklePreprocessed::anchor_column_ids();
-        let row_mask = eval.get_preprocessed_column(ids[ANCHOR_ROW_MASK_COLUMN].clone());
-        let segment_mask = eval.get_preprocessed_column(ids[ANCHOR_SEGMENT_MASK_COLUMN].clone());
-        let binary_mask = eval.get_preprocessed_column(ids[ANCHOR_BINARY_MASK_COLUMN].clone());
-        let verifier_id = eval.get_preprocessed_column(ids[ANCHOR_VERIFIER_ID_COLUMN].clone());
-        let layer = eval.get_preprocessed_column(ids[ANCHOR_LAYER_COLUMN].clone());
-        let query = eval.get_preprocessed_column(ids[ANCHOR_QUERY_COLUMN].clone());
-        let tree_id = eval.get_preprocessed_column(ids[ANCHOR_TREE_ID_COLUMN].clone());
-        let path_depth = eval.get_preprocessed_column(ids[ANCHOR_PATH_DEPTH_COLUMN].clone());
-        let leaf_count = eval.get_preprocessed_column(ids[ANCHOR_LEAF_COUNT_COLUMN].clone());
-        let control_sequence =
-            eval.get_preprocessed_column(ids[ANCHOR_CONTROL_SEQUENCE_COLUMN].clone());
-        let control_tag = eval.get_preprocessed_column(ids[ANCHOR_CONTROL_TAG_COLUMN].clone());
-        let control_args = [
-            eval.get_preprocessed_column(ids[ANCHOR_CONTROL_ARG_0_COLUMN].clone()),
-            eval.get_preprocessed_column(ids[ANCHOR_CONTROL_ARG_1_COLUMN].clone()),
-            eval.get_preprocessed_column(ids[ANCHOR_CONTROL_ARG_2_COLUMN].clone()),
-            eval.get_preprocessed_column(ids[ANCHOR_CONTROL_ARG_3_COLUMN].clone()),
-        ];
-        let digest = anchor_digest_columns(&cols);
-        let segment = E::F::from(BaseField::from(u32::from(
-            self.proof_kind == ProofKind::SegmentLeaf,
-        )));
-        let binary = E::F::from(BaseField::from(u32::from(
-            self.proof_kind == ProofKind::BinaryNode,
-        )));
-        let active = row_mask * (segment_mask * segment + binary_mask * binary);
-        let one = E::F::from(BaseField::from(1));
+            constrain enabler - active;
+            constrain (1 - active) * position;
+            constrain (1 - active) * digest_0;
+            constrain (1 - active) * digest_1;
+            constrain (1 - active) * digest_2;
+            constrain (1 - active) * digest_3;
+            constrain (1 - active) * digest_4;
+            constrain (1 - active) * digest_5;
+            constrain (1 - active) * digest_6;
+            constrain (1 - active) * digest_7;
 
-        eval.add_constraint(cols.enabler.clone() - active.clone());
-        for value in core::iter::once(&cols.position).chain(&digest) {
-            eval.add_constraint((one.clone() - active.clone()) * value.clone());
+            consume(active) query_position(
+                verifier_id, fri_merkle_kind, layer, query, position, 0,
+            );
+            consume(active) merkle_node(
+                tree_id, path_depth, position,
+                digest_0, digest_1, digest_2, digest_3,
+                digest_4, digest_5, digest_6, digest_7,
+            );
+            emit(active) local_root(
+                tree_id, path_depth, position,
+                digest_0, digest_1, digest_2, digest_3,
+                digest_4, digest_5, digest_6, digest_7,
+            );
+            emit(active * leaf_count) route(verifier_id, layer, query, position);
+            consume(active) control_step(
+                verifier_id, control_sequence, control_tag,
+                control_arg_0, control_arg_1, control_arg_2, control_arg_3,
+            );
+
+            return (
+                digest_0, digest_1, digest_2, digest_3,
+                digest_4, digest_5, digest_6, digest_7,
+            );
         }
-
-        eval.add_to_relation(RelationEntry::new(
-            &self.query_relations.position,
-            -E::EF::from(active.clone()),
-            &[
-                verifier_id.clone(),
-                E::F::from(BaseField::from(QueryPositionKind::FriMerkle.as_u32())),
-                layer.clone(),
-                query.clone(),
-                cols.position.clone(),
-                E::F::from(BaseField::from(0)),
-            ],
-        ));
-        let mut root_tuple = vec![tree_id, path_depth, cols.position.clone()];
-        root_tuple.extend(digest.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.recursion_relations.merkle_node,
-            -E::EF::from(active.clone()),
-            &root_tuple,
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.fri_relations.local_root,
-            E::EF::from(active.clone()),
-            &root_tuple,
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.fri_relations.route,
-            E::EF::from(active.clone() * leaf_count),
-            &[verifier_id.clone(), layer, query, cols.position.clone()],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.control_relations.step,
-            -E::EF::from(active),
-            &[
-                verifier_id,
-                control_sequence,
-                control_tag,
-                control_args[0].clone(),
-                control_args[1].clone(),
-                control_args[2].clone(),
-                control_args[3].clone(),
-            ],
-        ));
-
-        eval.finalize_logup_in_pairs();
-        eval
     }
 }
 
-fn leaf_previous_columns<F: Clone>(cols: &FriMerkleLeafColumns<F>) -> [F; T] {
-    [
-        cols.previous_0.clone(),
-        cols.previous_1.clone(),
-        cols.previous_2.clone(),
-        cols.previous_3.clone(),
-        cols.previous_4.clone(),
-        cols.previous_5.clone(),
-        cols.previous_6.clone(),
-        cols.previous_7.clone(),
-        cols.previous_8.clone(),
-        cols.previous_9.clone(),
-        cols.previous_10.clone(),
-        cols.previous_11.clone(),
-        cols.previous_12.clone(),
-        cols.previous_13.clone(),
-        cols.previous_14.clone(),
-        cols.previous_15.clone(),
-    ]
+pub use fri_merkle_anchor_dsl::FriMerkleAnchorTable;
+pub use fri_merkle_anchor_dsl::component::air::{Component as AnchorComponent, Eval as AnchorEval};
+pub use fri_merkle_leaf_dsl::FriMerkleLeafTable;
+pub use fri_merkle_leaf_dsl::component::air::{Component as LeafComponent, Eval as LeafEval};
+pub use fri_merkle_node_dsl::FriMerkleNodeTable;
+pub use fri_merkle_node_dsl::component::air::{Component as NodeComponent, Eval as NodeEval};
+
+/// Construct the generated FRI leaf evaluator for the selected proof kind.
+pub fn leaf_eval_for_proof_kind(
+    log_size: u32,
+    proof_kind: ProofKind,
+    vm_relations: &Relations,
+    fri_relations: &FriMerkleRelations,
+    recursion_relations: &RecursionRelations,
+) -> LeafEval {
+    LeafEval {
+        log_size,
+        segment_active: BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        binary_active: BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        leaf_tag: BaseField::from(LEAF_TAG),
+        relations: FriMerkleLeafComponentRelations::new(
+            vm_relations,
+            fri_relations,
+            recursion_relations,
+        ),
+    }
 }
 
-fn leaf_chunk_columns<F: Clone>(cols: &FriMerkleLeafColumns<F>) -> [F; RATE] {
-    [
-        cols.chunk_0.clone(),
-        cols.chunk_1.clone(),
-        cols.chunk_2.clone(),
-        cols.chunk_3.clone(),
-        cols.chunk_4.clone(),
-        cols.chunk_5.clone(),
-        cols.chunk_6.clone(),
-        cols.chunk_7.clone(),
-    ]
+/// Construct the generated FRI internal-node evaluator for the selected proof kind.
+pub fn node_eval_for_proof_kind(
+    log_size: u32,
+    proof_kind: ProofKind,
+    vm_relations: &Relations,
+    fri_relations: &FriMerkleRelations,
+    recursion_relations: &RecursionRelations,
+) -> NodeEval {
+    NodeEval {
+        log_size,
+        segment_active: BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        binary_active: BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        relations: FriMerkleNodeComponentRelations::new(
+            vm_relations,
+            fri_relations,
+            recursion_relations,
+        ),
+    }
 }
 
-fn leaf_output_columns<F: Clone>(cols: &FriMerkleLeafColumns<F>) -> [F; T] {
-    [
-        cols.output_0.clone(),
-        cols.output_1.clone(),
-        cols.output_2.clone(),
-        cols.output_3.clone(),
-        cols.output_4.clone(),
-        cols.output_5.clone(),
-        cols.output_6.clone(),
-        cols.output_7.clone(),
-        cols.output_8.clone(),
-        cols.output_9.clone(),
-        cols.output_10.clone(),
-        cols.output_11.clone(),
-        cols.output_12.clone(),
-        cols.output_13.clone(),
-        cols.output_14.clone(),
-        cols.output_15.clone(),
-    ]
+/// Construct the generated FRI path-anchor evaluator for the selected proof kind.
+pub fn anchor_eval_for_proof_kind(
+    log_size: u32,
+    proof_kind: ProofKind,
+    control_relations: &ControlRelations,
+    query_relations: &QueryPositionRelations,
+    fri_relations: &FriMerkleRelations,
+    recursion_relations: &RecursionRelations,
+) -> AnchorEval {
+    AnchorEval {
+        log_size,
+        segment_active: BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        binary_active: BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        fri_merkle_kind: BaseField::from(QueryPositionKind::FriMerkle.as_u32()),
+        relations: FriMerkleAnchorComponentRelations::new(
+            control_relations,
+            query_relations,
+            fri_relations,
+            recursion_relations,
+        ),
+    }
 }
 
-fn node_left_columns<F: Clone>(cols: &FriMerkleNodeColumns<F>) -> [F; DIGEST_WORDS] {
-    [
-        cols.left_0.clone(),
-        cols.left_1.clone(),
-        cols.left_2.clone(),
-        cols.left_3.clone(),
-        cols.left_4.clone(),
-        cols.left_5.clone(),
-        cols.left_6.clone(),
-        cols.left_7.clone(),
-    ]
-}
-
-fn node_right_columns<F: Clone>(cols: &FriMerkleNodeColumns<F>) -> [F; DIGEST_WORDS] {
-    [
-        cols.right_0.clone(),
-        cols.right_1.clone(),
-        cols.right_2.clone(),
-        cols.right_3.clone(),
-        cols.right_4.clone(),
-        cols.right_5.clone(),
-        cols.right_6.clone(),
-        cols.right_7.clone(),
-    ]
-}
-
-fn node_parent_columns<F: Clone>(cols: &FriMerkleNodeColumns<F>) -> [F; DIGEST_WORDS] {
-    [
-        cols.parent_0.clone(),
-        cols.parent_1.clone(),
-        cols.parent_2.clone(),
-        cols.parent_3.clone(),
-        cols.parent_4.clone(),
-        cols.parent_5.clone(),
-        cols.parent_6.clone(),
-        cols.parent_7.clone(),
-    ]
-}
-
-fn node_tail_columns<F: Clone>(cols: &FriMerkleNodeColumns<F>) -> [F; DIGEST_WORDS] {
-    [
-        cols.output_8.clone(),
-        cols.output_9.clone(),
-        cols.output_10.clone(),
-        cols.output_11.clone(),
-        cols.output_12.clone(),
-        cols.output_13.clone(),
-        cols.output_14.clone(),
-        cols.output_15.clone(),
-    ]
-}
-
-fn anchor_digest_columns<F: Clone>(cols: &FriMerkleAnchorColumns<F>) -> [F; DIGEST_WORDS] {
-    [
-        cols.digest_0.clone(),
-        cols.digest_1.clone(),
-        cols.digest_2.clone(),
-        cols.digest_3.clone(),
-        cols.digest_4.clone(),
-        cols.digest_5.clone(),
-        cols.digest_6.clone(),
-        cols.digest_7.clone(),
-    ]
-}
-
-/// Generates leaf hash, value, state, route, and endpoint interactions.
-#[allow(clippy::too_many_arguments)]
+/// Generate leaf hash, value, state, route, and endpoint interactions.
 pub fn gen_leaf_interaction_trace(
     trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     preprocessed: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
@@ -1252,258 +1229,17 @@ pub fn gen_leaf_interaction_trace(
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     QM31,
 ) {
-    let cols = FriMerkleLeafColumns::from_iter(trace.iter().map(|column| &column.values.data));
-    let pp = preprocessed
-        .iter()
-        .map(|column| &column.values.data)
-        .collect::<Vec<_>>();
-    let previous = leaf_previous_columns(&cols);
-    let chunks = leaf_chunk_columns(&cols);
-    let output = leaf_output_columns(&cols);
-    let size = cols.enabler.len();
-    let segment = BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf));
-    let binary = BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode));
-    let active = (0..size)
-        .map(|row| {
-            PackedQM31::from(
-                pp[LEAF_ROW_MASK_COLUMN][row]
-                    * (pp[LEAF_SEGMENT_MASK_COLUMN][row] * segment
-                        + pp[LEAF_BINARY_MASK_COLUMN][row] * binary),
-            )
-        })
-        .collect::<Vec<_>>();
-    let negative_active = active.iter().map(|value| -*value).collect::<Vec<_>>();
-    let first = (0..size)
-        .map(|row| PackedQM31::from(pp[LEAF_FIRST_MASK_COLUMN][row]))
-        .collect::<Vec<_>>();
-    let last = (0..size)
-        .map(|row| PackedQM31::from(pp[LEAF_LAST_MASK_COLUMN][row]))
-        .collect::<Vec<_>>();
-    let previous_numerator = active
-        .iter()
-        .zip(&first)
-        .map(|(active, first)| -*active * (PackedQM31::one() - *first))
-        .collect::<Vec<_>>();
-    let output_numerator = active
-        .iter()
-        .zip(&last)
-        .map(|(active, last)| *active * (PackedQM31::one() - *last))
-        .collect::<Vec<_>>();
-    let final_numerator = active
-        .iter()
-        .zip(&last)
-        .map(|(active, last)| -*active * *last)
-        .collect::<Vec<_>>();
-
-    let in_rate = core::array::from_fn::<_, RATE, _>(|slot| {
-        previous[slot]
-            .iter()
-            .zip(chunks[slot])
-            .map(|(previous, chunk)| *previous + *chunk)
-            .collect::<Vec<PackedM31>>()
-    });
-    let poseidon_denominator = combine!(
-        vm_relations.poseidon2_io,
-        [
-            &in_rate[0],
-            &in_rate[1],
-            &in_rate[2],
-            &in_rate[3],
-            &in_rate[4],
-            &in_rate[5],
-            &in_rate[6],
-            &in_rate[7],
-            previous[8],
-            previous[9],
-            previous[10],
-            previous[11],
-            previous[12],
-            previous[13],
-            previous[14],
-            previous[15],
-            output[0],
-            output[1],
-            output[2],
-            output[3],
-            output[4],
-            output[5],
-            output[6],
-            output[7],
-            output[8],
-            output[9],
-            output[10],
-            output[11],
-            output[12],
-            output[13],
-            output[14],
-            output[15]
-        ]
-    );
-
-    let value_numerators = (0..RATE)
-        .map(|slot| {
-            (0..size)
-                .map(|row| active[row] * pp[leaf_chunk_column(slot)][row])
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    let value_denominators = (0..RATE)
-        .map(|slot| {
-            (0..size)
-                .map(|row| {
-                    fri_relations.value_word.combine(&[
-                        pp[LEAF_VERIFIER_ID_COLUMN][row],
-                        pp[LEAF_LAYER_COLUMN][row],
-                        pp[LEAF_QUERY_COLUMN][row],
-                        pp[leaf_chunk_column(slot) + 1][row],
-                        pp[leaf_chunk_column(slot) + 2][row],
-                        chunks[slot][row],
-                    ])
-                })
-                .collect::<Vec<PackedQM31>>()
-        })
-        .collect::<Vec<_>>();
-
-    let one = PackedM31::broadcast(BaseField::from(1));
-    let previous_denominator = (0..size)
-        .map(|row| {
-            let mut tuple = vec![
-                pp[LEAF_VERIFIER_ID_COLUMN][row],
-                pp[LEAF_LAYER_COLUMN][row],
-                pp[LEAF_QUERY_COLUMN][row],
-                pp[LEAF_PACKED_INDEX_COLUMN][row],
-                pp[LEAF_STEP_COLUMN][row],
-            ];
-            tuple.extend(previous.iter().map(|column| column[row]));
-            fri_relations.state.combine(&tuple)
-        })
-        .collect::<Vec<PackedQM31>>();
-    let output_denominator = (0..size)
-        .map(|row| {
-            let mut tuple = vec![
-                pp[LEAF_VERIFIER_ID_COLUMN][row],
-                pp[LEAF_LAYER_COLUMN][row],
-                pp[LEAF_QUERY_COLUMN][row],
-                pp[LEAF_PACKED_INDEX_COLUMN][row],
-                pp[LEAF_STEP_COLUMN][row] + one,
-            ];
-            tuple.extend(output.iter().map(|column| column[row]));
-            fri_relations.state.combine(&tuple)
-        })
-        .collect::<Vec<PackedQM31>>();
-    let route_denominator = (0..size)
-        .map(|row| {
-            fri_relations.route.combine(&[
-                pp[LEAF_VERIFIER_ID_COLUMN][row],
-                pp[LEAF_LAYER_COLUMN][row],
-                pp[LEAF_QUERY_COLUMN][row],
-                cols.position[row],
-            ])
-        })
-        .collect::<Vec<PackedQM31>>();
-    let leaf_indices = (0..size)
-        .map(|row| {
-            cols.position[row] * pp[LEAF_COUNT_COLUMN][row] + pp[LEAF_PACKED_INDEX_COLUMN][row]
-        })
-        .collect::<Vec<_>>();
-    let merkle_denominator = (0..size)
-        .map(|row| {
-            recursion_relations.merkle_node.combine(&[
-                pp[LEAF_TREE_ID_COLUMN][row],
-                pp[LEAF_TREE_HEIGHT_COLUMN][row],
-                leaf_indices[row],
-                output[0][row],
-                output[1][row],
-                output[2][row],
-                output[3][row],
-                output[4][row],
-                output[5][row],
-                output[6][row],
-                output[7][row],
-            ])
-        })
-        .collect::<Vec<PackedQM31>>();
-    let local_root_denominator = (0..size)
-        .map(|row| {
-            fri_relations.local_root.combine(&[
-                pp[LEAF_TREE_ID_COLUMN][row],
-                pp[LEAF_TREE_HEIGHT_COLUMN][row],
-                leaf_indices[row],
-                output[0][row],
-                output[1][row],
-                output[2][row],
-                output[3][row],
-                output[4][row],
-                output[5][row],
-                output[6][row],
-                output[7][row],
-            ])
-        })
-        .collect::<Vec<PackedQM31>>();
-    let merkle_numerator = (0..size)
-        .map(|row| {
-            final_numerator[row]
-                * (PackedQM31::one() - PackedQM31::from(pp[LEAF_LOCAL_ROOT_MASK_COLUMN][row]))
-        })
-        .collect::<Vec<_>>();
-    let local_root_numerator = (0..size)
-        .map(|row| final_numerator[row] * pp[LEAF_LOCAL_ROOT_MASK_COLUMN][row])
-        .collect::<Vec<_>>();
-
-    let mut logup = LogupTraceGenerator::new(trace[0].domain.log_size());
-    write_pair!(
-        &negative_active,
-        &poseidon_denominator,
-        &value_numerators[0],
-        &value_denominators[0],
-        logup
-    );
-    write_pair!(
-        &value_numerators[1],
-        &value_denominators[1],
-        &value_numerators[2],
-        &value_denominators[2],
-        logup
-    );
-    write_pair!(
-        &value_numerators[3],
-        &value_denominators[3],
-        &value_numerators[4],
-        &value_denominators[4],
-        logup
-    );
-    write_pair!(
-        &value_numerators[5],
-        &value_denominators[5],
-        &value_numerators[6],
-        &value_denominators[6],
-        logup
-    );
-    write_pair!(
-        &value_numerators[7],
-        &value_denominators[7],
-        &previous_numerator,
-        &previous_denominator,
-        logup
-    );
-    write_pair!(
-        &output_numerator,
-        &output_denominator,
-        &final_numerator,
-        &route_denominator,
-        logup
-    );
-    write_pair!(
-        &merkle_numerator,
-        &merkle_denominator,
-        &local_root_numerator,
-        &local_root_denominator,
-        logup
-    );
-    logup.finalize_last()
+    fri_merkle_leaf_dsl::component::witness::gen_interaction_trace(
+        trace,
+        preprocessed,
+        BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        BaseField::from(LEAF_TAG),
+        &FriMerkleLeafComponentRelations::new(vm_relations, fri_relations, recursion_relations),
+    )
 }
 
-/// Generates internal-node hash and binary-subtree interactions.
+/// Generate internal-node hash and binary-subtree interactions.
 pub fn gen_node_interaction_trace(
     trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     preprocessed: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
@@ -1515,152 +1251,16 @@ pub fn gen_node_interaction_trace(
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     QM31,
 ) {
-    let cols = FriMerkleNodeColumns::from_iter(trace.iter().map(|column| &column.values.data));
-    let pp = preprocessed
-        .iter()
-        .map(|column| &column.values.data)
-        .collect::<Vec<_>>();
-    let left = node_left_columns(&cols);
-    let right = node_right_columns(&cols);
-    let parent = node_parent_columns(&cols);
-    let tail = node_tail_columns(&cols);
-    let size = cols.enabler.len();
-    let segment = BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf));
-    let binary = BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode));
-    let active = (0..size)
-        .map(|row| {
-            PackedQM31::from(
-                pp[NODE_ROW_MASK_COLUMN][row]
-                    * (pp[NODE_SEGMENT_MASK_COLUMN][row] * segment
-                        + pp[NODE_BINARY_MASK_COLUMN][row] * binary),
-            )
-        })
-        .collect::<Vec<_>>();
-    let negative_active = active.iter().map(|value| -*value).collect::<Vec<_>>();
-    let regular_numerator = (0..size)
-        .map(|row| {
-            -active[row]
-                * (PackedQM31::one() - PackedQM31::from(pp[NODE_LOCAL_ROOT_MASK_COLUMN][row]))
-        })
-        .collect::<Vec<_>>();
-    let local_root_numerator = (0..size)
-        .map(|row| -active[row] * pp[NODE_LOCAL_ROOT_MASK_COLUMN][row])
-        .collect::<Vec<_>>();
-
-    let poseidon_denominator = combine!(
-        vm_relations.poseidon2_io,
-        [
-            left[0], left[1], left[2], left[3], left[4], left[5], left[6], left[7], right[0],
-            right[1], right[2], right[3], right[4], right[5], right[6], right[7], parent[0],
-            parent[1], parent[2], parent[3], parent[4], parent[5], parent[6], parent[7], tail[0],
-            tail[1], tail[2], tail[3], tail[4], tail[5], tail[6], tail[7]
-        ]
-    );
-    let own_denominator = (0..size)
-        .map(|row| {
-            recursion_relations.merkle_node.combine(&[
-                pp[NODE_TREE_ID_COLUMN][row],
-                pp[NODE_DEPTH_COLUMN][row],
-                cols.index[row],
-                parent[0][row],
-                parent[1][row],
-                parent[2][row],
-                parent[3][row],
-                parent[4][row],
-                parent[5][row],
-                parent[6][row],
-                parent[7][row],
-            ])
-        })
-        .collect::<Vec<PackedQM31>>();
-    let local_root_denominator = (0..size)
-        .map(|row| {
-            fri_relations.local_root.combine(&[
-                pp[NODE_TREE_ID_COLUMN][row],
-                pp[NODE_DEPTH_COLUMN][row],
-                cols.index[row],
-                parent[0][row],
-                parent[1][row],
-                parent[2][row],
-                parent[3][row],
-                parent[4][row],
-                parent[5][row],
-                parent[6][row],
-                parent[7][row],
-            ])
-        })
-        .collect::<Vec<PackedQM31>>();
-    let one = PackedM31::broadcast(BaseField::from(1));
-    let two = PackedM31::broadcast(BaseField::from(2));
-    let child_depth = (0..size)
-        .map(|row| pp[NODE_DEPTH_COLUMN][row] + one)
-        .collect::<Vec<_>>();
-    let left_index = (0..size)
-        .map(|row| cols.index[row] * two)
-        .collect::<Vec<_>>();
-    let right_index = left_index
-        .iter()
-        .map(|index| *index + one)
-        .collect::<Vec<_>>();
-    let left_denominator = (0..size)
-        .map(|row| {
-            recursion_relations.merkle_node.combine(&[
-                pp[NODE_TREE_ID_COLUMN][row],
-                child_depth[row],
-                left_index[row],
-                left[0][row],
-                left[1][row],
-                left[2][row],
-                left[3][row],
-                left[4][row],
-                left[5][row],
-                left[6][row],
-                left[7][row],
-            ])
-        })
-        .collect::<Vec<PackedQM31>>();
-    let right_denominator = (0..size)
-        .map(|row| {
-            recursion_relations.merkle_node.combine(&[
-                pp[NODE_TREE_ID_COLUMN][row],
-                child_depth[row],
-                right_index[row],
-                right[0][row],
-                right[1][row],
-                right[2][row],
-                right[3][row],
-                right[4][row],
-                right[5][row],
-                right[6][row],
-                right[7][row],
-            ])
-        })
-        .collect::<Vec<PackedQM31>>();
-
-    let mut logup = LogupTraceGenerator::new(trace[0].domain.log_size());
-    write_pair!(
-        &negative_active,
-        &poseidon_denominator,
-        &regular_numerator,
-        &own_denominator,
-        logup
-    );
-    write_pair!(
-        &local_root_numerator,
-        &local_root_denominator,
-        &active,
-        &left_denominator,
-        logup
-    );
-    let mut right_column = logup.new_col();
-    for row in 0..size {
-        right_column.write_frac(row, active[row], right_denominator[row]);
-    }
-    right_column.finalize_col();
-    logup.finalize_last()
+    fri_merkle_node_dsl::component::witness::gen_interaction_trace(
+        trace,
+        preprocessed,
+        BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        &FriMerkleNodeComponentRelations::new(vm_relations, fri_relations, recursion_relations),
+    )
 }
 
-/// Generates query, external-path, local-root, route, and control interactions.
+/// Generate query, external-path, local-root, route, and control interactions.
 #[allow(clippy::too_many_arguments)]
 pub fn gen_anchor_interaction_trace(
     trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
@@ -1674,122 +1274,19 @@ pub fn gen_anchor_interaction_trace(
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     QM31,
 ) {
-    let cols = FriMerkleAnchorColumns::from_iter(trace.iter().map(|column| &column.values.data));
-    let pp = preprocessed
-        .iter()
-        .map(|column| &column.values.data)
-        .collect::<Vec<_>>();
-    let digest = anchor_digest_columns(&cols);
-    let size = cols.enabler.len();
-    let segment = BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf));
-    let binary = BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode));
-    let active = (0..size)
-        .map(|row| {
-            PackedQM31::from(
-                pp[ANCHOR_ROW_MASK_COLUMN][row]
-                    * (pp[ANCHOR_SEGMENT_MASK_COLUMN][row] * segment
-                        + pp[ANCHOR_BINARY_MASK_COLUMN][row] * binary),
-            )
-        })
-        .collect::<Vec<_>>();
-    let negative_active = active.iter().map(|value| -*value).collect::<Vec<_>>();
-    let route_numerator = (0..size)
-        .map(|row| active[row] * pp[ANCHOR_LEAF_COUNT_COLUMN][row])
-        .collect::<Vec<_>>();
-    let fri_merkle_kind =
-        PackedM31::broadcast(BaseField::from(QueryPositionKind::FriMerkle.as_u32()));
-    let zero = PackedM31::broadcast(BaseField::from(0));
-    let query_denominator = (0..size)
-        .map(|row| {
-            query_relations.position.combine(&[
-                pp[ANCHOR_VERIFIER_ID_COLUMN][row],
-                fri_merkle_kind,
-                pp[ANCHOR_LAYER_COLUMN][row],
-                pp[ANCHOR_QUERY_COLUMN][row],
-                cols.position[row],
-                zero,
-            ])
-        })
-        .collect::<Vec<PackedQM31>>();
-    let external_denominator = (0..size)
-        .map(|row| {
-            recursion_relations.merkle_node.combine(&[
-                pp[ANCHOR_TREE_ID_COLUMN][row],
-                pp[ANCHOR_PATH_DEPTH_COLUMN][row],
-                cols.position[row],
-                digest[0][row],
-                digest[1][row],
-                digest[2][row],
-                digest[3][row],
-                digest[4][row],
-                digest[5][row],
-                digest[6][row],
-                digest[7][row],
-            ])
-        })
-        .collect::<Vec<PackedQM31>>();
-    let local_root_denominator = (0..size)
-        .map(|row| {
-            fri_relations.local_root.combine(&[
-                pp[ANCHOR_TREE_ID_COLUMN][row],
-                pp[ANCHOR_PATH_DEPTH_COLUMN][row],
-                cols.position[row],
-                digest[0][row],
-                digest[1][row],
-                digest[2][row],
-                digest[3][row],
-                digest[4][row],
-                digest[5][row],
-                digest[6][row],
-                digest[7][row],
-            ])
-        })
-        .collect::<Vec<PackedQM31>>();
-    let route_denominator = (0..size)
-        .map(|row| {
-            fri_relations.route.combine(&[
-                pp[ANCHOR_VERIFIER_ID_COLUMN][row],
-                pp[ANCHOR_LAYER_COLUMN][row],
-                pp[ANCHOR_QUERY_COLUMN][row],
-                cols.position[row],
-            ])
-        })
-        .collect::<Vec<PackedQM31>>();
-    let control_denominator = (0..size)
-        .map(|row| {
-            control_relations.step.combine(&[
-                pp[ANCHOR_VERIFIER_ID_COLUMN][row],
-                pp[ANCHOR_CONTROL_SEQUENCE_COLUMN][row],
-                pp[ANCHOR_CONTROL_TAG_COLUMN][row],
-                pp[ANCHOR_CONTROL_ARG_0_COLUMN][row],
-                pp[ANCHOR_CONTROL_ARG_1_COLUMN][row],
-                pp[ANCHOR_CONTROL_ARG_2_COLUMN][row],
-                pp[ANCHOR_CONTROL_ARG_3_COLUMN][row],
-            ])
-        })
-        .collect::<Vec<PackedQM31>>();
-
-    let mut logup = LogupTraceGenerator::new(trace[0].domain.log_size());
-    write_pair!(
-        &negative_active,
-        &query_denominator,
-        &negative_active,
-        &external_denominator,
-        logup
-    );
-    write_pair!(
-        &active,
-        &local_root_denominator,
-        &route_numerator,
-        &route_denominator,
-        logup
-    );
-    let mut control_column = logup.new_col();
-    for row in 0..size {
-        control_column.write_frac(row, negative_active[row], control_denominator[row]);
-    }
-    control_column.finalize_col();
-    logup.finalize_last()
+    fri_merkle_anchor_dsl::component::witness::gen_interaction_trace(
+        trace,
+        preprocessed,
+        BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        BaseField::from(QueryPositionKind::FriMerkle.as_u32()),
+        &FriMerkleAnchorComponentRelations::new(
+            control_relations,
+            query_relations,
+            fri_relations,
+            recursion_relations,
+        ),
+    )
 }
 
 /// One raw-query opening of a complete FRI fold subset.
@@ -2586,7 +2083,7 @@ mod tests {
     use stwo::core::fields::m31::M31;
     use stwo::core::pcs::TreeVec;
     use stwo::core::vcs_lifted::merkle_hasher::MerkleHasherLifted;
-    use stwo_constraint_framework::assert_constraints_on_polys;
+    use stwo_constraint_framework::{FrameworkEval, Relation, assert_constraints_on_polys};
 
     use super::*;
     use crate::kernel::VerifierProgramSpec;
@@ -2834,13 +2331,13 @@ mod tests {
         );
         let traces = TreeVec::new(vec![preprocessed, trace, interaction]);
         let polys = traces.map_cols(|column| column.interpolate());
-        let eval = LeafEval {
-            log_size: materialized.preprocessing.leaf_log_size(),
-            proof_kind: kind,
-            vm_relations,
-            fri_relations,
-            recursion_relations,
-        };
+        let eval = leaf_eval_for_proof_kind(
+            materialized.preprocessing.leaf_log_size(),
+            kind,
+            &vm_relations,
+            &fri_relations,
+            &recursion_relations,
+        );
         assert_constraints_on_polys(
             &polys,
             CanonicCoset::new(materialized.preprocessing.leaf_log_size()),
@@ -2868,13 +2365,13 @@ mod tests {
         );
         let traces = TreeVec::new(vec![preprocessed, trace, interaction]);
         let polys = traces.map_cols(|column| column.interpolate());
-        let eval = NodeEval {
-            log_size: materialized.preprocessing.node_log_size(),
-            proof_kind: kind,
-            vm_relations,
-            fri_relations,
-            recursion_relations,
-        };
+        let eval = node_eval_for_proof_kind(
+            materialized.preprocessing.node_log_size(),
+            kind,
+            &vm_relations,
+            &fri_relations,
+            &recursion_relations,
+        );
         assert_constraints_on_polys(
             &polys,
             CanonicCoset::new(materialized.preprocessing.node_log_size()),
@@ -2904,14 +2401,14 @@ mod tests {
         );
         let traces = TreeVec::new(vec![preprocessed, trace, interaction]);
         let polys = traces.map_cols(|column| column.interpolate());
-        let eval = AnchorEval {
-            log_size: materialized.preprocessing.anchor_log_size(),
-            proof_kind: kind,
-            control_relations,
-            query_relations,
-            fri_relations,
-            recursion_relations,
-        };
+        let eval = anchor_eval_for_proof_kind(
+            materialized.preprocessing.anchor_log_size(),
+            kind,
+            &control_relations,
+            &query_relations,
+            &fri_relations,
+            &recursion_relations,
+        );
         assert_constraints_on_polys(
             &polys,
             CanonicCoset::new(materialized.preprocessing.anchor_log_size()),

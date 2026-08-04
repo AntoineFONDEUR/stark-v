@@ -12,7 +12,6 @@ use core::fmt;
 use air::digest::{Digest8, M31Word};
 use air::poseidon2::{T, poseidon2_traced_state};
 use air::trace::Poseidon2Table;
-use num_traits::One;
 use prover::relations::Relations;
 use simd::AlignedVec;
 use stwo::core::ColumnVec;
@@ -21,16 +20,10 @@ use stwo::core::fields::qm31::QM31;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::simd::column::BaseColumn;
-use stwo::prover::backend::simd::m31::PackedM31;
-use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
-    relation,
-};
-use stwo_macros::define_component_tables;
+use stwo_constraint_framework::relation;
 
 use super::control_air::{
     ControlRelations, LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
@@ -72,27 +65,6 @@ const CONTROL_ARG_3_COLUMN: usize = 16;
 const CHUNK_COLUMNS_START: usize = 17;
 const CHUNK_COLUMNS_PER_WORD: usize = 3;
 const PREPROCESSED_COLUMN_COUNT: usize = CHUNK_COLUMNS_START + RATE * CHUNK_COLUMNS_PER_WORD;
-
-define_component_tables! {
-    trace_merkle_leaf: {
-        committed: {
-            position,
-            previous_0, previous_1, previous_2, previous_3,
-            previous_4, previous_5, previous_6, previous_7,
-            previous_8, previous_9, previous_10, previous_11,
-            previous_12, previous_13, previous_14, previous_15,
-            chunk_0, chunk_1, chunk_2, chunk_3,
-            chunk_4, chunk_5, chunk_6, chunk_7,
-            output_0, output_1, output_2, output_3,
-            output_4, output_5, output_6, output_7,
-            output_8, output_9, output_10, output_11,
-            output_12, output_13, output_14, output_15,
-        },
-        constraints: {},
-    },
-}
-
-use prover_columns::TraceMerkleLeafColumns;
 
 // verifier, tree, query, step, and the complete Poseidon2 state.
 relation!(TraceLeafHashStateRelation, 20);
@@ -235,42 +207,7 @@ impl TraceMerklePreprocessed {
     }
 
     pub fn column_ids() -> Vec<PreProcessedColumnId> {
-        let mut ids = [
-            "recursion_trace_leaf_row_mask",
-            "recursion_trace_leaf_segment_mask",
-            "recursion_trace_leaf_binary_mask",
-            "recursion_trace_leaf_verifier_id",
-            "recursion_trace_leaf_tree",
-            "recursion_trace_leaf_query",
-            "recursion_trace_leaf_tree_id",
-            "recursion_trace_leaf_tree_height",
-            "recursion_trace_leaf_step",
-            "recursion_trace_leaf_first_mask",
-            "recursion_trace_leaf_last_mask",
-            "recursion_trace_leaf_control_sequence",
-            "recursion_trace_leaf_control_tag",
-            "recursion_trace_leaf_control_arg_0",
-            "recursion_trace_leaf_control_arg_1",
-            "recursion_trace_leaf_control_arg_2",
-            "recursion_trace_leaf_control_arg_3",
-        ]
-        .into_iter()
-        .map(|id| PreProcessedColumnId { id: id.into() })
-        .collect::<Vec<_>>();
-        for slot in 0..RATE {
-            ids.extend([
-                PreProcessedColumnId {
-                    id: format!("recursion_trace_leaf_chunk_{slot}_source_mask"),
-                },
-                PreProcessedColumnId {
-                    id: format!("recursion_trace_leaf_chunk_{slot}_column"),
-                },
-                PreProcessedColumnId {
-                    id: format!("recursion_trace_leaf_chunk_{slot}_constant"),
-                },
-            ]);
-        }
-        ids
+        preprocessed_column_ids()
     }
 
     pub fn gen_columns(
@@ -547,243 +484,282 @@ const fn chunk_column(slot: usize) -> usize {
     CHUNK_COLUMNS_START + slot * CHUNK_COLUMNS_PER_WORD
 }
 
-pub type Component = FrameworkComponent<Eval>;
-
-/// Proves fixed leaf streams and binds their value, control, and path claims.
+/// Relations used by the macro-generated trace-leaf hash component.
 #[derive(Clone)]
-pub struct Eval {
-    pub log_size: u32,
-    pub proof_kind: ProofKind,
-    pub vm_relations: Relations,
-    pub control_relations: ControlRelations,
-    pub query_relations: QueryPositionRelations,
-    pub trace_relations: TraceMerkleRelations,
-    pub recursion_relations: RecursionRelations,
+pub struct TraceMerkleLeafComponentRelations {
+    pub poseidon2_io: air::relations::relation_types::poseidon2_io,
+    pub control_step: super::control_air::VerifierStepRelation,
+    pub query_position: super::query_position_air::QueryPositionRelation,
+    pub state: TraceLeafHashStateRelation,
+    pub value: TraceQueryValueRelation,
+    pub merkle_node: crate::relations::MerkleNodeRelation,
 }
 
-impl FrameworkEval for Eval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
-
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
-
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = TraceMerkleLeafColumns::from_eval(&mut eval);
-        let ids = TraceMerklePreprocessed::column_ids();
-        let row_mask = eval.get_preprocessed_column(ids[ROW_MASK_COLUMN].clone());
-        let segment_mask = eval.get_preprocessed_column(ids[SEGMENT_MASK_COLUMN].clone());
-        let binary_mask = eval.get_preprocessed_column(ids[BINARY_MASK_COLUMN].clone());
-        let verifier_id = eval.get_preprocessed_column(ids[VERIFIER_ID_COLUMN].clone());
-        let tree = eval.get_preprocessed_column(ids[TREE_COLUMN].clone());
-        let query = eval.get_preprocessed_column(ids[QUERY_COLUMN].clone());
-        let tree_id = eval.get_preprocessed_column(ids[TREE_ID_COLUMN].clone());
-        let tree_height = eval.get_preprocessed_column(ids[TREE_HEIGHT_COLUMN].clone());
-        let step = eval.get_preprocessed_column(ids[STEP_COLUMN].clone());
-        let first = eval.get_preprocessed_column(ids[FIRST_MASK_COLUMN].clone());
-        let last = eval.get_preprocessed_column(ids[LAST_MASK_COLUMN].clone());
-        let control_sequence = eval.get_preprocessed_column(ids[CONTROL_SEQUENCE_COLUMN].clone());
-        let control_tag = eval.get_preprocessed_column(ids[CONTROL_TAG_COLUMN].clone());
-        let control_args = [
-            eval.get_preprocessed_column(ids[CONTROL_ARG_0_COLUMN].clone()),
-            eval.get_preprocessed_column(ids[CONTROL_ARG_1_COLUMN].clone()),
-            eval.get_preprocessed_column(ids[CONTROL_ARG_2_COLUMN].clone()),
-            eval.get_preprocessed_column(ids[CONTROL_ARG_3_COLUMN].clone()),
-        ];
-        let chunk_metadata: [(E::F, E::F, E::F); RATE] = core::array::from_fn(|slot| {
-            let start = chunk_column(slot);
-            (
-                eval.get_preprocessed_column(ids[start].clone()),
-                eval.get_preprocessed_column(ids[start + 1].clone()),
-                eval.get_preprocessed_column(ids[start + 2].clone()),
-            )
-        });
-        let previous = previous_columns(&cols);
-        let chunks = chunk_columns(&cols);
-        let output = output_columns(&cols);
-        let segment = E::F::from(BaseField::from(u32::from(
-            self.proof_kind == ProofKind::SegmentLeaf,
-        )));
-        let binary = E::F::from(BaseField::from(u32::from(
-            self.proof_kind == ProofKind::BinaryNode,
-        )));
-        let active = row_mask * (segment_mask * segment + binary_mask * binary);
-        let one = E::F::from(BaseField::from(1));
-        let final_active = active.clone() * last.clone();
-
-        eval.add_constraint(cols.enabler.clone() - active.clone());
-        for value in previous.iter().chain(&chunks).chain(&output) {
-            eval.add_constraint((one.clone() - active.clone()) * value.clone());
+impl TraceMerkleLeafComponentRelations {
+    /// Combine leaf hashing, routed positions, control, and path ownership.
+    pub fn new(
+        vm_relations: &Relations,
+        control_relations: &ControlRelations,
+        query_relations: &QueryPositionRelations,
+        trace_relations: &TraceMerkleRelations,
+        recursion_relations: &RecursionRelations,
+    ) -> Self {
+        Self {
+            poseidon2_io: vm_relations.poseidon2_io.clone(),
+            control_step: control_relations.step.clone(),
+            query_position: query_relations.position.clone(),
+            state: trace_relations.state.clone(),
+            value: trace_relations.value.clone(),
+            merkle_node: recursion_relations.merkle_node.clone(),
         }
-        eval.add_constraint((one.clone() - final_active.clone()) * cols.position.clone());
-        for (index, value) in previous.iter().enumerate() {
-            let initial = u32::from(index + 1 == T) * LEAF_TAG;
-            eval.add_constraint(
-                active.clone()
-                    * first.clone()
-                    * (value.clone() - E::F::from(BaseField::from(initial))),
-            );
-        }
-        for (slot, chunk) in chunks.iter().enumerate() {
-            let (source_mask, _, constant) = &chunk_metadata[slot];
-            eval.add_constraint(
-                active.clone()
-                    * (one.clone() - source_mask.clone())
-                    * (chunk.clone() - constant.clone()),
-            );
-        }
-
-        let mut poseidon_tuple = Vec::with_capacity(2 * T);
-        for (index, value) in previous.iter().enumerate() {
-            poseidon_tuple.push(if index < RATE {
-                value.clone() + chunks[index].clone()
-            } else {
-                value.clone()
-            });
-        }
-        poseidon_tuple.extend(output.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.vm_relations.poseidon2_io,
-            -E::EF::from(active.clone()),
-            &poseidon_tuple,
-        ));
-
-        for (slot, chunk) in chunks.iter().enumerate() {
-            let (source_mask, column, _) = &chunk_metadata[slot];
-            eval.add_to_relation(RelationEntry::new(
-                &self.trace_relations.value,
-                E::EF::from(active.clone() * source_mask.clone()),
-                &[
-                    verifier_id.clone(),
-                    tree.clone(),
-                    column.clone(),
-                    query.clone(),
-                    chunk.clone(),
-                ],
-            ));
-        }
-
-        let mut previous_tuple = vec![
-            verifier_id.clone(),
-            tree.clone(),
-            query.clone(),
-            step.clone(),
-        ];
-        previous_tuple.extend(previous.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.trace_relations.state,
-            -E::EF::from(active.clone() * (one.clone() - first)),
-            &previous_tuple,
-        ));
-        let mut output_tuple = vec![
-            verifier_id.clone(),
-            tree.clone(),
-            query.clone(),
-            step + one.clone(),
-        ];
-        output_tuple.extend(output.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.trace_relations.state,
-            E::EF::from(active.clone() * (one.clone() - last)),
-            &output_tuple,
-        ));
-
-        eval.add_to_relation(RelationEntry::new(
-            &self.query_relations.position,
-            -E::EF::from(final_active.clone()),
-            &[
-                verifier_id.clone(),
-                E::F::from(BaseField::from(QueryPositionKind::TraceTree.as_u32())),
-                tree.clone(),
-                query.clone(),
-                cols.position.clone(),
-                E::F::from(BaseField::from(0)),
-            ],
-        ));
-        let mut leaf_tuple = vec![tree_id, tree_height, cols.position.clone()];
-        leaf_tuple.extend(output[..RATE].iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.recursion_relations.merkle_node,
-            -E::EF::from(final_active.clone()),
-            &leaf_tuple,
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.control_relations.step,
-            -E::EF::from(final_active),
-            &[
-                verifier_id,
-                control_sequence,
-                control_tag,
-                control_args[0].clone(),
-                control_args[1].clone(),
-                control_args[2].clone(),
-                control_args[3].clone(),
-            ],
-        ));
-
-        eval.finalize_logup_in_pairs();
-        eval
     }
 }
 
-fn previous_columns<F: Clone>(cols: &TraceMerkleLeafColumns<F>) -> [F; T] {
-    [
-        cols.previous_0.clone(),
-        cols.previous_1.clone(),
-        cols.previous_2.clone(),
-        cols.previous_3.clone(),
-        cols.previous_4.clone(),
-        cols.previous_5.clone(),
-        cols.previous_6.clone(),
-        cols.previous_7.clone(),
-        cols.previous_8.clone(),
-        cols.previous_9.clone(),
-        cols.previous_10.clone(),
-        cols.previous_11.clone(),
-        cols.previous_12.clone(),
-        cols.previous_13.clone(),
-        cols.previous_14.clone(),
-        cols.previous_15.clone(),
-    ]
+stwo_macros::define_air_fns! {
+    max_degree: 3,
+    embedded: [],
+    embedded_component: true,
+    embedded_enabler_boolean: false,
+    embedded_relations: crate::trace_merkle_air::TraceMerkleLeafComponentRelations,
+    logup_batch: 2,
+    embedded_preprocessed: {
+        row_mask: "recursion_trace_leaf_row_mask",
+        segment_mask: "recursion_trace_leaf_segment_mask",
+        binary_mask: "recursion_trace_leaf_binary_mask",
+        verifier_id: "recursion_trace_leaf_verifier_id",
+        tree: "recursion_trace_leaf_tree",
+        query: "recursion_trace_leaf_query",
+        tree_id: "recursion_trace_leaf_tree_id",
+        tree_height: "recursion_trace_leaf_tree_height",
+        step: "recursion_trace_leaf_step",
+        first: "recursion_trace_leaf_first_mask",
+        last: "recursion_trace_leaf_last_mask",
+        control_sequence: "recursion_trace_leaf_control_sequence",
+        control_tag: "recursion_trace_leaf_control_tag",
+        control_arg_0: "recursion_trace_leaf_control_arg_0",
+        control_arg_1: "recursion_trace_leaf_control_arg_1",
+        control_arg_2: "recursion_trace_leaf_control_arg_2",
+        control_arg_3: "recursion_trace_leaf_control_arg_3",
+        chunk_0_source_mask: "recursion_trace_leaf_chunk_0_source_mask",
+        chunk_0_column: "recursion_trace_leaf_chunk_0_column",
+        chunk_0_constant: "recursion_trace_leaf_chunk_0_constant",
+        chunk_1_source_mask: "recursion_trace_leaf_chunk_1_source_mask",
+        chunk_1_column: "recursion_trace_leaf_chunk_1_column",
+        chunk_1_constant: "recursion_trace_leaf_chunk_1_constant",
+        chunk_2_source_mask: "recursion_trace_leaf_chunk_2_source_mask",
+        chunk_2_column: "recursion_trace_leaf_chunk_2_column",
+        chunk_2_constant: "recursion_trace_leaf_chunk_2_constant",
+        chunk_3_source_mask: "recursion_trace_leaf_chunk_3_source_mask",
+        chunk_3_column: "recursion_trace_leaf_chunk_3_column",
+        chunk_3_constant: "recursion_trace_leaf_chunk_3_constant",
+        chunk_4_source_mask: "recursion_trace_leaf_chunk_4_source_mask",
+        chunk_4_column: "recursion_trace_leaf_chunk_4_column",
+        chunk_4_constant: "recursion_trace_leaf_chunk_4_constant",
+        chunk_5_source_mask: "recursion_trace_leaf_chunk_5_source_mask",
+        chunk_5_column: "recursion_trace_leaf_chunk_5_column",
+        chunk_5_constant: "recursion_trace_leaf_chunk_5_constant",
+        chunk_6_source_mask: "recursion_trace_leaf_chunk_6_source_mask",
+        chunk_6_column: "recursion_trace_leaf_chunk_6_column",
+        chunk_6_constant: "recursion_trace_leaf_chunk_6_constant",
+        chunk_7_source_mask: "recursion_trace_leaf_chunk_7_source_mask",
+        chunk_7_column: "recursion_trace_leaf_chunk_7_column",
+        chunk_7_constant: "recursion_trace_leaf_chunk_7_constant",
+    },
+    embedded_params: [
+        segment_active, binary_active, leaf_tag, trace_position_kind,
+    ],
+
+    relation poseidon2_io(32);
+    relation control_step(7);
+    relation query_position(6);
+    relation state(20);
+    relation value(5);
+    relation merkle_node(11);
+
+    fn trace_merkle_leaf(
+        position,
+        previous_0, previous_1, previous_2, previous_3, previous_4, previous_5, previous_6, previous_7, previous_8, previous_9, previous_10, previous_11, previous_12, previous_13, previous_14, previous_15,
+        chunk_0, chunk_1, chunk_2, chunk_3, chunk_4, chunk_5, chunk_6, chunk_7,
+        output_0, output_1, output_2, output_3, output_4, output_5, output_6, output_7, output_8, output_9, output_10, output_11, output_12, output_13, output_14, output_15,
+        row_mask, segment_mask, binary_mask, verifier_id, tree, query, tree_id, tree_height, step, first, last, control_sequence, control_tag, control_arg_0, control_arg_1, control_arg_2, control_arg_3,
+        chunk_0_source_mask, chunk_0_column, chunk_0_constant, chunk_1_source_mask, chunk_1_column, chunk_1_constant, chunk_2_source_mask, chunk_2_column, chunk_2_constant, chunk_3_source_mask, chunk_3_column, chunk_3_constant, chunk_4_source_mask, chunk_4_column, chunk_4_constant, chunk_5_source_mask, chunk_5_column, chunk_5_constant, chunk_6_source_mask, chunk_6_column, chunk_6_constant, chunk_7_source_mask, chunk_7_column, chunk_7_constant,
+        segment_active, binary_active, leaf_tag, trace_position_kind,
+    ) {
+        // Trusted lane masks are disjoint subsets of the row mask.
+        let active = segment_mask * segment_active + binary_mask * binary_active;
+        let final_active = active * last;
+
+        constrain enabler - active;
+        constrain (1 - active) * previous_0;
+        constrain (1 - active) * previous_1;
+        constrain (1 - active) * previous_2;
+        constrain (1 - active) * previous_3;
+        constrain (1 - active) * previous_4;
+        constrain (1 - active) * previous_5;
+        constrain (1 - active) * previous_6;
+        constrain (1 - active) * previous_7;
+        constrain (1 - active) * previous_8;
+        constrain (1 - active) * previous_9;
+        constrain (1 - active) * previous_10;
+        constrain (1 - active) * previous_11;
+        constrain (1 - active) * previous_12;
+        constrain (1 - active) * previous_13;
+        constrain (1 - active) * previous_14;
+        constrain (1 - active) * previous_15;
+        constrain (1 - active) * chunk_0;
+        constrain (1 - active) * chunk_1;
+        constrain (1 - active) * chunk_2;
+        constrain (1 - active) * chunk_3;
+        constrain (1 - active) * chunk_4;
+        constrain (1 - active) * chunk_5;
+        constrain (1 - active) * chunk_6;
+        constrain (1 - active) * chunk_7;
+        constrain (1 - active) * output_0;
+        constrain (1 - active) * output_1;
+        constrain (1 - active) * output_2;
+        constrain (1 - active) * output_3;
+        constrain (1 - active) * output_4;
+        constrain (1 - active) * output_5;
+        constrain (1 - active) * output_6;
+        constrain (1 - active) * output_7;
+        constrain (1 - active) * output_8;
+        constrain (1 - active) * output_9;
+        constrain (1 - active) * output_10;
+        constrain (1 - active) * output_11;
+        constrain (1 - active) * output_12;
+        constrain (1 - active) * output_13;
+        constrain (1 - active) * output_14;
+        constrain (1 - active) * output_15;
+        constrain (1 - final_active) * position;
+        constrain active * first * previous_0;
+        constrain active * first * previous_1;
+        constrain active * first * previous_2;
+        constrain active * first * previous_3;
+        constrain active * first * previous_4;
+        constrain active * first * previous_5;
+        constrain active * first * previous_6;
+        constrain active * first * previous_7;
+        constrain active * first * previous_8;
+        constrain active * first * previous_9;
+        constrain active * first * previous_10;
+        constrain active * first * previous_11;
+        constrain active * first * previous_12;
+        constrain active * first * previous_13;
+        constrain active * first * previous_14;
+        constrain active * first * (previous_15 - leaf_tag);
+        constrain active * (1 - chunk_0_source_mask) * (chunk_0 - chunk_0_constant);
+        constrain active * (1 - chunk_1_source_mask) * (chunk_1 - chunk_1_constant);
+        constrain active * (1 - chunk_2_source_mask) * (chunk_2 - chunk_2_constant);
+        constrain active * (1 - chunk_3_source_mask) * (chunk_3 - chunk_3_constant);
+        constrain active * (1 - chunk_4_source_mask) * (chunk_4 - chunk_4_constant);
+        constrain active * (1 - chunk_5_source_mask) * (chunk_5 - chunk_5_constant);
+        constrain active * (1 - chunk_6_source_mask) * (chunk_6 - chunk_6_constant);
+        constrain active * (1 - chunk_7_source_mask) * (chunk_7 - chunk_7_constant);
+
+        consume(active) poseidon2_io(
+            previous_0 + chunk_0,
+            previous_1 + chunk_1,
+            previous_2 + chunk_2,
+            previous_3 + chunk_3,
+            previous_4 + chunk_4,
+            previous_5 + chunk_5,
+            previous_6 + chunk_6,
+            previous_7 + chunk_7,
+            previous_8, previous_9, previous_10, previous_11,
+            previous_12, previous_13, previous_14, previous_15,
+            output_0, output_1, output_2, output_3,
+            output_4, output_5, output_6, output_7,
+            output_8, output_9, output_10, output_11,
+            output_12, output_13, output_14, output_15,
+        );
+        emit(active * chunk_0_source_mask) value(
+            verifier_id, tree, chunk_0_column, query, chunk_0,
+        );
+        emit(active * chunk_1_source_mask) value(
+            verifier_id, tree, chunk_1_column, query, chunk_1,
+        );
+        emit(active * chunk_2_source_mask) value(
+            verifier_id, tree, chunk_2_column, query, chunk_2,
+        );
+        emit(active * chunk_3_source_mask) value(
+            verifier_id, tree, chunk_3_column, query, chunk_3,
+        );
+        emit(active * chunk_4_source_mask) value(
+            verifier_id, tree, chunk_4_column, query, chunk_4,
+        );
+        emit(active * chunk_5_source_mask) value(
+            verifier_id, tree, chunk_5_column, query, chunk_5,
+        );
+        emit(active * chunk_6_source_mask) value(
+            verifier_id, tree, chunk_6_column, query, chunk_6,
+        );
+        emit(active * chunk_7_source_mask) value(
+            verifier_id, tree, chunk_7_column, query, chunk_7,
+        );
+        consume(active * (1 - first)) state(
+            verifier_id, tree, query, step,
+            previous_0, previous_1, previous_2, previous_3,
+            previous_4, previous_5, previous_6, previous_7,
+            previous_8, previous_9, previous_10, previous_11,
+            previous_12, previous_13, previous_14, previous_15,
+        );
+        emit(active * (1 - last)) state(
+            verifier_id, tree, query, step + 1,
+            output_0, output_1, output_2, output_3,
+            output_4, output_5, output_6, output_7,
+            output_8, output_9, output_10, output_11,
+            output_12, output_13, output_14, output_15,
+        );
+        consume(final_active) query_position(
+            verifier_id, trace_position_kind, tree, query, position, 0,
+        );
+        consume(final_active) merkle_node(
+            tree_id, tree_height, position,
+            output_0, output_1, output_2, output_3,
+            output_4, output_5, output_6, output_7,
+        );
+        consume(final_active) control_step(
+            verifier_id, control_sequence, control_tag,
+            control_arg_0, control_arg_1, control_arg_2, control_arg_3,
+        );
+
+        return (
+            output_0, output_1, output_2, output_3,
+            output_4, output_5, output_6, output_7,
+        );
+    }
 }
 
-fn chunk_columns<F: Clone>(cols: &TraceMerkleLeafColumns<F>) -> [F; RATE] {
-    [
-        cols.chunk_0.clone(),
-        cols.chunk_1.clone(),
-        cols.chunk_2.clone(),
-        cols.chunk_3.clone(),
-        cols.chunk_4.clone(),
-        cols.chunk_5.clone(),
-        cols.chunk_6.clone(),
-        cols.chunk_7.clone(),
-    ]
+pub use component::air::{Component, Eval};
+
+/// Construct the generated leaf evaluator for the selected proof kind.
+#[allow(clippy::too_many_arguments)]
+pub fn eval_for_proof_kind(
+    log_size: u32,
+    proof_kind: ProofKind,
+    vm_relations: &Relations,
+    control_relations: &ControlRelations,
+    query_relations: &QueryPositionRelations,
+    trace_relations: &TraceMerkleRelations,
+    recursion_relations: &RecursionRelations,
+) -> Eval {
+    Eval {
+        log_size,
+        segment_active: BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        binary_active: BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        leaf_tag: BaseField::from(LEAF_TAG),
+        trace_position_kind: BaseField::from(QueryPositionKind::TraceTree.as_u32()),
+        relations: TraceMerkleLeafComponentRelations::new(
+            vm_relations,
+            control_relations,
+            query_relations,
+            trace_relations,
+            recursion_relations,
+        ),
+    }
 }
 
-fn output_columns<F: Clone>(cols: &TraceMerkleLeafColumns<F>) -> [F; T] {
-    [
-        cols.output_0.clone(),
-        cols.output_1.clone(),
-        cols.output_2.clone(),
-        cols.output_3.clone(),
-        cols.output_4.clone(),
-        cols.output_5.clone(),
-        cols.output_6.clone(),
-        cols.output_7.clone(),
-        cols.output_8.clone(),
-        cols.output_9.clone(),
-        cols.output_10.clone(),
-        cols.output_11.clone(),
-        cols.output_12.clone(),
-        cols.output_13.clone(),
-        cols.output_14.clone(),
-        cols.output_15.clone(),
-    ]
-}
-
-/// Generates hash, value, state, position, leaf, and control interactions.
+/// Generate hash, value, state, position, leaf, and control interactions.
 #[allow(clippy::too_many_arguments)]
 pub fn gen_interaction_trace(
     trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
@@ -798,236 +774,21 @@ pub fn gen_interaction_trace(
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     QM31,
 ) {
-    let cols = TraceMerkleLeafColumns::from_iter(trace.iter().map(|column| &column.values.data));
-    let pp = preprocessed
-        .iter()
-        .map(|column| &column.values.data)
-        .collect::<Vec<_>>();
-    let previous = previous_columns(&cols);
-    let chunks = chunk_columns(&cols);
-    let output = output_columns(&cols);
-    let size = cols.enabler.len();
-    let segment = BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf));
-    let binary = BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode));
-    let active = (0..size)
-        .map(|row| {
-            PackedQM31::from(
-                pp[ROW_MASK_COLUMN][row]
-                    * (pp[SEGMENT_MASK_COLUMN][row] * segment
-                        + pp[BINARY_MASK_COLUMN][row] * binary),
-            )
-        })
-        .collect::<Vec<_>>();
-    let negative_active = active.iter().map(|value| -*value).collect::<Vec<_>>();
-    let first = (0..size)
-        .map(|row| PackedQM31::from(pp[FIRST_MASK_COLUMN][row]))
-        .collect::<Vec<_>>();
-    let last = (0..size)
-        .map(|row| PackedQM31::from(pp[LAST_MASK_COLUMN][row]))
-        .collect::<Vec<_>>();
-    let previous_numerator = active
-        .iter()
-        .zip(&first)
-        .map(|(active, first)| -*active * (PackedQM31::one() - *first))
-        .collect::<Vec<_>>();
-    let output_numerator = active
-        .iter()
-        .zip(&last)
-        .map(|(active, last)| *active * (PackedQM31::one() - *last))
-        .collect::<Vec<_>>();
-    let final_numerator = active
-        .iter()
-        .zip(&last)
-        .map(|(active, last)| -*active * *last)
-        .collect::<Vec<_>>();
-
-    let in_rate = core::array::from_fn::<_, RATE, _>(|slot| {
-        previous[slot]
-            .iter()
-            .zip(chunks[slot])
-            .map(|(previous, chunk)| *previous + *chunk)
-            .collect::<Vec<PackedM31>>()
-    });
-    let poseidon_denominator = combine!(
-        vm_relations.poseidon2_io,
-        [
-            &in_rate[0],
-            &in_rate[1],
-            &in_rate[2],
-            &in_rate[3],
-            &in_rate[4],
-            &in_rate[5],
-            &in_rate[6],
-            &in_rate[7],
-            previous[8],
-            previous[9],
-            previous[10],
-            previous[11],
-            previous[12],
-            previous[13],
-            previous[14],
-            previous[15],
-            output[0],
-            output[1],
-            output[2],
-            output[3],
-            output[4],
-            output[5],
-            output[6],
-            output[7],
-            output[8],
-            output[9],
-            output[10],
-            output[11],
-            output[12],
-            output[13],
-            output[14],
-            output[15]
-        ]
-    );
-
-    let value_numerators = (0..RATE)
-        .map(|slot| {
-            (0..size)
-                .map(|row| active[row] * pp[chunk_column(slot)][row])
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    let value_denominators = (0..RATE)
-        .map(|slot| {
-            (0..size)
-                .map(|row| {
-                    trace_relations.value.combine(&[
-                        pp[VERIFIER_ID_COLUMN][row],
-                        pp[TREE_COLUMN][row],
-                        pp[chunk_column(slot) + 1][row],
-                        pp[QUERY_COLUMN][row],
-                        chunks[slot][row],
-                    ])
-                })
-                .collect::<Vec<PackedQM31>>()
-        })
-        .collect::<Vec<_>>();
-
-    let one = PackedM31::broadcast(BaseField::from(1));
-    let previous_denominator = (0..size)
-        .map(|row| {
-            let mut tuple = vec![
-                pp[VERIFIER_ID_COLUMN][row],
-                pp[TREE_COLUMN][row],
-                pp[QUERY_COLUMN][row],
-                pp[STEP_COLUMN][row],
-            ];
-            tuple.extend(previous.iter().map(|column| column[row]));
-            trace_relations.state.combine(&tuple)
-        })
-        .collect::<Vec<PackedQM31>>();
-    let output_denominator = (0..size)
-        .map(|row| {
-            let mut tuple = vec![
-                pp[VERIFIER_ID_COLUMN][row],
-                pp[TREE_COLUMN][row],
-                pp[QUERY_COLUMN][row],
-                pp[STEP_COLUMN][row] + one,
-            ];
-            tuple.extend(output.iter().map(|column| column[row]));
-            trace_relations.state.combine(&tuple)
-        })
-        .collect::<Vec<PackedQM31>>();
-    let query_denominator = (0..size)
-        .map(|row| {
-            query_relations.position.combine(&[
-                pp[VERIFIER_ID_COLUMN][row],
-                PackedM31::broadcast(BaseField::from(QueryPositionKind::TraceTree.as_u32())),
-                pp[TREE_COLUMN][row],
-                pp[QUERY_COLUMN][row],
-                cols.position[row],
-                PackedM31::broadcast(BaseField::from(0)),
-            ])
-        })
-        .collect::<Vec<PackedQM31>>();
-    let leaf_denominator = (0..size)
-        .map(|row| {
-            recursion_relations.merkle_node.combine(&[
-                pp[TREE_ID_COLUMN][row],
-                pp[TREE_HEIGHT_COLUMN][row],
-                cols.position[row],
-                output[0][row],
-                output[1][row],
-                output[2][row],
-                output[3][row],
-                output[4][row],
-                output[5][row],
-                output[6][row],
-                output[7][row],
-            ])
-        })
-        .collect::<Vec<PackedQM31>>();
-    let control_denominator = (0..size)
-        .map(|row| {
-            control_relations.step.combine(&[
-                pp[VERIFIER_ID_COLUMN][row],
-                pp[CONTROL_SEQUENCE_COLUMN][row],
-                pp[CONTROL_TAG_COLUMN][row],
-                pp[CONTROL_ARG_0_COLUMN][row],
-                pp[CONTROL_ARG_1_COLUMN][row],
-                pp[CONTROL_ARG_2_COLUMN][row],
-                pp[CONTROL_ARG_3_COLUMN][row],
-            ])
-        })
-        .collect::<Vec<PackedQM31>>();
-
-    let mut logup = LogupTraceGenerator::new(trace[0].domain.log_size());
-    write_pair!(
-        &negative_active,
-        &poseidon_denominator,
-        &value_numerators[0],
-        &value_denominators[0],
-        logup
-    );
-    write_pair!(
-        &value_numerators[1],
-        &value_denominators[1],
-        &value_numerators[2],
-        &value_denominators[2],
-        logup
-    );
-    write_pair!(
-        &value_numerators[3],
-        &value_denominators[3],
-        &value_numerators[4],
-        &value_denominators[4],
-        logup
-    );
-    write_pair!(
-        &value_numerators[5],
-        &value_denominators[5],
-        &value_numerators[6],
-        &value_denominators[6],
-        logup
-    );
-    write_pair!(
-        &value_numerators[7],
-        &value_denominators[7],
-        &previous_numerator,
-        &previous_denominator,
-        logup
-    );
-    write_pair!(
-        &output_numerator,
-        &output_denominator,
-        &final_numerator,
-        &query_denominator,
-        logup
-    );
-    write_pair!(
-        &final_numerator,
-        &leaf_denominator,
-        &final_numerator,
-        &control_denominator,
-        logup
-    );
-    logup.finalize_last()
+    component::witness::gen_interaction_trace(
+        trace,
+        preprocessed,
+        BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        BaseField::from(LEAF_TAG),
+        BaseField::from(QueryPositionKind::TraceTree.as_u32()),
+        &TraceMerkleLeafComponentRelations::new(
+            vm_relations,
+            control_relations,
+            query_relations,
+            trace_relations,
+            recursion_relations,
+        ),
+    )
 }
 
 /// Queried values and raw transcript words for one inner proof lane.
@@ -1585,7 +1346,7 @@ mod tests {
     use stwo::core::fields::m31::M31;
     use stwo::core::pcs::TreeVec;
     use stwo::core::vcs_lifted::merkle_hasher::MerkleHasherLifted;
-    use stwo_constraint_framework::assert_constraints_on_polys;
+    use stwo_constraint_framework::{FrameworkEval, Relation, assert_constraints_on_polys};
 
     use super::*;
     use crate::kernel::VerifierProgramSpec;
@@ -1746,15 +1507,15 @@ mod tests {
         );
         let traces = TreeVec::new(vec![preprocessed, trace, interaction]);
         let polys = traces.map_cols(|column| column.interpolate());
-        let eval = Eval {
-            log_size: preprocessing.log_size(),
-            proof_kind: kind,
-            vm_relations,
-            control_relations,
-            query_relations,
-            trace_relations,
-            recursion_relations,
-        };
+        let eval = eval_for_proof_kind(
+            preprocessing.log_size(),
+            kind,
+            &vm_relations,
+            &control_relations,
+            &query_relations,
+            &trace_relations,
+            &recursion_relations,
+        );
         assert_constraints_on_polys(
             &polys,
             CanonicCoset::new(preprocessing.log_size()),

@@ -17,16 +17,10 @@ use stwo::core::fields::qm31::QM31;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::simd::column::BaseColumn;
-use stwo::prover::backend::simd::m31::PackedM31;
-use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, Relation, RelationEntry,
-    relation,
-};
-use stwo_macros::define_component_tables;
+use stwo_constraint_framework::relation;
 
 use super::control_air::{
     LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
@@ -57,40 +51,6 @@ const MAPPING_QUERY_COLUMN: usize = 6;
 const POSITION_WEIGHT_START_COLUMN: usize = 7;
 const OFFSET_WEIGHT_START_COLUMN: usize = POSITION_WEIGHT_START_COLUMN + M31_BITS;
 const MAPPING_PREPROCESSED_COLUMN_COUNT: usize = OFFSET_WEIGHT_START_COLUMN + M31_BITS;
-
-const RAW_PREPROCESSED_COLUMN_IDS: [&str; RAW_PREPROCESSED_COLUMN_COUNT] = [
-    "recursion_query_raw_row_mask",
-    "recursion_query_raw_segment_mask",
-    "recursion_query_raw_binary_mask",
-    "recursion_query_raw_verifier_id",
-    "recursion_query_raw_query",
-    "recursion_query_raw_use_count",
-];
-
-define_component_tables! {
-    query_bits: {
-        committed: {
-            word, canonical_inverse,
-            bit_0, bit_1, bit_2, bit_3, bit_4, bit_5, bit_6, bit_7,
-            bit_8, bit_9, bit_10, bit_11, bit_12, bit_13, bit_14, bit_15,
-            bit_16, bit_17, bit_18, bit_19, bit_20, bit_21, bit_22, bit_23,
-            bit_24, bit_25, bit_26, bit_27, bit_28, bit_29, bit_30,
-        },
-        constraints: {},
-    },
-    query_mapping: {
-        committed: {
-            position, offset,
-            bit_0, bit_1, bit_2, bit_3, bit_4, bit_5, bit_6, bit_7,
-            bit_8, bit_9, bit_10, bit_11, bit_12, bit_13, bit_14, bit_15,
-            bit_16, bit_17, bit_18, bit_19, bit_20, bit_21, bit_22, bit_23,
-            bit_24, bit_25, bit_26, bit_27, bit_28, bit_29, bit_30,
-        },
-        constraints: {},
-    },
-}
-
-use prover_columns::{QueryBitsColumns, QueryMappingColumns};
 
 // Canonical query bits: verifier, raw-query index, and all 31 bits.
 relation!(QueryBitsRelation, 33);
@@ -287,32 +247,11 @@ impl QueryPositionPreprocessed {
     }
 
     pub fn raw_column_ids() -> Vec<PreProcessedColumnId> {
-        RAW_PREPROCESSED_COLUMN_IDS
-            .iter()
-            .map(|id| PreProcessedColumnId { id: (*id).into() })
-            .collect()
+        query_bits_dsl::preprocessed_column_ids()
     }
 
     pub fn mapping_column_ids() -> Vec<PreProcessedColumnId> {
-        let mut ids = [
-            "recursion_query_mapping_row_mask",
-            "recursion_query_mapping_segment_mask",
-            "recursion_query_mapping_binary_mask",
-            "recursion_query_mapping_verifier_id",
-            "recursion_query_mapping_kind",
-            "recursion_query_mapping_item",
-            "recursion_query_mapping_query",
-        ]
-        .into_iter()
-        .map(|id| PreProcessedColumnId { id: id.into() })
-        .collect::<Vec<_>>();
-        ids.extend((0..M31_BITS).map(|bit| PreProcessedColumnId {
-            id: format!("recursion_query_mapping_position_weight_{bit}"),
-        }));
-        ids.extend((0..M31_BITS).map(|bit| PreProcessedColumnId {
-            id: format!("recursion_query_mapping_offset_weight_{bit}"),
-        }));
-        ids
+        query_mapping_dsl::preprocessed_column_ids()
     }
 
     pub fn gen_raw_columns(
@@ -574,261 +513,348 @@ fn into_evaluations(
         .collect()
 }
 
-pub type BitsComponent = FrameworkComponent<BitsEval>;
-pub type MappingComponent = FrameworkComponent<MappingEval>;
-
-/// Consumes raw transcript words and exports their canonical bit tuples.
+/// Relations used by the macro-generated raw-query decomposition component.
 #[derive(Clone)]
-pub struct BitsEval {
-    pub log_size: u32,
-    pub proof_kind: ProofKind,
-    pub randomness_relations: VerifierRandomnessRelations,
-    pub query_relations: QueryPositionRelations,
+pub struct QueryBitsComponentRelations {
+    pub randomness_word: super::verifier_randomness_air::VerifierRandomnessWordRelation,
+    pub bits: QueryBitsRelation,
+    pub bit_value: QueryBitValueRelation,
 }
 
-impl FrameworkEval for BitsEval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
-
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
-
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = QueryBitsColumns::from_eval(&mut eval);
-        let ids = QueryPositionPreprocessed::raw_column_ids();
-        let row_mask = eval.get_preprocessed_column(ids[RAW_ROW_MASK_COLUMN].clone());
-        let segment_mask = eval.get_preprocessed_column(ids[RAW_SEGMENT_MASK_COLUMN].clone());
-        let binary_mask = eval.get_preprocessed_column(ids[RAW_BINARY_MASK_COLUMN].clone());
-        let verifier_id = eval.get_preprocessed_column(ids[RAW_VERIFIER_ID_COLUMN].clone());
-        let query = eval.get_preprocessed_column(ids[RAW_QUERY_COLUMN].clone());
-        let use_count = eval.get_preprocessed_column(ids[RAW_USE_COUNT_COLUMN].clone());
-        let segment = E::F::from(BaseField::from(u32::from(
-            self.proof_kind == ProofKind::SegmentLeaf,
-        )));
-        let binary = E::F::from(BaseField::from(u32::from(
-            self.proof_kind == ProofKind::BinaryNode,
-        )));
-        let active = row_mask * (segment_mask * segment + binary_mask * binary);
-        let one = E::F::from(BaseField::from(1));
-        let bits = query_bits(&cols);
-
-        eval.add_constraint(cols.enabler.clone() - active.clone());
-        eval.add_constraint((one.clone() - active.clone()) * cols.word.clone());
-        eval.add_constraint((one.clone() - active.clone()) * cols.canonical_inverse.clone());
-        let mut reconstructed = E::F::from(BaseField::from(0));
-        let mut bit_sum = E::F::from(BaseField::from(0));
-        let mut tuple = vec![verifier_id.clone(), query.clone()];
-        tuple.extend(bits.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.query_relations.bits,
-            E::EF::from(active.clone() * use_count),
-            &tuple,
-        ));
-        for (bit, value) in bits.iter().enumerate() {
-            eval.add_constraint(value.clone() * (one.clone() - value.clone()));
-            eval.add_constraint((one.clone() - active.clone()) * value.clone());
-            reconstructed += value.clone()
-                * E::F::from(BaseField::from(
-                    1_u32
-                        .checked_shl(bit as u32)
-                        .expect("M31 bit weights fit u32"),
-                ));
-            bit_sum += value.clone();
+impl QueryBitsComponentRelations {
+    /// Combine the typed transcript source with both canonical-bit relations.
+    pub fn new(
+        randomness_relations: &VerifierRandomnessRelations,
+        query_relations: &QueryPositionRelations,
+    ) -> Self {
+        Self {
+            randomness_word: randomness_relations.word.clone(),
+            bits: query_relations.bits.clone(),
+            bit_value: query_relations.bit_value.clone(),
         }
-        eval.add_constraint(cols.word.clone() - reconstructed);
-        eval.add_constraint(canonical_inverse_constraint(
-            active.clone(),
-            bit_sum,
-            cols.canonical_inverse.clone(),
-        ));
-
-        eval.add_to_relation(RelationEntry::new(
-            &self.randomness_relations.word,
-            -E::EF::from(active.clone()),
-            &[
-                verifier_id.clone(),
-                E::F::from(BaseField::from(VerifierRandomnessKind::RawQuery.as_u32())),
-                query.clone(),
-                E::F::from(BaseField::from(0)),
-                cols.word.clone(),
-            ],
-        ));
-        for (bit, value) in bits.iter().enumerate() {
-            eval.add_to_relation(RelationEntry::new(
-                &self.query_relations.bit_value,
-                E::EF::from(active.clone()),
-                &[
-                    verifier_id.clone(),
-                    query.clone(),
-                    E::F::from(BaseField::from(bit as u32)),
-                    value.clone(),
-                ],
-            ));
-        }
-        eval.finalize_logup_in_pairs();
-        eval
     }
 }
 
+mod query_bits_dsl {
+    stwo_macros::define_air_fns! {
+        max_degree: 3,
+        embedded: [],
+        embedded_component: true,
+        embedded_enabler_boolean: false,
+        embedded_relations: crate::query_position_air::QueryBitsComponentRelations,
+        logup_batch: 2,
+        embedded_preprocessed: {
+            row_mask: "recursion_query_raw_row_mask",
+            segment_mask: "recursion_query_raw_segment_mask",
+            binary_mask: "recursion_query_raw_binary_mask",
+            verifier_id: "recursion_query_raw_verifier_id",
+            query: "recursion_query_raw_query",
+            use_count: "recursion_query_raw_use_count",
+        },
+        embedded_params: [segment_active, binary_active, raw_query_kind],
+
+        relation randomness_word(5);
+        relation bits(33);
+        relation bit_value(4);
+
+        fn query_bits(
+            word, canonical_inverse,
+            bit_0, bit_1, bit_2, bit_3, bit_4, bit_5, bit_6, bit_7, bit_8, bit_9, bit_10, bit_11, bit_12, bit_13, bit_14, bit_15, bit_16, bit_17, bit_18, bit_19, bit_20, bit_21, bit_22, bit_23, bit_24, bit_25, bit_26, bit_27, bit_28, bit_29, bit_30,
+            row_mask, segment_mask, binary_mask, verifier_id, query, use_count,
+            segment_active, binary_active, raw_query_kind,
+        ) {
+            // Trusted lane masks are disjoint subsets of the row mask.
+            let active = segment_mask * segment_active + binary_mask * binary_active;
+
+            constrain enabler - active;
+            constrain (1 - active) * word;
+            constrain (1 - active) * canonical_inverse;
+            constrain bit_0 * (1 - bit_0);
+            constrain (1 - active) * bit_0;
+            constrain bit_1 * (1 - bit_1);
+            constrain (1 - active) * bit_1;
+            constrain bit_2 * (1 - bit_2);
+            constrain (1 - active) * bit_2;
+            constrain bit_3 * (1 - bit_3);
+            constrain (1 - active) * bit_3;
+            constrain bit_4 * (1 - bit_4);
+            constrain (1 - active) * bit_4;
+            constrain bit_5 * (1 - bit_5);
+            constrain (1 - active) * bit_5;
+            constrain bit_6 * (1 - bit_6);
+            constrain (1 - active) * bit_6;
+            constrain bit_7 * (1 - bit_7);
+            constrain (1 - active) * bit_7;
+            constrain bit_8 * (1 - bit_8);
+            constrain (1 - active) * bit_8;
+            constrain bit_9 * (1 - bit_9);
+            constrain (1 - active) * bit_9;
+            constrain bit_10 * (1 - bit_10);
+            constrain (1 - active) * bit_10;
+            constrain bit_11 * (1 - bit_11);
+            constrain (1 - active) * bit_11;
+            constrain bit_12 * (1 - bit_12);
+            constrain (1 - active) * bit_12;
+            constrain bit_13 * (1 - bit_13);
+            constrain (1 - active) * bit_13;
+            constrain bit_14 * (1 - bit_14);
+            constrain (1 - active) * bit_14;
+            constrain bit_15 * (1 - bit_15);
+            constrain (1 - active) * bit_15;
+            constrain bit_16 * (1 - bit_16);
+            constrain (1 - active) * bit_16;
+            constrain bit_17 * (1 - bit_17);
+            constrain (1 - active) * bit_17;
+            constrain bit_18 * (1 - bit_18);
+            constrain (1 - active) * bit_18;
+            constrain bit_19 * (1 - bit_19);
+            constrain (1 - active) * bit_19;
+            constrain bit_20 * (1 - bit_20);
+            constrain (1 - active) * bit_20;
+            constrain bit_21 * (1 - bit_21);
+            constrain (1 - active) * bit_21;
+            constrain bit_22 * (1 - bit_22);
+            constrain (1 - active) * bit_22;
+            constrain bit_23 * (1 - bit_23);
+            constrain (1 - active) * bit_23;
+            constrain bit_24 * (1 - bit_24);
+            constrain (1 - active) * bit_24;
+            constrain bit_25 * (1 - bit_25);
+            constrain (1 - active) * bit_25;
+            constrain bit_26 * (1 - bit_26);
+            constrain (1 - active) * bit_26;
+            constrain bit_27 * (1 - bit_27);
+            constrain (1 - active) * bit_27;
+            constrain bit_28 * (1 - bit_28);
+            constrain (1 - active) * bit_28;
+            constrain bit_29 * (1 - bit_29);
+            constrain (1 - active) * bit_29;
+            constrain bit_30 * (1 - bit_30);
+            constrain (1 - active) * bit_30;
+            constrain word - (1 * bit_0 + 2 * bit_1 + 4 * bit_2 + 8 * bit_3 + 16 * bit_4 + 32 * bit_5 + 64 * bit_6 + 128 * bit_7 + 256 * bit_8 + 512 * bit_9 + 1024 * bit_10 + 2048 * bit_11 + 4096 * bit_12 + 8192 * bit_13 + 16384 * bit_14 + 32768 * bit_15 + 65536 * bit_16 + 131072 * bit_17 + 262144 * bit_18 + 524288 * bit_19 + 1048576 * bit_20 + 2097152 * bit_21 + 4194304 * bit_22 + 8388608 * bit_23 + 16777216 * bit_24 + 33554432 * bit_25 + 67108864 * bit_26 + 134217728 * bit_27 + 268435456 * bit_28 + 536870912 * bit_29 + 1073741824 * bit_30);
+            constrain (active * 31 - (bit_0 + bit_1 + bit_2 + bit_3 + bit_4 + bit_5 + bit_6 + bit_7 + bit_8 + bit_9 + bit_10 + bit_11 + bit_12 + bit_13 + bit_14 + bit_15 + bit_16 + bit_17 + bit_18 + bit_19 + bit_20 + bit_21 + bit_22 + bit_23 + bit_24 + bit_25 + bit_26 + bit_27 + bit_28 + bit_29 + bit_30)) * canonical_inverse - active;
+
+            consume(active) randomness_word(verifier_id, raw_query_kind, query, 0, word);
+            emit(active * use_count) bits(verifier_id, query, bit_0, bit_1, bit_2, bit_3, bit_4, bit_5, bit_6, bit_7, bit_8, bit_9, bit_10, bit_11, bit_12, bit_13, bit_14, bit_15, bit_16, bit_17, bit_18, bit_19, bit_20, bit_21, bit_22, bit_23, bit_24, bit_25, bit_26, bit_27, bit_28, bit_29, bit_30);
+        emit(active) bit_value(verifier_id, query, 0, bit_0);
+        emit(active) bit_value(verifier_id, query, 1, bit_1);
+        emit(active) bit_value(verifier_id, query, 2, bit_2);
+        emit(active) bit_value(verifier_id, query, 3, bit_3);
+        emit(active) bit_value(verifier_id, query, 4, bit_4);
+        emit(active) bit_value(verifier_id, query, 5, bit_5);
+        emit(active) bit_value(verifier_id, query, 6, bit_6);
+        emit(active) bit_value(verifier_id, query, 7, bit_7);
+        emit(active) bit_value(verifier_id, query, 8, bit_8);
+        emit(active) bit_value(verifier_id, query, 9, bit_9);
+        emit(active) bit_value(verifier_id, query, 10, bit_10);
+        emit(active) bit_value(verifier_id, query, 11, bit_11);
+        emit(active) bit_value(verifier_id, query, 12, bit_12);
+        emit(active) bit_value(verifier_id, query, 13, bit_13);
+        emit(active) bit_value(verifier_id, query, 14, bit_14);
+        emit(active) bit_value(verifier_id, query, 15, bit_15);
+        emit(active) bit_value(verifier_id, query, 16, bit_16);
+        emit(active) bit_value(verifier_id, query, 17, bit_17);
+        emit(active) bit_value(verifier_id, query, 18, bit_18);
+        emit(active) bit_value(verifier_id, query, 19, bit_19);
+        emit(active) bit_value(verifier_id, query, 20, bit_20);
+        emit(active) bit_value(verifier_id, query, 21, bit_21);
+        emit(active) bit_value(verifier_id, query, 22, bit_22);
+        emit(active) bit_value(verifier_id, query, 23, bit_23);
+        emit(active) bit_value(verifier_id, query, 24, bit_24);
+        emit(active) bit_value(verifier_id, query, 25, bit_25);
+        emit(active) bit_value(verifier_id, query, 26, bit_26);
+        emit(active) bit_value(verifier_id, query, 27, bit_27);
+        emit(active) bit_value(verifier_id, query, 28, bit_28);
+        emit(active) bit_value(verifier_id, query, 29, bit_29);
+        emit(active) bit_value(verifier_id, query, 30, bit_30);
+
+            return word;
+        }
+    }
+}
+
+mod query_mapping_dsl {
+    stwo_macros::define_air_fns! {
+        max_degree: 3,
+        embedded: [],
+        embedded_component: true,
+        embedded_enabler_boolean: false,
+        embedded_relations: crate::query_position_air::QueryPositionRelations,
+        logup_batch: 2,
+        embedded_preprocessed: {
+        row_mask: "recursion_query_mapping_row_mask",
+        segment_mask: "recursion_query_mapping_segment_mask",
+        binary_mask: "recursion_query_mapping_binary_mask",
+        verifier_id: "recursion_query_mapping_verifier_id",
+        kind: "recursion_query_mapping_kind",
+        item: "recursion_query_mapping_item",
+        query: "recursion_query_mapping_query",
+        position_weight_0: "recursion_query_mapping_position_weight_0",
+        position_weight_1: "recursion_query_mapping_position_weight_1",
+        position_weight_2: "recursion_query_mapping_position_weight_2",
+        position_weight_3: "recursion_query_mapping_position_weight_3",
+        position_weight_4: "recursion_query_mapping_position_weight_4",
+        position_weight_5: "recursion_query_mapping_position_weight_5",
+        position_weight_6: "recursion_query_mapping_position_weight_6",
+        position_weight_7: "recursion_query_mapping_position_weight_7",
+        position_weight_8: "recursion_query_mapping_position_weight_8",
+        position_weight_9: "recursion_query_mapping_position_weight_9",
+        position_weight_10: "recursion_query_mapping_position_weight_10",
+        position_weight_11: "recursion_query_mapping_position_weight_11",
+        position_weight_12: "recursion_query_mapping_position_weight_12",
+        position_weight_13: "recursion_query_mapping_position_weight_13",
+        position_weight_14: "recursion_query_mapping_position_weight_14",
+        position_weight_15: "recursion_query_mapping_position_weight_15",
+        position_weight_16: "recursion_query_mapping_position_weight_16",
+        position_weight_17: "recursion_query_mapping_position_weight_17",
+        position_weight_18: "recursion_query_mapping_position_weight_18",
+        position_weight_19: "recursion_query_mapping_position_weight_19",
+        position_weight_20: "recursion_query_mapping_position_weight_20",
+        position_weight_21: "recursion_query_mapping_position_weight_21",
+        position_weight_22: "recursion_query_mapping_position_weight_22",
+        position_weight_23: "recursion_query_mapping_position_weight_23",
+        position_weight_24: "recursion_query_mapping_position_weight_24",
+        position_weight_25: "recursion_query_mapping_position_weight_25",
+        position_weight_26: "recursion_query_mapping_position_weight_26",
+        position_weight_27: "recursion_query_mapping_position_weight_27",
+        position_weight_28: "recursion_query_mapping_position_weight_28",
+        position_weight_29: "recursion_query_mapping_position_weight_29",
+        position_weight_30: "recursion_query_mapping_position_weight_30",
+        offset_weight_0: "recursion_query_mapping_offset_weight_0",
+        offset_weight_1: "recursion_query_mapping_offset_weight_1",
+        offset_weight_2: "recursion_query_mapping_offset_weight_2",
+        offset_weight_3: "recursion_query_mapping_offset_weight_3",
+        offset_weight_4: "recursion_query_mapping_offset_weight_4",
+        offset_weight_5: "recursion_query_mapping_offset_weight_5",
+        offset_weight_6: "recursion_query_mapping_offset_weight_6",
+        offset_weight_7: "recursion_query_mapping_offset_weight_7",
+        offset_weight_8: "recursion_query_mapping_offset_weight_8",
+        offset_weight_9: "recursion_query_mapping_offset_weight_9",
+        offset_weight_10: "recursion_query_mapping_offset_weight_10",
+        offset_weight_11: "recursion_query_mapping_offset_weight_11",
+        offset_weight_12: "recursion_query_mapping_offset_weight_12",
+        offset_weight_13: "recursion_query_mapping_offset_weight_13",
+        offset_weight_14: "recursion_query_mapping_offset_weight_14",
+        offset_weight_15: "recursion_query_mapping_offset_weight_15",
+        offset_weight_16: "recursion_query_mapping_offset_weight_16",
+        offset_weight_17: "recursion_query_mapping_offset_weight_17",
+        offset_weight_18: "recursion_query_mapping_offset_weight_18",
+        offset_weight_19: "recursion_query_mapping_offset_weight_19",
+        offset_weight_20: "recursion_query_mapping_offset_weight_20",
+        offset_weight_21: "recursion_query_mapping_offset_weight_21",
+        offset_weight_22: "recursion_query_mapping_offset_weight_22",
+        offset_weight_23: "recursion_query_mapping_offset_weight_23",
+        offset_weight_24: "recursion_query_mapping_offset_weight_24",
+        offset_weight_25: "recursion_query_mapping_offset_weight_25",
+        offset_weight_26: "recursion_query_mapping_offset_weight_26",
+        offset_weight_27: "recursion_query_mapping_offset_weight_27",
+        offset_weight_28: "recursion_query_mapping_offset_weight_28",
+        offset_weight_29: "recursion_query_mapping_offset_weight_29",
+        offset_weight_30: "recursion_query_mapping_offset_weight_30",
+        },
+        embedded_params: [segment_active, binary_active],
+
+        relation bits(33);
+        relation position(6);
+
+        fn query_mapping(
+            position, offset,
+            bit_0, bit_1, bit_2, bit_3, bit_4, bit_5, bit_6, bit_7, bit_8, bit_9, bit_10, bit_11, bit_12, bit_13, bit_14, bit_15, bit_16, bit_17, bit_18, bit_19, bit_20, bit_21, bit_22, bit_23, bit_24, bit_25, bit_26, bit_27, bit_28, bit_29, bit_30,
+            row_mask, segment_mask, binary_mask, verifier_id, kind, item, query,
+            position_weight_0, position_weight_1, position_weight_2, position_weight_3, position_weight_4, position_weight_5, position_weight_6, position_weight_7, position_weight_8, position_weight_9, position_weight_10, position_weight_11, position_weight_12, position_weight_13, position_weight_14, position_weight_15, position_weight_16, position_weight_17, position_weight_18, position_weight_19, position_weight_20, position_weight_21, position_weight_22, position_weight_23, position_weight_24, position_weight_25, position_weight_26, position_weight_27, position_weight_28, position_weight_29, position_weight_30,
+            offset_weight_0, offset_weight_1, offset_weight_2, offset_weight_3, offset_weight_4, offset_weight_5, offset_weight_6, offset_weight_7, offset_weight_8, offset_weight_9, offset_weight_10, offset_weight_11, offset_weight_12, offset_weight_13, offset_weight_14, offset_weight_15, offset_weight_16, offset_weight_17, offset_weight_18, offset_weight_19, offset_weight_20, offset_weight_21, offset_weight_22, offset_weight_23, offset_weight_24, offset_weight_25, offset_weight_26, offset_weight_27, offset_weight_28, offset_weight_29, offset_weight_30,
+            segment_active, binary_active,
+        ) {
+            // Trusted lane masks are disjoint subsets of the row mask.
+            let active = segment_mask * segment_active + binary_mask * binary_active;
+
+            constrain enabler - active;
+            constrain (1 - active) * position;
+            constrain (1 - active) * offset;
+        constrain (1 - active) * bit_0;
+        constrain (1 - active) * bit_1;
+        constrain (1 - active) * bit_2;
+        constrain (1 - active) * bit_3;
+        constrain (1 - active) * bit_4;
+        constrain (1 - active) * bit_5;
+        constrain (1 - active) * bit_6;
+        constrain (1 - active) * bit_7;
+        constrain (1 - active) * bit_8;
+        constrain (1 - active) * bit_9;
+        constrain (1 - active) * bit_10;
+        constrain (1 - active) * bit_11;
+        constrain (1 - active) * bit_12;
+        constrain (1 - active) * bit_13;
+        constrain (1 - active) * bit_14;
+        constrain (1 - active) * bit_15;
+        constrain (1 - active) * bit_16;
+        constrain (1 - active) * bit_17;
+        constrain (1 - active) * bit_18;
+        constrain (1 - active) * bit_19;
+        constrain (1 - active) * bit_20;
+        constrain (1 - active) * bit_21;
+        constrain (1 - active) * bit_22;
+        constrain (1 - active) * bit_23;
+        constrain (1 - active) * bit_24;
+        constrain (1 - active) * bit_25;
+        constrain (1 - active) * bit_26;
+        constrain (1 - active) * bit_27;
+        constrain (1 - active) * bit_28;
+        constrain (1 - active) * bit_29;
+        constrain (1 - active) * bit_30;
+            constrain position - (bit_0 * position_weight_0 + bit_1 * position_weight_1 + bit_2 * position_weight_2 + bit_3 * position_weight_3 + bit_4 * position_weight_4 + bit_5 * position_weight_5 + bit_6 * position_weight_6 + bit_7 * position_weight_7 + bit_8 * position_weight_8 + bit_9 * position_weight_9 + bit_10 * position_weight_10 + bit_11 * position_weight_11 + bit_12 * position_weight_12 + bit_13 * position_weight_13 + bit_14 * position_weight_14 + bit_15 * position_weight_15 + bit_16 * position_weight_16 + bit_17 * position_weight_17 + bit_18 * position_weight_18 + bit_19 * position_weight_19 + bit_20 * position_weight_20 + bit_21 * position_weight_21 + bit_22 * position_weight_22 + bit_23 * position_weight_23 + bit_24 * position_weight_24 + bit_25 * position_weight_25 + bit_26 * position_weight_26 + bit_27 * position_weight_27 + bit_28 * position_weight_28 + bit_29 * position_weight_29 + bit_30 * position_weight_30);
+            constrain offset - (bit_0 * offset_weight_0 + bit_1 * offset_weight_1 + bit_2 * offset_weight_2 + bit_3 * offset_weight_3 + bit_4 * offset_weight_4 + bit_5 * offset_weight_5 + bit_6 * offset_weight_6 + bit_7 * offset_weight_7 + bit_8 * offset_weight_8 + bit_9 * offset_weight_9 + bit_10 * offset_weight_10 + bit_11 * offset_weight_11 + bit_12 * offset_weight_12 + bit_13 * offset_weight_13 + bit_14 * offset_weight_14 + bit_15 * offset_weight_15 + bit_16 * offset_weight_16 + bit_17 * offset_weight_17 + bit_18 * offset_weight_18 + bit_19 * offset_weight_19 + bit_20 * offset_weight_20 + bit_21 * offset_weight_21 + bit_22 * offset_weight_22 + bit_23 * offset_weight_23 + bit_24 * offset_weight_24 + bit_25 * offset_weight_25 + bit_26 * offset_weight_26 + bit_27 * offset_weight_27 + bit_28 * offset_weight_28 + bit_29 * offset_weight_29 + bit_30 * offset_weight_30);
+
+            consume(active) bits(verifier_id, query, bit_0, bit_1, bit_2, bit_3, bit_4, bit_5, bit_6, bit_7, bit_8, bit_9, bit_10, bit_11, bit_12, bit_13, bit_14, bit_15, bit_16, bit_17, bit_18, bit_19, bit_20, bit_21, bit_22, bit_23, bit_24, bit_25, bit_26, bit_27, bit_28, bit_29, bit_30);
+            emit(active) position(verifier_id, kind, item, query, position, offset);
+
+            return (position, offset);
+        }
+    }
+}
+
+pub use query_bits_dsl::QueryBitsTable;
+pub use query_bits_dsl::component::air::{Component as BitsComponent, Eval as BitsEval};
+pub use query_mapping_dsl::QueryMappingTable;
+pub use query_mapping_dsl::component::air::{Component as MappingComponent, Eval as MappingEval};
+
+/// Construct the raw-query evaluator for the selected proof kind.
+pub fn bits_eval_for_proof_kind(
+    log_size: u32,
+    proof_kind: ProofKind,
+    randomness_relations: &VerifierRandomnessRelations,
+    query_relations: &QueryPositionRelations,
+) -> BitsEval {
+    BitsEval {
+        log_size,
+        segment_active: BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        binary_active: BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        raw_query_kind: BaseField::from(VerifierRandomnessKind::RawQuery.as_u32()),
+        relations: QueryBitsComponentRelations::new(randomness_relations, query_relations),
+    }
+}
+
+/// Construct the query-route evaluator for the selected proof kind.
+pub fn mapping_eval_for_proof_kind(
+    log_size: u32,
+    proof_kind: ProofKind,
+    query_relations: &QueryPositionRelations,
+) -> MappingEval {
+    MappingEval {
+        log_size,
+        segment_active: BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        binary_active: BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        relations: query_relations.clone(),
+    }
+}
+
+/// Evaluates the canonical M31 bit-pattern constraint used by the macro AIR.
+#[cfg(test)]
 fn canonical_inverse_constraint<F>(active: F, bit_sum: F, inverse: F) -> F
 where
     F: Clone + From<BaseField> + core::ops::Mul<Output = F> + core::ops::Sub<Output = F>,
 {
     (active.clone() * F::from(BaseField::from(M31_BITS as u32)) - bit_sum) * inverse - active
-}
-
-/// Consumes canonical bits and emits one typed position per fixed obligation.
-#[derive(Clone)]
-pub struct MappingEval {
-    pub log_size: u32,
-    pub proof_kind: ProofKind,
-    pub query_relations: QueryPositionRelations,
-}
-
-impl FrameworkEval for MappingEval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
-
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
-
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = QueryMappingColumns::from_eval(&mut eval);
-        let ids = QueryPositionPreprocessed::mapping_column_ids();
-        let row_mask = eval.get_preprocessed_column(ids[MAPPING_ROW_MASK_COLUMN].clone());
-        let segment_mask = eval.get_preprocessed_column(ids[MAPPING_SEGMENT_MASK_COLUMN].clone());
-        let binary_mask = eval.get_preprocessed_column(ids[MAPPING_BINARY_MASK_COLUMN].clone());
-        let verifier_id = eval.get_preprocessed_column(ids[MAPPING_VERIFIER_ID_COLUMN].clone());
-        let kind = eval.get_preprocessed_column(ids[MAPPING_KIND_COLUMN].clone());
-        let item = eval.get_preprocessed_column(ids[MAPPING_ITEM_COLUMN].clone());
-        let query = eval.get_preprocessed_column(ids[MAPPING_QUERY_COLUMN].clone());
-        let segment = E::F::from(BaseField::from(u32::from(
-            self.proof_kind == ProofKind::SegmentLeaf,
-        )));
-        let binary = E::F::from(BaseField::from(u32::from(
-            self.proof_kind == ProofKind::BinaryNode,
-        )));
-        let active = row_mask * (segment_mask * segment + binary_mask * binary);
-        let one = E::F::from(BaseField::from(1));
-        let bits = mapping_bits(&cols);
-        let position_weights = core::array::from_fn::<_, M31_BITS, _>(|bit| {
-            eval.get_preprocessed_column(ids[POSITION_WEIGHT_START_COLUMN + bit].clone())
-        });
-        let offset_weights = core::array::from_fn::<_, M31_BITS, _>(|bit| {
-            eval.get_preprocessed_column(ids[OFFSET_WEIGHT_START_COLUMN + bit].clone())
-        });
-
-        eval.add_constraint(cols.enabler.clone() - active.clone());
-        eval.add_constraint((one.clone() - active.clone()) * cols.position.clone());
-        eval.add_constraint((one.clone() - active.clone()) * cols.offset.clone());
-        let mut position = E::F::from(BaseField::from(0));
-        let mut offset = E::F::from(BaseField::from(0));
-        for (bit, value) in bits.iter().enumerate() {
-            eval.add_constraint((one.clone() - active.clone()) * value.clone());
-            position += value.clone() * position_weights[bit].clone();
-            offset += value.clone() * offset_weights[bit].clone();
-        }
-        eval.add_constraint(cols.position.clone() - position);
-        eval.add_constraint(cols.offset.clone() - offset);
-
-        let mut bits_tuple = vec![verifier_id.clone(), query.clone()];
-        bits_tuple.extend(bits);
-        eval.add_to_relation(RelationEntry::new(
-            &self.query_relations.bits,
-            -E::EF::from(active.clone()),
-            &bits_tuple,
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.query_relations.position,
-            E::EF::from(active),
-            &[
-                verifier_id,
-                kind,
-                item,
-                query,
-                cols.position.clone(),
-                cols.offset.clone(),
-            ],
-        ));
-        eval.finalize_logup_in_pairs();
-        eval
-    }
-}
-
-fn query_bits<F: Clone>(cols: &QueryBitsColumns<F>) -> [F; M31_BITS] {
-    [
-        cols.bit_0.clone(),
-        cols.bit_1.clone(),
-        cols.bit_2.clone(),
-        cols.bit_3.clone(),
-        cols.bit_4.clone(),
-        cols.bit_5.clone(),
-        cols.bit_6.clone(),
-        cols.bit_7.clone(),
-        cols.bit_8.clone(),
-        cols.bit_9.clone(),
-        cols.bit_10.clone(),
-        cols.bit_11.clone(),
-        cols.bit_12.clone(),
-        cols.bit_13.clone(),
-        cols.bit_14.clone(),
-        cols.bit_15.clone(),
-        cols.bit_16.clone(),
-        cols.bit_17.clone(),
-        cols.bit_18.clone(),
-        cols.bit_19.clone(),
-        cols.bit_20.clone(),
-        cols.bit_21.clone(),
-        cols.bit_22.clone(),
-        cols.bit_23.clone(),
-        cols.bit_24.clone(),
-        cols.bit_25.clone(),
-        cols.bit_26.clone(),
-        cols.bit_27.clone(),
-        cols.bit_28.clone(),
-        cols.bit_29.clone(),
-        cols.bit_30.clone(),
-    ]
-}
-
-fn mapping_bits<F: Clone>(cols: &QueryMappingColumns<F>) -> [F; M31_BITS] {
-    [
-        cols.bit_0.clone(),
-        cols.bit_1.clone(),
-        cols.bit_2.clone(),
-        cols.bit_3.clone(),
-        cols.bit_4.clone(),
-        cols.bit_5.clone(),
-        cols.bit_6.clone(),
-        cols.bit_7.clone(),
-        cols.bit_8.clone(),
-        cols.bit_9.clone(),
-        cols.bit_10.clone(),
-        cols.bit_11.clone(),
-        cols.bit_12.clone(),
-        cols.bit_13.clone(),
-        cols.bit_14.clone(),
-        cols.bit_15.clone(),
-        cols.bit_16.clone(),
-        cols.bit_17.clone(),
-        cols.bit_18.clone(),
-        cols.bit_19.clone(),
-        cols.bit_20.clone(),
-        cols.bit_21.clone(),
-        cols.bit_22.clone(),
-        cols.bit_23.clone(),
-        cols.bit_24.clone(),
-        cols.bit_25.clone(),
-        cols.bit_26.clone(),
-        cols.bit_27.clone(),
-        cols.bit_28.clone(),
-        cols.bit_29.clone(),
-        cols.bit_30.clone(),
-    ]
 }
 
 /// Raw query words selected by the public universal proof kind.
@@ -975,7 +1001,7 @@ fn push_mapping_row(
     table.push_row(&row);
 }
 
-/// Generates the raw-word consumer and canonical-bit producer interaction trace.
+/// Generate the raw-word consumer and canonical-bit producer interactions.
 pub fn gen_bits_interaction_trace(
     trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     preprocessed: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
@@ -986,90 +1012,17 @@ pub fn gen_bits_interaction_trace(
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     QM31,
 ) {
-    let cols = QueryBitsColumns::from_iter(trace.iter().map(|column| &column.values.data));
-    let pp = preprocessed
-        .iter()
-        .map(|column| &column.values.data)
-        .collect::<Vec<_>>();
-    let bits = query_bits(&cols);
-    let size = cols.enabler.len();
-    let segment = BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf));
-    let binary = BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode));
-    let active = (0..size)
-        .map(|row| {
-            PackedQM31::from(
-                pp[RAW_ROW_MASK_COLUMN][row]
-                    * (pp[RAW_SEGMENT_MASK_COLUMN][row] * segment
-                        + pp[RAW_BINARY_MASK_COLUMN][row] * binary),
-            )
-        })
-        .collect::<Vec<_>>();
-    let negative_active = active.iter().map(|value| -*value).collect::<Vec<_>>();
-    let randomness_denominator = (0..size)
-        .map(|row| {
-            randomness_relations.word.combine(&[
-                pp[RAW_VERIFIER_ID_COLUMN][row],
-                PackedM31::broadcast(BaseField::from(VerifierRandomnessKind::RawQuery.as_u32())),
-                pp[RAW_QUERY_COLUMN][row],
-                PackedM31::broadcast(BaseField::from(0)),
-                cols.word[row],
-            ])
-        })
-        .collect::<Vec<PackedQM31>>();
-    let bits_numerator = (0..size)
-        .map(|row| active[row] * pp[RAW_USE_COUNT_COLUMN][row])
-        .collect::<Vec<_>>();
-    let bits_denominator = (0..size)
-        .map(|row| {
-            let mut tuple = vec![pp[RAW_VERIFIER_ID_COLUMN][row], pp[RAW_QUERY_COLUMN][row]];
-            tuple.extend(bits.iter().map(|column| column[row]));
-            query_relations.bits.combine(&tuple)
-        })
-        .collect::<Vec<PackedQM31>>();
-    let bit_value_denominators = bits
-        .iter()
-        .enumerate()
-        .map(|(bit, values)| {
-            let bit = PackedM31::broadcast(BaseField::from(bit as u32));
-            (0..size)
-                .map(|row| {
-                    query_relations.bit_value.combine(&[
-                        pp[RAW_VERIFIER_ID_COLUMN][row],
-                        pp[RAW_QUERY_COLUMN][row],
-                        bit,
-                        values[row],
-                    ])
-                })
-                .collect::<Vec<PackedQM31>>()
-        })
-        .collect::<Vec<_>>();
-    let mut logup = LogupTraceGenerator::new(trace[0].domain.log_size());
-    write_pair!(
-        &negative_active,
-        &randomness_denominator,
-        &bits_numerator,
-        &bits_denominator,
-        logup
-    );
-    for pair in bit_value_denominators.chunks(2) {
-        let mut column = logup.new_col();
-        for row in 0..size {
-            if let [first, second] = pair {
-                column.write_frac(
-                    row,
-                    active[row] * (first[row] + second[row]),
-                    first[row] * second[row],
-                );
-            } else {
-                column.write_frac(row, active[row], pair[0][row]);
-            }
-        }
-        column.finalize_col();
-    }
-    logup.finalize_last()
+    query_bits_dsl::component::witness::gen_interaction_trace(
+        trace,
+        preprocessed,
+        BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        BaseField::from(VerifierRandomnessKind::RawQuery.as_u32()),
+        &QueryBitsComponentRelations::new(randomness_relations, query_relations),
+    )
 }
 
-/// Generates canonical-bit consumers and typed-position producers.
+/// Generate canonical-bit consumers and typed-position producers.
 pub fn gen_mapping_interaction_trace(
     trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     preprocessed: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
@@ -1079,56 +1032,13 @@ pub fn gen_mapping_interaction_trace(
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     QM31,
 ) {
-    let cols = QueryMappingColumns::from_iter(trace.iter().map(|column| &column.values.data));
-    let pp = preprocessed
-        .iter()
-        .map(|column| &column.values.data)
-        .collect::<Vec<_>>();
-    let bits = mapping_bits(&cols);
-    let size = cols.enabler.len();
-    let segment = BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf));
-    let binary = BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode));
-    let active = (0..size)
-        .map(|row| {
-            PackedQM31::from(
-                pp[MAPPING_ROW_MASK_COLUMN][row]
-                    * (pp[MAPPING_SEGMENT_MASK_COLUMN][row] * segment
-                        + pp[MAPPING_BINARY_MASK_COLUMN][row] * binary),
-            )
-        })
-        .collect::<Vec<_>>();
-    let negative_active = active.iter().map(|value| -*value).collect::<Vec<_>>();
-    let bits_denominator = (0..size)
-        .map(|row| {
-            let mut tuple = vec![
-                pp[MAPPING_VERIFIER_ID_COLUMN][row],
-                pp[MAPPING_QUERY_COLUMN][row],
-            ];
-            tuple.extend(bits.iter().map(|column| column[row]));
-            query_relations.bits.combine(&tuple)
-        })
-        .collect::<Vec<PackedQM31>>();
-    let position_denominator = (0..size)
-        .map(|row| {
-            query_relations.position.combine(&[
-                pp[MAPPING_VERIFIER_ID_COLUMN][row],
-                pp[MAPPING_KIND_COLUMN][row],
-                pp[MAPPING_ITEM_COLUMN][row],
-                pp[MAPPING_QUERY_COLUMN][row],
-                cols.position[row],
-                cols.offset[row],
-            ])
-        })
-        .collect::<Vec<PackedQM31>>();
-    let mut logup = LogupTraceGenerator::new(trace[0].domain.log_size());
-    write_pair!(
-        &negative_active,
-        &bits_denominator,
-        &active,
-        &position_denominator,
-        logup
-    );
-    logup.finalize_last()
+    query_mapping_dsl::component::witness::gen_interaction_trace(
+        trace,
+        preprocessed,
+        BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        query_relations,
+    )
 }
 
 /// Invalid profile geometry, universal witness, or canonical position.
@@ -1205,7 +1115,7 @@ mod tests {
     use stwo::core::fields::m31::M31;
     use stwo::core::pcs::TreeVec;
     use stwo::core::pcs::utils::prepare_preprocessed_query_positions;
-    use stwo_constraint_framework::assert_constraints_on_polys;
+    use stwo_constraint_framework::{FrameworkEval, Relation, assert_constraints_on_polys};
 
     use super::*;
     use crate::protocol::{OptionalM31Word, PcsParameters};
@@ -1294,12 +1204,12 @@ mod tests {
         );
         let traces = TreeVec::new(vec![preprocessed, trace, interaction]);
         let polys = traces.map_cols(|column| column.interpolate());
-        let eval = BitsEval {
-            log_size: preprocessing.raw_log_size(),
-            proof_kind: kind,
-            randomness_relations,
-            query_relations,
-        };
+        let eval = bits_eval_for_proof_kind(
+            preprocessing.raw_log_size(),
+            kind,
+            &randomness_relations,
+            &query_relations,
+        );
         assert_constraints_on_polys(
             &polys,
             CanonicCoset::new(preprocessing.raw_log_size()),
@@ -1322,11 +1232,8 @@ mod tests {
             gen_mapping_interaction_trace(&trace, &preprocessed, kind, &query_relations);
         let traces = TreeVec::new(vec![preprocessed, trace, interaction]);
         let polys = traces.map_cols(|column| column.interpolate());
-        let eval = MappingEval {
-            log_size: preprocessing.mapping_log_size(),
-            proof_kind: kind,
-            query_relations,
-        };
+        let eval =
+            mapping_eval_for_proof_kind(preprocessing.mapping_log_size(), kind, &query_relations);
         assert_constraints_on_polys(
             &polys,
             CanonicCoset::new(preprocessing.mapping_log_size()),

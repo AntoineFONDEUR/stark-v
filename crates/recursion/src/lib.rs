@@ -5,10 +5,9 @@
 //! expose a complete recursive prover or root-verifier API; `docs/recursion.md`
 //! tracks the remaining integration work.
 //!
-//! The live roster still contains hand-written `FrameworkEval` components
-//! backed by `define_component_tables!`. They are migration debt, not the
-//! accepted recursion architecture: every roster component must move to
-//! `define_air!` or `define_air_fns!` before integration continues.
+//! Every recursion-owned roster component is authored in `define_air!` or
+//! `define_air_fns!`, so its AIR evaluation and interaction witness share one
+//! source definition.
 #![allow(clippy::too_many_arguments)] // generated table push takes one arg per column
 
 pub mod air_expression_circuit;
@@ -84,7 +83,3 @@ mod fri_verifier_binding_tests;
 pub(crate) mod test_fixtures;
 #[cfg(test)]
 mod vm_leaf_binding_tests;
-
-// combine!/write_pair! are used by witness modules.
-#[macro_use]
-extern crate stwo_macros;

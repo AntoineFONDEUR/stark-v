@@ -16,15 +16,9 @@ use stwo::core::fields::qm31::QM31;
 use stwo::core::poly::circle::{CanonicCoset, MAX_CIRCLE_DOMAIN_LOG_SIZE};
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::simd::column::BaseColumn;
-use stwo::prover::backend::simd::m31::PackedM31;
-use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, RelationEntry,
-};
-use stwo_macros::define_component_tables;
 
 use super::control_air::{
     ControlRelations, LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
@@ -55,33 +49,6 @@ const ARG_1_COLUMN: usize = 12;
 const ARG_2_COLUMN: usize = 13;
 const ARG_3_COLUMN: usize = 14;
 const PREPROCESSED_COLUMN_COUNT: usize = 15;
-
-const PREPROCESSED_COLUMN_IDS: [&str; PREPROCESSED_COLUMN_COUNT] = [
-    "recursion_fri_control_row_mask",
-    "recursion_fri_control_segment_mask",
-    "recursion_fri_control_binary_mask",
-    "recursion_fri_control_route_mask",
-    "recursion_fri_control_offset_output_mask",
-    "recursion_fri_control_verifier_id",
-    "recursion_fri_control_route_kind",
-    "recursion_fri_control_item",
-    "recursion_fri_control_query",
-    "recursion_fri_control_sequence",
-    "recursion_fri_control_tag",
-    "recursion_fri_control_arg_0",
-    "recursion_fri_control_arg_1",
-    "recursion_fri_control_arg_2",
-    "recursion_fri_control_arg_3",
-];
-
-define_component_tables! {
-    fri_verifier_control: {
-        committed: { position, offset },
-        constraints: {},
-    },
-}
-
-use prover_columns::FriVerifierControlColumns;
 
 /// One verifier plan and its fixed FRI circuit geometry.
 #[derive(Clone, Copy)]
@@ -175,10 +142,7 @@ impl FriVerifierControlPreprocessed {
     }
 
     pub fn column_ids() -> Vec<PreProcessedColumnId> {
-        PREPROCESSED_COLUMN_IDS
-            .iter()
-            .map(|id| PreProcessedColumnId { id: (*id).into() })
-            .collect()
+        preprocessed_column_ids()
     }
 
     pub fn gen_columns(
@@ -394,118 +358,117 @@ fn into_evaluations(
         .collect()
 }
 
-pub type Component = FrameworkComponent<Eval>;
-
+/// Relations used by the macro-generated FRI control and route adapter.
 #[derive(Clone)]
-pub struct Eval {
-    pub log_size: u32,
-    pub proof_kind: ProofKind,
-    pub control_relations: ControlRelations,
-    pub query_relations: QueryPositionRelations,
-    pub route_relations: FriVerifierRouteRelations,
+pub struct FriVerifierControlComponentRelations {
+    pub control_step: super::control_air::VerifierStepRelation,
+    pub query_position: super::query_position_air::QueryPositionRelation,
+    pub route_word: super::fri_verifier_input_air::FriVerifierRouteWordRelation,
 }
 
-impl FrameworkEval for Eval {
-    fn log_size(&self) -> u32 {
-        self.log_size
+impl FriVerifierControlComponentRelations {
+    /// Combine control-step ownership with atomic and scalar query routes.
+    pub fn new(
+        control_relations: &ControlRelations,
+        query_relations: &QueryPositionRelations,
+        route_relations: &FriVerifierRouteRelations,
+    ) -> Self {
+        Self {
+            control_step: control_relations.step.clone(),
+            query_position: query_relations.position.clone(),
+            route_word: route_relations.word.clone(),
+        }
     }
+}
 
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
+stwo_macros::define_air_fns! {
+    max_degree: 3,
+    embedded: [],
+    embedded_component: true,
+    embedded_enabler_boolean: false,
+    embedded_relations: crate::fri_verifier_control_air::FriVerifierControlComponentRelations,
+    logup_batch: 2,
+    embedded_preprocessed: {
+        row_mask: "recursion_fri_control_row_mask",
+        segment_mask: "recursion_fri_control_segment_mask",
+        binary_mask: "recursion_fri_control_binary_mask",
+        route_mask: "recursion_fri_control_route_mask",
+        offset_output_mask: "recursion_fri_control_offset_output_mask",
+        verifier_id: "recursion_fri_control_verifier_id",
+        route_kind: "recursion_fri_control_route_kind",
+        item: "recursion_fri_control_item",
+        query: "recursion_fri_control_query",
+        sequence: "recursion_fri_control_sequence",
+        tag: "recursion_fri_control_tag",
+        arg_0: "recursion_fri_control_arg_0",
+        arg_1: "recursion_fri_control_arg_1",
+        arg_2: "recursion_fri_control_arg_2",
+        arg_3: "recursion_fri_control_arg_3",
+    },
+    embedded_params: [segment_active, binary_active, position_field, offset_field],
 
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = FriVerifierControlColumns::from_eval(&mut eval);
-        let ids = FriVerifierControlPreprocessed::column_ids();
-        let pp = |eval: &mut E, column: usize| eval.get_preprocessed_column(ids[column].clone());
-        let row_mask = pp(&mut eval, ROW_MASK_COLUMN);
-        let segment_mask = pp(&mut eval, SEGMENT_MASK_COLUMN);
-        let binary_mask = pp(&mut eval, BINARY_MASK_COLUMN);
-        let route_mask = pp(&mut eval, ROUTE_MASK_COLUMN);
-        let offset_output_mask = pp(&mut eval, OFFSET_OUTPUT_MASK_COLUMN);
-        let verifier_id = pp(&mut eval, VERIFIER_ID_COLUMN);
-        let route_kind = pp(&mut eval, ROUTE_KIND_COLUMN);
-        let item = pp(&mut eval, ITEM_COLUMN);
-        let query = pp(&mut eval, QUERY_COLUMN);
-        let sequence = pp(&mut eval, SEQUENCE_COLUMN);
-        let tag = pp(&mut eval, TAG_COLUMN);
-        let arg_0 = pp(&mut eval, ARG_0_COLUMN);
-        let arg_1 = pp(&mut eval, ARG_1_COLUMN);
-        let arg_2 = pp(&mut eval, ARG_2_COLUMN);
-        let arg_3 = pp(&mut eval, ARG_3_COLUMN);
-        let segment = E::F::from(BaseField::from(u32::from(
-            self.proof_kind == ProofKind::SegmentLeaf,
-        )));
-        let binary = E::F::from(BaseField::from(u32::from(
-            self.proof_kind == ProofKind::BinaryNode,
-        )));
-        let active = segment_mask * segment + binary_mask * binary;
-        let one = E::F::from(BaseField::from(1));
+    relation control_step(7);
+    relation query_position(6);
+    relation route_word(6);
 
-        eval.add_constraint(cols.enabler.clone() - row_mask.clone());
-        eval.add_constraint((one.clone() - active.clone()) * cols.position.clone());
-        eval.add_constraint((one - active.clone()) * cols.offset.clone());
-        eval.add_constraint((row_mask.clone() - route_mask.clone()) * cols.position.clone());
-        eval.add_constraint((row_mask.clone() - route_mask.clone()) * cols.offset.clone());
-        eval.add_constraint(
-            (route_mask.clone() - offset_output_mask.clone()) * cols.offset.clone(),
+    fn fri_verifier_control(
+        position, offset,
+        row_mask, segment_mask, binary_mask, route_mask, offset_output_mask,
+        verifier_id, route_kind, item, query, sequence, tag,
+        arg_0, arg_1, arg_2, arg_3,
+        segment_active, binary_active, position_field, offset_field,
+    ) {
+        let active = segment_mask * segment_active + binary_mask * binary_active;
+
+        constrain enabler - row_mask;
+        constrain (1 - active) * position;
+        constrain (1 - active) * offset;
+        constrain (row_mask - route_mask) * position;
+        constrain (row_mask - route_mask) * offset;
+        constrain (route_mask - offset_output_mask) * offset;
+
+        consume(active * row_mask) control_step(
+            verifier_id, sequence, tag, arg_0, arg_1, arg_2, arg_3,
+        );
+        consume(active * route_mask) query_position(
+            verifier_id, route_kind, item, query, position, offset,
+        );
+        emit(active * route_mask) route_word(
+            verifier_id, route_kind, item, query, position_field, position,
+        );
+        emit(active * offset_output_mask) route_word(
+            verifier_id, route_kind, item, query, offset_field, offset,
         );
 
-        eval.add_to_relation(RelationEntry::new(
-            &self.control_relations.step,
-            -E::EF::from(active.clone() * row_mask),
-            &[
-                verifier_id.clone(),
-                sequence,
-                tag,
-                arg_0,
-                arg_1,
-                arg_2,
-                arg_3,
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.query_relations.position,
-            -E::EF::from(active.clone() * route_mask.clone()),
-            &[
-                verifier_id.clone(),
-                route_kind.clone(),
-                item.clone(),
-                query.clone(),
-                cols.position.clone(),
-                cols.offset.clone(),
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.route_relations.word,
-            E::EF::from(active.clone() * route_mask),
-            &[
-                verifier_id.clone(),
-                route_kind.clone(),
-                item.clone(),
-                query.clone(),
-                E::F::from(BaseField::from(FriVerifierRouteField::Position.as_u32())),
-                cols.position,
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.route_relations.word,
-            E::EF::from(active * offset_output_mask),
-            &[
-                verifier_id,
-                route_kind,
-                item,
-                query,
-                E::F::from(BaseField::from(FriVerifierRouteField::Offset.as_u32())),
-                cols.offset,
-            ],
-        ));
-        eval.finalize_logup_in_pairs();
-        eval
+        return (position, offset);
     }
 }
 
-/// Generates control consumers, atomic route consumers, and scalar producers.
+pub use component::air::{Component, Eval};
+
+/// Construct the generated FRI control evaluator for the selected proof kind.
+pub fn eval_for_proof_kind(
+    log_size: u32,
+    proof_kind: ProofKind,
+    control_relations: &ControlRelations,
+    query_relations: &QueryPositionRelations,
+    route_relations: &FriVerifierRouteRelations,
+) -> Eval {
+    Eval {
+        log_size,
+        segment_active: BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        binary_active: BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        position_field: BaseField::from(FriVerifierRouteField::Position.as_u32()),
+        offset_field: BaseField::from(FriVerifierRouteField::Offset.as_u32()),
+        relations: FriVerifierControlComponentRelations::new(
+            control_relations,
+            query_relations,
+            route_relations,
+        ),
+    }
+}
+
+/// Generate control consumers, atomic route consumers, and scalar producers.
 pub fn gen_interaction_trace(
     trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     preprocessed: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
@@ -517,95 +480,19 @@ pub fn gen_interaction_trace(
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     QM31,
 ) {
-    let cols = FriVerifierControlColumns::from_iter(trace.iter().map(|column| &column.values.data));
-    let pp = preprocessed
-        .iter()
-        .map(|column| &column.values.data)
-        .collect::<Vec<_>>();
-    let size = cols.enabler.len();
-    let segment = BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf));
-    let binary = BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode));
-    let active = (0..size)
-        .map(|row| {
-            PackedQM31::from(
-                pp[SEGMENT_MASK_COLUMN][row] * segment + pp[BINARY_MASK_COLUMN][row] * binary,
-            )
-        })
-        .collect::<Vec<_>>();
-    let numerator = |mask: usize, sign: i32| {
-        (0..size)
-            .map(|row| active[row] * pp[mask][row] * BaseField::from(sign))
-            .collect::<Vec<_>>()
-    };
-    let control_numerator = numerator(ROW_MASK_COLUMN, -1);
-    let query_numerator = numerator(ROUTE_MASK_COLUMN, -1);
-    let position_numerator = numerator(ROUTE_MASK_COLUMN, 1);
-    let offset_numerator = numerator(OFFSET_OUTPUT_MASK_COLUMN, 1);
-    let position_field =
-        vec![PackedM31::broadcast(BaseField::from(FriVerifierRouteField::Position.as_u32())); size];
-    let offset_field =
-        vec![PackedM31::broadcast(BaseField::from(FriVerifierRouteField::Offset.as_u32())); size];
-    let control_denominator = combine!(
-        control_relations.step,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            pp[SEQUENCE_COLUMN],
-            pp[TAG_COLUMN],
-            pp[ARG_0_COLUMN],
-            pp[ARG_1_COLUMN],
-            pp[ARG_2_COLUMN],
-            pp[ARG_3_COLUMN]
-        ]
-    );
-    let query_denominator = combine!(
-        query_relations.position,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            pp[ROUTE_KIND_COLUMN],
-            pp[ITEM_COLUMN],
-            pp[QUERY_COLUMN],
-            cols.position,
-            cols.offset
-        ]
-    );
-    let position_denominator = combine!(
-        route_relations.word,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            pp[ROUTE_KIND_COLUMN],
-            pp[ITEM_COLUMN],
-            pp[QUERY_COLUMN],
-            position_field,
-            cols.position
-        ]
-    );
-    let offset_denominator = combine!(
-        route_relations.word,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            pp[ROUTE_KIND_COLUMN],
-            pp[ITEM_COLUMN],
-            pp[QUERY_COLUMN],
-            offset_field,
-            cols.offset
-        ]
-    );
-    let mut logup = LogupTraceGenerator::new(trace[0].domain.log_size());
-    write_pair!(
-        &control_numerator,
-        &control_denominator,
-        &query_numerator,
-        &query_denominator,
-        logup
-    );
-    write_pair!(
-        &position_numerator,
-        &position_denominator,
-        &offset_numerator,
-        &offset_denominator,
-        logup
-    );
-    logup.finalize_last()
+    component::witness::gen_interaction_trace(
+        trace,
+        preprocessed,
+        BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        BaseField::from(FriVerifierRouteField::Position.as_u32()),
+        BaseField::from(FriVerifierRouteField::Offset.as_u32()),
+        &FriVerifierControlComponentRelations::new(
+            control_relations,
+            query_relations,
+            route_relations,
+        ),
+    )
 }
 
 /// Materializes trusted routes from canonical raw queries for the active mode.
@@ -740,7 +627,7 @@ impl std::error::Error for FriVerifierControlError {}
 mod tests {
     use rstest::rstest;
     use stwo::core::pcs::TreeVec;
-    use stwo_constraint_framework::assert_constraints_on_polys;
+    use stwo_constraint_framework::{FrameworkEval, assert_constraints_on_polys};
 
     use super::*;
     use crate::kernel::VerifierProgramSpec;
@@ -870,13 +757,13 @@ mod tests {
         let log_size = preprocessed[0].domain.log_size();
         let traces = TreeVec::new(vec![preprocessed, trace, interaction]);
         let trace_polys = traces.map_cols(|column| column.interpolate());
-        let eval = Eval {
+        let eval = eval_for_proof_kind(
             log_size,
-            proof_kind: kind,
-            control_relations,
-            query_relations,
-            route_relations,
-        };
+            kind,
+            &control_relations,
+            &query_relations,
+            &route_relations,
+        );
         assert_constraints_on_polys(
             &trace_polys,
             CanonicCoset::new(eval.log_size),

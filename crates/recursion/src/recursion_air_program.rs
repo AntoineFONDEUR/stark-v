@@ -8,14 +8,11 @@
 //! lowers this evaluation into the shared arithmetic tables, so the metadata
 //! here also sizes those tables.
 //!
-//! Unlike the VM program, the universal components are hand-written and have
-//! no macro-generated dynamic-relation evaluator, and `RelationEntry` fields
-//! are private outside the constraint framework, so formal relation
-//! parameters cannot be injected through `add_to_relation`. The circuit path
-//! therefore compiles each component once through `ExprEvaluator` — the same
-//! `FrameworkEval::evaluate` implementation that drives proving — and replays
-//! the resulting formal expression program over circuit wires via
-//! [`super::air_expression_circuit`]. No constraint is ever transcribed.
+//! The circuit path compiles each macro-generated component once through
+//! `ExprEvaluator` using the same `FrameworkEval::evaluate` implementation
+//! that drives proving. It then replays the resulting formal expression
+//! program over circuit wires via [`super::air_expression_circuit`], avoiding
+//! any separately transcribed constraint system.
 
 use core::fmt;
 use std::collections::HashMap;
@@ -911,109 +908,109 @@ impl RosterCollector {
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[20], claimed_sum(), {
             let log_size = log_size();
-            super::query_position_air::BitsEval {
+            super::query_position_air::bits_eval_for_proof_kind(
                 log_size,
-                proof_kind: kind,
-                randomness_relations: relations.verifier_randomness.clone(),
-                query_relations: relations.query_position.clone(),
-            }
+                kind,
+                &relations.verifier_randomness,
+                &relations.query_position,
+            )
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[21], claimed_sum(), {
             let log_size = log_size();
-            super::query_position_air::MappingEval {
+            super::query_position_air::mapping_eval_for_proof_kind(
                 log_size,
-                proof_kind: kind,
-                query_relations: relations.query_position.clone(),
-            }
+                kind,
+                &relations.query_position,
+            )
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[22], claimed_sum(), {
             let log_size = log_size();
-            super::merkle_root_air::Eval {
+            super::merkle_root_air::eval_for_proof_kind(
                 log_size,
-                proof_kind: kind,
-                verifier_input_relations: relations.verifier_input.clone(),
-                recursion_relations: relations.recursion.clone(),
-            }
+                kind,
+                &relations.verifier_input,
+                &relations.recursion,
+            )
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[23], claimed_sum(), {
             let log_size = log_size();
-            super::trace_merkle_air::Eval {
+            super::trace_merkle_air::eval_for_proof_kind(
                 log_size,
-                proof_kind: kind,
-                vm_relations: relations.vm.clone(),
-                control_relations: relations.control.clone(),
-                query_relations: relations.query_position.clone(),
-                trace_relations: relations.trace_merkle.clone(),
-                recursion_relations: relations.recursion.clone(),
-            }
+                kind,
+                &relations.vm,
+                &relations.control,
+                &relations.query_position,
+                &relations.trace_merkle,
+                &relations.recursion,
+            )
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[24], claimed_sum(), {
             let log_size = log_size();
-            super::pcs_deep_input_air::Eval {
+            super::pcs_deep_input_air::eval_for_proof_kind(
                 log_size,
-                proof_kind: kind,
-                verifier_input_relations: relations.verifier_input.clone(),
-                trace_relations: relations.trace_merkle.clone(),
-                randomness_relations: relations.verifier_randomness.clone(),
-                query_relations: relations.query_position.clone(),
-                deep_relations: relations.pcs_deep.clone(),
-                circuit_relations: relations.recursion.clone(),
-            }
+                kind,
+                &relations.verifier_input,
+                &relations.trace_merkle,
+                &relations.verifier_randomness,
+                &relations.query_position,
+                &relations.pcs_deep,
+                &relations.recursion,
+            )
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[25], claimed_sum(), {
             let log_size = log_size();
-            super::fri_merkle_air::LeafEval {
+            super::fri_merkle_air::leaf_eval_for_proof_kind(
                 log_size,
-                proof_kind: kind,
-                vm_relations: relations.vm.clone(),
-                fri_relations: relations.fri_merkle.clone(),
-                recursion_relations: relations.recursion.clone(),
-            }
+                kind,
+                &relations.vm,
+                &relations.fri_merkle,
+                &relations.recursion,
+            )
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[26], claimed_sum(), {
             let log_size = log_size();
-            super::fri_merkle_air::NodeEval {
+            super::fri_merkle_air::node_eval_for_proof_kind(
                 log_size,
-                proof_kind: kind,
-                vm_relations: relations.vm.clone(),
-                fri_relations: relations.fri_merkle.clone(),
-                recursion_relations: relations.recursion.clone(),
-            }
+                kind,
+                &relations.vm,
+                &relations.fri_merkle,
+                &relations.recursion,
+            )
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[27], claimed_sum(), {
             let log_size = log_size();
-            super::fri_merkle_air::AnchorEval {
+            super::fri_merkle_air::anchor_eval_for_proof_kind(
                 log_size,
-                proof_kind: kind,
-                control_relations: relations.control.clone(),
-                query_relations: relations.query_position.clone(),
-                fri_relations: relations.fri_merkle.clone(),
-                recursion_relations: relations.recursion.clone(),
-            }
+                kind,
+                &relations.control,
+                &relations.query_position,
+                &relations.fri_merkle,
+                &relations.recursion,
+            )
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[28], claimed_sum(), {
             let log_size = log_size();
-            super::fri_verifier_control_air::Eval {
+            super::fri_verifier_control_air::eval_for_proof_kind(
                 log_size,
-                proof_kind: kind,
-                control_relations: relations.control.clone(),
-                query_relations: relations.query_position.clone(),
-                route_relations: relations.fri_verifier_route.clone(),
-            }
+                kind,
+                &relations.control,
+                &relations.query_position,
+                &relations.fri_verifier_route,
+            )
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[29], claimed_sum(), {
             let log_size = log_size();
-            super::fri_verifier_input_air::Eval {
+            super::fri_verifier_input_air::eval_for_proof_kind(
                 log_size,
-                proof_kind: kind,
-                verifier_input_relations: relations.verifier_input.clone(),
-                randomness_relations: relations.verifier_randomness.clone(),
-                query_relations: relations.query_position.clone(),
-                deep_relations: relations.pcs_deep.clone(),
-                fri_merkle_relations: relations.fri_merkle.clone(),
-                route_relations: relations.fri_verifier_route.clone(),
-                circuit_relations: relations.recursion.clone(),
-            }
+                kind,
+                &relations.verifier_input,
+                &relations.verifier_randomness,
+                &relations.query_position,
+                &relations.pcs_deep,
+                &relations.fri_merkle,
+                &relations.fri_verifier_route,
+                &relations.recursion,
+            )
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[30], claimed_sum(), {
             let log_size = log_size();

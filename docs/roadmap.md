@@ -157,8 +157,17 @@ set.
     capacities, and a 3,080,316-byte universal proof wire.
   - Evidence: commit `b0a3f2ae`; focused profile, manifest mutation, macro,
     recursion, full release workspace, and repository hook suites passed.
-- `[active] REC-001` Adapt a real VM proof to the recursive leaf wire.
-- `[pending] REC-002` Build the universal trace assembler.
+- `[done] REC-001` Adapt a real VM proof to the recursive leaf wire.
+  - The fixed-layout Poseidon prover retains STWO's authenticated expansion maps
+    long enough to materialize all 193 independent raw-query slots, while the
+    ordinary prover keeps its compact in-memory behavior.
+  - The adapter checks the frozen geometry, canonical public claim, runner
+    boundary, job identity, segment slot, cycle interval, and every trace and
+    FRI opening before producing the fixed leaf input.
+  - Evidence: commit `93dc88b3`; focused real-proof, malformed metadata, fixed
+    wire, fixed trace, macro, clippy, full recursion, full release workspace,
+    and repository hook suites passed.
+- `[active] REC-002` Build the universal trace assembler.
 - `[pending] REC-003` Close the segment-leaf branch end to end.
 - `[pending] REC-004` Close the canonical empty-leaf branch.
 - `[pending] REC-005` Implement the outer recursion prover and verifier.
@@ -323,14 +332,14 @@ Done when native and AIR manifest encodings have the same digest, every field
 mutation changes the identity or fails validation, and the profile is tested,
 committed, and pushed.
 
-### `[active] REC-001` Real VM-proof adapter
+### `[done] REC-001` Real VM-proof adapter
 
 Dependencies: `PRO-001`.
 
 Required work:
 
-1. Convert `prover::Proof<Poseidon2M31Hash>` and authenticated public data into
-   the fixed segment-leaf wire.
+1. Convert `prover::Proof<Poseidon2M31MerkleHasher>` and authenticated public
+   data into the fixed segment-leaf wire.
 2. Derive the exact height-zero span from the public claim, job context, segment
    index, and cycle interval.
 3. Reject capacity overflow, non-canonical optional roots, and disagreement
@@ -339,7 +348,7 @@ Required work:
 Done when a real proof round-trips and one focused test rejects each malformed
 wire or metadata field.
 
-### `[pending] REC-002` Universal trace assembler
+### `[active] REC-002` Universal trace assembler
 
 Dependencies: `REC-001`.
 
@@ -722,9 +731,35 @@ commands run, observed test counts or measurements, and the pushed commit.
   tests passed.
 - `cargo test --release --workspace`: passed in 200.72 seconds.
 - `prek run --all-files`: passed.
-- Protocol identifier limbs:
-  `[1652171419, 1590417197, 197779048, 927218326, 675052838, 980679464, 1483989404, 1842475866]`.
+- Current protocol identifier limbs are recorded by the active profile
+  conformance test. A real finalized VM segment requires log-size 11 capacity
+  for its program, memory, Merkle, and Poseidon2 commitment tables; changing
+  that geometry changes the identifier.
 - Commit `b0a3f2ae` pushed to `origin/chore/scratchpad-cleanups`.
+
+### `REC-001` — 2026-08-04
+
+- `cargo test --release -p recursion segment_leaf::tests::`: 13 passed in 55.00
+  seconds, including one real Poseidon VM proof and independent malformed proof,
+  public-claim, runner-boundary, protocol, slot, and cycle cases.
+- `cargo test --release -p recursion wire::tests::`: 24 fixed-wire round-trip
+  and malformed-encoding tests passed.
+- `cargo test --release -p prover --lib fixed_trace_generation_`: 2
+  verifier-owned geometry tests passed.
+- `cargo test --release -p prover --test integration test_prove_verify_poseidon2_channel -- --exact`:
+  the ordinary Poseidon proof verified without retaining recursion-only
+  expansion maps.
+- `cargo test --release -p recursion`: 609 unit and 5 structural integration
+  tests passed in 55.66 seconds.
+- `cargo test --release -p stwo-macros`: 25 integration tests passed; 11
+  documentation tests remained intentionally ignored.
+- `cargo clippy --release -p stwo-macros -p air -p prover -p recursion --all-targets --no-deps -- -D warnings`:
+  passed.
+- `cargo test --release --workspace`: passed in 271.02 seconds.
+- `prek run --all-files`: passed.
+- Protocol identifier limbs:
+  `[1944644389, 1135441973, 1743486779, 1673021574, 1185365817, 1671132422, 875754423, 1496784385]`.
+- Commit `93dc88b3` pushed to `origin/chore/scratchpad-cleanups`.
 
 ## Project finish line
 

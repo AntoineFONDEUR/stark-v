@@ -124,8 +124,19 @@ set.
   - Evidence: commit `16ac9d55`; malformed wire, statement substitution,
     inactive-input, hash-domain, sponge-state, lane-swap, circuit-ownership,
     macro, and full recursion tests passed; repository hooks passed.
-- `[active] AIR-005` Migrate recursion PCS and FRI components.
-- `[pending] AIR-006` Enforce zero handwritten recursion AIRs.
+- `[done] AIR-005` Migrate recursion PCS and FRI components.
+  - Query decomposition and mapping, Merkle roots and openings, PCS DEEP inputs,
+    FRI subtree authentication, FRI control, and FRI circuit inputs now derive
+    their tables, evaluators, and interactions from direct `define_air_fns!`
+    definitions.
+  - Trusted preprocessing fixes proof-shape geometry, verifier lanes, query
+    routes, and FRI endpoint masks; committed columns contain only
+    proof-dependent values.
+  - Handwritten recursion evaluators decreased from 10 to zero.
+  - Evidence: commit `6bfdb9d7`; focused query, root, opening, FRI-width, route,
+    and final-value tests, the macro suite, the full recursion suite, structural
+    inventories, and repository hooks passed.
+- `[active] AIR-006` Enforce zero handwritten recursion AIRs.
 - `[pending] PRO-001` Freeze the first recursive protocol profile.
 - `[pending] REC-001` Adapt a real VM proof to the recursive leaf wire.
 - `[pending] REC-002` Build the universal trace assembler.
@@ -145,10 +156,12 @@ set.
 
 ## Macro-only recursion migration
 
-The live universal roster contains 36 components. `poseidon2` already uses
-`define_air_fns!`, and `range_check_8_8` already uses `define_air!`. The other
-34 source evaluators are migration debt. No `PRO-*` or `REC-*` task may start
-until `AIR-006` is done.
+The live universal roster contains 36 components. Every recursion-owned
+component now uses `define_air!` or `define_air_fns!`; `poseidon2` and
+`range_check_8_8` use the same accepted DSL in their owning crates. `AIR-006`
+must verify the complete reachable dependency graph and make this invariant
+structurally enforced. No `PRO-*` or `REC-*` task may start until `AIR-006` is
+done.
 
 ### `[done] AIR-001` Shared primitives
 
@@ -233,7 +246,7 @@ Done when all eight components are macro-generated, malformed-wire and
 statement-substitution tests pass, the manual inventory is 10, and the milestone
 is tested, committed, and pushed.
 
-### `[active] AIR-005` PCS and FRI family
+### `[done] AIR-005` PCS and FRI family
 
 Dependencies: `AIR-004`.
 
@@ -252,7 +265,7 @@ Required work:
 Done when all ten components are macro-generated, the manual inventory is zero,
 and the milestone is tested, committed, and pushed.
 
-### `[pending] AIR-006` Zero-manual-AIR enforcement
+### `[active] AIR-006` Zero-manual-AIR enforcement
 
 Dependencies: `AIR-005`.
 
@@ -632,6 +645,37 @@ commands run, observed test counts or measurements, and the pushed commit.
   18 matches.
 - `prek run --all-files`: passed.
 - Commit `9ca4fd1d` pushed to `origin/chore/scratchpad-cleanups`.
+
+### `AIR-004` — 2026-08-04
+
+- Focused statement, VM-claim, public-IO, public-LogUp, and VM-composition
+  adapter release tests passed.
+- `cargo test --release -p stwo-macros`: 25 integration tests passed; 11
+  documentation tests remained intentionally ignored.
+- `cargo test --release -p recursion`: 589 passed.
+- `sg -p 'impl FrameworkEval for $TYPE { $$$BODY }' -l rust --json=compact crates/recursion/src`:
+  10 matches.
+- `prek run --all-files`: passed.
+- Commit `16ac9d55` pushed to `origin/chore/scratchpad-cleanups`.
+
+### `AIR-005` — 2026-08-04
+
+- `cargo test --release -p recursion query_position_air::tests`: 12 passed.
+- `cargo test --release -p recursion merkle_root_air::tests`: 6 passed.
+- `cargo test --release -p recursion trace_merkle_air::tests`: 10 passed.
+- `cargo test --release -p recursion pcs_deep_input_air::tests`: 6 passed.
+- `cargo test --release -p recursion fri_merkle_air::tests`: 24 passed.
+- `cargo test --release -p recursion fri_verifier_control_air::tests`: 5 passed.
+- `cargo test --release -p recursion fri_verifier_input_air::tests`: 6 passed.
+- `cargo test --release -p stwo-macros`: 25 integration tests passed; 11
+  documentation tests remained intentionally ignored.
+- `cargo test --release -p recursion`: 589 passed in 48.70 seconds.
+- `sg -p 'impl FrameworkEval for $TYPE { $$$BODY }' -l rust --json=compact crates/recursion/src`:
+  zero matches.
+- `rg -n 'define_component_tables!|define_component_tables' crates/recursion/src`:
+  zero matches.
+- `prek run --all-files`: passed.
+- Commit `6bfdb9d7` pushed to `origin/chore/scratchpad-cleanups`.
 
 ## Project finish line
 

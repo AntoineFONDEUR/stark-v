@@ -112,8 +112,19 @@ set.
   - Evidence: commit `9ca4fd1d`; independent changed, missing, duplicated, and
     reordered payload tests, the macro suite, the recursion library suite, and
     repository hooks passed.
-- `[active] AIR-004` Migrate statement and VM-public-input adapters.
-- `[pending] AIR-005` Migrate recursion PCS and FRI components.
+- `[done] AIR-004` Migrate statement and VM-public-input adapters.
+  - Statement words, statement-semantic inputs, canonical VM claim words, claim
+    and public-IO hashes, claim-semantic inputs, public-LogUp inputs, and
+    VM-composition inputs derive their tables, evaluators, and interactions from
+    `define_air_fns!`.
+  - Trusted schedules remain preprocessing; proof-kind selectors and protocol
+    tags remain verifier-owned fixed parameters; committed columns contain only
+    proof-dependent values.
+  - Handwritten recursion evaluators decreased from 18 to 10.
+  - Evidence: commit `16ac9d55`; malformed wire, statement substitution,
+    inactive-input, hash-domain, sponge-state, lane-swap, circuit-ownership,
+    macro, and full recursion tests passed; repository hooks passed.
+- `[active] AIR-005` Migrate recursion PCS and FRI components.
 - `[pending] AIR-006` Enforce zero handwritten recursion AIRs.
 - `[pending] PRO-001` Freeze the first recursive protocol profile.
 - `[pending] REC-001` Adapt a real VM proof to the recursive leaf wire.
@@ -202,7 +213,7 @@ Done when all nine components are macro-generated, native and AIR transcript
 vectors agree, the manual inventory is 18, and the milestone is tested,
 committed, and pushed.
 
-### `[active] AIR-004` Statement and VM adapters
+### `[done] AIR-004` Statement and VM adapters
 
 Dependencies: `AIR-003`.
 
@@ -222,7 +233,7 @@ Done when all eight components are macro-generated, malformed-wire and
 statement-substitution tests pass, the manual inventory is 10, and the milestone
 is tested, committed, and pushed.
 
-### `[pending] AIR-005` PCS and FRI family
+### `[active] AIR-005` PCS and FRI family
 
 Dependencies: `AIR-004`.
 

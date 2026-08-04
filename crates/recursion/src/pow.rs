@@ -14,204 +14,14 @@ use stwo::core::channel::Channel;
 use stwo::core::fields::m31::BaseField;
 use stwo::core::fields::qm31::QM31;
 use stwo::prover::backend::simd::SimdBackend;
-use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::CircleEvaluation;
-use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, RelationEntry, relation,
-};
-use stwo_macros::define_component_tables;
+use stwo_constraint_framework::relation;
 
 use super::transcript::PowCheck;
 use super::transcript_binding_air::TranscriptBindingRelations;
 
 const M31_BITS: usize = 31;
-
-define_component_tables! {
-    pow_check: {
-        committed: {
-            verifier_id, pow_kind, call_id, bits, word,
-            word_bit_0, word_bit_1, word_bit_2, word_bit_3,
-            word_bit_4, word_bit_5, word_bit_6, word_bit_7,
-            word_bit_8, word_bit_9, word_bit_10, word_bit_11,
-            word_bit_12, word_bit_13, word_bit_14, word_bit_15,
-            word_bit_16, word_bit_17, word_bit_18, word_bit_19,
-            word_bit_20, word_bit_21, word_bit_22, word_bit_23,
-            word_bit_24, word_bit_25, word_bit_26, word_bit_27,
-            word_bit_28, word_bit_29, word_bit_30,
-            active_0, active_1, active_2, active_3,
-            active_4, active_5, active_6, active_7,
-            active_8, active_9, active_10, active_11,
-            active_12, active_13, active_14, active_15,
-            active_16, active_17, active_18, active_19,
-            active_20, active_21, active_22, active_23,
-            active_24, active_25, active_26, active_27,
-            active_28, active_29, active_30,
-        },
-        constraints: {
-            word_bit_0 * (1 - word_bit_0),
-            word_bit_1 * (1 - word_bit_1),
-            word_bit_2 * (1 - word_bit_2),
-            word_bit_3 * (1 - word_bit_3),
-            word_bit_4 * (1 - word_bit_4),
-            word_bit_5 * (1 - word_bit_5),
-            word_bit_6 * (1 - word_bit_6),
-            word_bit_7 * (1 - word_bit_7),
-            word_bit_8 * (1 - word_bit_8),
-            word_bit_9 * (1 - word_bit_9),
-            word_bit_10 * (1 - word_bit_10),
-            word_bit_11 * (1 - word_bit_11),
-            word_bit_12 * (1 - word_bit_12),
-            word_bit_13 * (1 - word_bit_13),
-            word_bit_14 * (1 - word_bit_14),
-            word_bit_15 * (1 - word_bit_15),
-            word_bit_16 * (1 - word_bit_16),
-            word_bit_17 * (1 - word_bit_17),
-            word_bit_18 * (1 - word_bit_18),
-            word_bit_19 * (1 - word_bit_19),
-            word_bit_20 * (1 - word_bit_20),
-            word_bit_21 * (1 - word_bit_21),
-            word_bit_22 * (1 - word_bit_22),
-            word_bit_23 * (1 - word_bit_23),
-            word_bit_24 * (1 - word_bit_24),
-            word_bit_25 * (1 - word_bit_25),
-            word_bit_26 * (1 - word_bit_26),
-            word_bit_27 * (1 - word_bit_27),
-            word_bit_28 * (1 - word_bit_28),
-            word_bit_29 * (1 - word_bit_29),
-            word_bit_30 * (1 - word_bit_30),
-            active_0 * (1 - active_0),
-            active_1 * (1 - active_1),
-            active_2 * (1 - active_2),
-            active_3 * (1 - active_3),
-            active_4 * (1 - active_4),
-            active_5 * (1 - active_5),
-            active_6 * (1 - active_6),
-            active_7 * (1 - active_7),
-            active_8 * (1 - active_8),
-            active_9 * (1 - active_9),
-            active_10 * (1 - active_10),
-            active_11 * (1 - active_11),
-            active_12 * (1 - active_12),
-            active_13 * (1 - active_13),
-            active_14 * (1 - active_14),
-            active_15 * (1 - active_15),
-            active_16 * (1 - active_16),
-            active_17 * (1 - active_17),
-            active_18 * (1 - active_18),
-            active_19 * (1 - active_19),
-            active_20 * (1 - active_20),
-            active_21 * (1 - active_21),
-            active_22 * (1 - active_22),
-            active_23 * (1 - active_23),
-            active_24 * (1 - active_24),
-            active_25 * (1 - active_25),
-            active_26 * (1 - active_26),
-            active_27 * (1 - active_27),
-            active_28 * (1 - active_28),
-            active_29 * (1 - active_29),
-            active_30 * (1 - active_30),
-            word - (
-                word_bit_0 + 2 * word_bit_1 + 4 * word_bit_2 + 8 * word_bit_3
-                + 16 * word_bit_4 + 32 * word_bit_5 + 64 * word_bit_6
-                + 128 * word_bit_7 + 256 * word_bit_8 + 512 * word_bit_9
-                + 1024 * word_bit_10 + 2048 * word_bit_11 + 4096 * word_bit_12
-                + 8192 * word_bit_13 + 16384 * word_bit_14 + 32768 * word_bit_15
-                + 65536 * word_bit_16 + 131072 * word_bit_17
-                + 262144 * word_bit_18 + 524288 * word_bit_19
-                + 1048576 * word_bit_20 + 2097152 * word_bit_21
-                + 4194304 * word_bit_22 + 8388608 * word_bit_23
-                + 16777216 * word_bit_24 + 33554432 * word_bit_25
-                + 67108864 * word_bit_26 + 134217728 * word_bit_27
-                + 268435456 * word_bit_28 + 536870912 * word_bit_29
-                + 1073741824 * word_bit_30
-            ),
-            (1 - active_0) * active_1,
-            (1 - active_1) * active_2,
-            (1 - active_2) * active_3,
-            (1 - active_3) * active_4,
-            (1 - active_4) * active_5,
-            (1 - active_5) * active_6,
-            (1 - active_6) * active_7,
-            (1 - active_7) * active_8,
-            (1 - active_8) * active_9,
-            (1 - active_9) * active_10,
-            (1 - active_10) * active_11,
-            (1 - active_11) * active_12,
-            (1 - active_12) * active_13,
-            (1 - active_13) * active_14,
-            (1 - active_14) * active_15,
-            (1 - active_15) * active_16,
-            (1 - active_16) * active_17,
-            (1 - active_17) * active_18,
-            (1 - active_18) * active_19,
-            (1 - active_19) * active_20,
-            (1 - active_20) * active_21,
-            (1 - active_21) * active_22,
-            (1 - active_22) * active_23,
-            (1 - active_23) * active_24,
-            (1 - active_24) * active_25,
-            (1 - active_25) * active_26,
-            (1 - active_26) * active_27,
-            (1 - active_27) * active_28,
-            (1 - active_28) * active_29,
-            (1 - active_29) * active_30,
-            bits - (
-                active_0 + active_1 + active_2 + active_3 + active_4
-                + active_5 + active_6 + active_7 + active_8 + active_9
-                + active_10 + active_11 + active_12 + active_13 + active_14
-                + active_15 + active_16 + active_17 + active_18 + active_19
-                + active_20 + active_21 + active_22 + active_23 + active_24
-                + active_25 + active_26 + active_27 + active_28 + active_29
-                + active_30
-            ),
-            active_0 * word_bit_0,
-            active_1 * word_bit_1,
-            active_2 * word_bit_2,
-            active_3 * word_bit_3,
-            active_4 * word_bit_4,
-            active_5 * word_bit_5,
-            active_6 * word_bit_6,
-            active_7 * word_bit_7,
-            active_8 * word_bit_8,
-            active_9 * word_bit_9,
-            active_10 * word_bit_10,
-            active_11 * word_bit_11,
-            active_12 * word_bit_12,
-            active_13 * word_bit_13,
-            active_14 * word_bit_14,
-            active_15 * word_bit_15,
-            active_16 * word_bit_16,
-            active_17 * word_bit_17,
-            active_18 * word_bit_18,
-            active_19 * word_bit_19,
-            active_20 * word_bit_20,
-            active_21 * word_bit_21,
-            active_22 * word_bit_22,
-            active_23 * word_bit_23,
-            active_24 * word_bit_24,
-            active_25 * word_bit_25,
-            active_26 * word_bit_26,
-            active_27 * word_bit_27,
-            active_28 * word_bit_28,
-            active_29 * word_bit_29,
-            active_30 * word_bit_30,
-        },
-    },
-    pow_frame: {
-        committed: {
-            verifier_id, sequence, pow_kind, hash_id, call_id, bits,
-            word_0, word_1, word_2, word_3,
-            word_4, word_5, word_6, word_7,
-        },
-        constraints: {
-            // Only the two protocol-owned PoW rounds are representable.
-            enabler * (pow_kind - 1) * (pow_kind - 2),
-        },
-    },
-}
-
-use prover_columns::{PowCheckColumns, PowFrameColumns};
 
 relation!(PowCheckRelation, 5);
 
@@ -249,101 +59,119 @@ impl PowRelations {
     }
 }
 
-pub type Component = FrameworkComponent<Eval>;
-pub type FrameComponent = FrameworkComponent<FrameEval>;
+mod pow_check_dsl {
+    stwo_macros::define_air_fns! {
+        max_degree: 3,
+        embedded: [],
+        embedded_component: true,
+        embedded_relations: crate::pow::PowRelations,
+        logup_batch: 1,
 
-#[derive(Clone)]
-pub struct Eval {
-    pub log_size: u32,
-    pub relations: PowRelations,
-}
+        relation check(5);
 
-impl FrameworkEval for Eval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
+        fn pow_check(
+            verifier_id, pow_kind, call_id, bits, word,
+            word_bit: [felt; 31],
+            active: [felt; 31],
+        ) {
+            for bit in 0..31 {
+                constrain word_bit[bit] * (1 - word_bit[bit]);
+                constrain active[bit] * (1 - active[bit]);
+                constrain active[bit] * word_bit[bit];
+            }
+            for bit in 0..30 {
+                constrain (1 - active[bit]) * active[bit + 1];
+            }
+            constrain word - (
+                word_bit[0] + 2 * word_bit[1] + 4 * word_bit[2] + 8 * word_bit[3]
+                + 16 * word_bit[4] + 32 * word_bit[5] + 64 * word_bit[6]
+                + 128 * word_bit[7] + 256 * word_bit[8] + 512 * word_bit[9]
+                + 1024 * word_bit[10] + 2048 * word_bit[11] + 4096 * word_bit[12]
+                + 8192 * word_bit[13] + 16384 * word_bit[14] + 32768 * word_bit[15]
+                + 65536 * word_bit[16] + 131072 * word_bit[17]
+                + 262144 * word_bit[18] + 524288 * word_bit[19]
+                + 1048576 * word_bit[20] + 2097152 * word_bit[21]
+                + 4194304 * word_bit[22] + 8388608 * word_bit[23]
+                + 16777216 * word_bit[24] + 33554432 * word_bit[25]
+                + 67108864 * word_bit[26] + 134217728 * word_bit[27]
+                + 268435456 * word_bit[28] + 536870912 * word_bit[29]
+                + 1073741824 * word_bit[30]
+            );
+            constrain bits - sum(bit, 0..31, active[bit]);
 
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
+            consume(enabler) check(verifier_id, pow_kind, call_id, bits, word);
 
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = PowCheckColumns::from_eval(&mut eval);
-        for constraint in cols.constraints() {
-            eval.add_constraint(constraint);
+            return word;
         }
-        eval.add_to_relation(RelationEntry::new(
-            &self.relations.check,
-            -E::EF::from(cols.enabler.clone()),
-            &[
-                cols.verifier_id.clone(),
-                cols.pow_kind.clone(),
-                cols.call_id.clone(),
-                cols.bits.clone(),
-                cols.word.clone(),
-            ],
-        ));
-        eval.finalize_logup();
-        eval
     }
 }
 
-/// Connects one transcript-owned PoW frame to the arithmetic predicate.
+/// Relation instances shared by the transcript-frame and arithmetic PoW AIRs.
 #[derive(Clone)]
-pub struct FrameEval {
-    pub log_size: u32,
-    pub pow_relations: PowRelations,
-    pub binding_relations: TranscriptBindingRelations,
+pub struct PowFrameRelations {
+    pub check: PowCheckRelation,
+    pub pow_frame: super::transcript_binding_air::TranscriptPowFrameRelation,
 }
 
-impl FrameworkEval for FrameEval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
-
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
-
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = PowFrameColumns::from_eval(&mut eval);
-        for constraint in cols.constraints() {
-            eval.add_constraint(constraint);
+impl PowFrameRelations {
+    /// Combine the PoW predicate and transcript-frame relation instances.
+    pub fn new(
+        pow_relations: &PowRelations,
+        binding_relations: &TranscriptBindingRelations,
+    ) -> Self {
+        Self {
+            check: pow_relations.check.clone(),
+            pow_frame: binding_relations.pow_frame.clone(),
         }
-        let pow_tag = cols.pow_kind.clone() * BaseField::from(14) - E::F::from(BaseField::from(8));
-        eval.add_to_relation(RelationEntry::new(
-            &self.binding_relations.pow_frame,
-            -E::EF::from(cols.enabler.clone()),
-            &[
-                cols.verifier_id.clone(),
-                cols.sequence.clone(),
-                pow_tag,
-                cols.hash_id.clone(),
-                cols.call_id.clone(),
-                cols.bits.clone(),
-                cols.word_0.clone(),
-                cols.word_1.clone(),
-                cols.word_2.clone(),
-                cols.word_3.clone(),
-                cols.word_4.clone(),
-                cols.word_5.clone(),
-                cols.word_6.clone(),
-                cols.word_7.clone(),
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.pow_relations.check,
-            E::EF::from(cols.enabler.clone()),
-            &[
-                cols.verifier_id.clone(),
-                cols.pow_kind.clone(),
-                cols.call_id.clone(),
-                cols.bits.clone(),
-                cols.word_0.clone(),
-            ],
-        ));
-        eval.finalize_logup_in_pairs();
-        eval
+    }
+}
+
+mod pow_frame_dsl {
+    stwo_macros::define_air_fns! {
+        max_degree: 3,
+        embedded: [],
+        embedded_component: true,
+        embedded_relations: crate::pow::PowFrameRelations,
+        logup_batch: 2,
+
+        relation pow_frame(14);
+        relation check(5);
+
+        fn pow_frame(
+            verifier_id, sequence, pow_kind, hash_id, call_id, bits,
+            word_0, word_1, word_2, word_3,
+            word_4, word_5, word_6, word_7,
+        ) {
+            let pow_tag = pow_kind * 14 - 8;
+
+            constrain enabler * (pow_kind - 1) * (pow_kind - 2);
+
+            consume(enabler) pow_frame(
+                verifier_id, sequence, pow_tag, hash_id, call_id, bits,
+                word_0, word_1, word_2, word_3,
+                word_4, word_5, word_6, word_7,
+            );
+            emit(enabler) check(verifier_id, pow_kind, call_id, bits, word_0);
+
+            return word_0;
+        }
+    }
+}
+
+pub use pow_check_dsl::PowCheckTable;
+pub use pow_check_dsl::component::air::{Component, Eval};
+pub use pow_frame_dsl::PowFrameTable;
+pub use pow_frame_dsl::component::air::{Component as FrameComponent, Eval as FrameEval};
+
+/// Construct the frame evaluator with both shared relation bundles.
+pub fn frame_eval(
+    log_size: u32,
+    pow_relations: &PowRelations,
+    binding_relations: &TranscriptBindingRelations,
+) -> FrameEval {
+    FrameEval {
+        log_size,
+        relations: PowFrameRelations::new(pow_relations, binding_relations),
     }
 }
 
@@ -355,26 +183,7 @@ pub fn gen_interaction_trace(
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     QM31,
 ) {
-    let cols = PowCheckColumns::from_iter(trace.iter().map(|eval| &eval.values.data));
-    let log_size = trace[0].domain.log_size();
-    let denominator = combine!(
-        relations.check,
-        [
-            cols.verifier_id,
-            cols.pow_kind,
-            cols.call_id,
-            cols.bits,
-            cols.word
-        ]
-    );
-    let numerator: Vec<PackedQM31> = cols
-        .enabler
-        .iter()
-        .map(|&enabled| -PackedQM31::from(enabled))
-        .collect();
-    let mut logup_gen = LogupTraceGenerator::new(log_size);
-    write_col!(&numerator, &denominator, logup_gen);
-    logup_gen.finalize_last()
+    pow_check_dsl::component::witness::gen_interaction_trace(trace, relations)
 }
 
 /// Generates the transcript-frame/check binding interaction trace.
@@ -386,59 +195,13 @@ pub fn gen_frame_interaction_trace(
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     QM31,
 ) {
-    let cols = PowFrameColumns::from_iter(trace.iter().map(|eval| &eval.values.data));
-    let log_size = trace[0].domain.log_size();
-    let enabled: Vec<PackedQM31> = cols
-        .enabler
-        .iter()
-        .map(|&value| PackedQM31::from(value))
-        .collect();
-    let neg_enabled: Vec<PackedQM31> = enabled.iter().map(|&value| -value).collect();
-    let fourteen = stwo::prover::backend::simd::m31::PackedM31::broadcast(BaseField::from(14));
-    let eight = stwo::prover::backend::simd::m31::PackedM31::broadcast(BaseField::from(8));
-    let pow_tag: Vec<_> = (0..cols.enabler.len())
-        .map(|row| cols.pow_kind[row] * fourteen - eight)
-        .collect();
-    let frame_denom = combine!(
-        binding_relations.pow_frame,
-        [
-            cols.verifier_id,
-            cols.sequence,
-            &pow_tag,
-            cols.hash_id,
-            cols.call_id,
-            cols.bits,
-            cols.word_0,
-            cols.word_1,
-            cols.word_2,
-            cols.word_3,
-            cols.word_4,
-            cols.word_5,
-            cols.word_6,
-            cols.word_7
-        ]
-    );
-    let check_denom = combine!(
-        pow_relations.check,
-        [
-            cols.verifier_id,
-            cols.pow_kind,
-            cols.call_id,
-            cols.bits,
-            cols.word_0
-        ]
-    );
-    let mut logup_gen = LogupTraceGenerator::new(log_size);
-    write_pair!(
-        &neg_enabled,
-        &frame_denom,
-        &enabled,
-        &check_denom,
-        logup_gen
-    );
-    logup_gen.finalize_last()
+    pow_frame_dsl::component::witness::gen_interaction_trace(
+        trace,
+        &PowFrameRelations::new(pow_relations, binding_relations),
+    )
 }
 
+/// Records one arithmetic PoW check for a fixed verifier invocation.
 /// Records one arithmetic PoW check for a fixed verifier invocation.
 pub fn push_pow_check(
     table: &mut PowCheckTable,
@@ -618,7 +381,7 @@ mod tests {
     use stwo::core::poly::circle::CanonicCoset;
     use stwo::core::proof_of_work::GrindOps;
     use stwo::prover::backend::simd::SimdBackend;
-    use stwo_constraint_framework::assert_constraints_on_polys;
+    use stwo_constraint_framework::{FrameworkEval, assert_constraints_on_polys};
 
     use prover::poseidon2_channel::Poseidon2M31Channel;
 
@@ -726,11 +489,7 @@ mod tests {
             gen_frame_interaction_trace(&trace, &pow_relations, &binding_relations);
         let traces = TreeVec::new(vec![vec![], trace, interaction]);
         let trace_polys = traces.map_cols(|column| column.interpolate());
-        let eval = FrameEval {
-            log_size,
-            pow_relations,
-            binding_relations,
-        };
+        let eval = frame_eval(log_size, &pow_relations, &binding_relations);
         assert_constraints_on_polys(
             &trace_polys,
             CanonicCoset::new(log_size),
@@ -853,11 +612,11 @@ mod tests {
     fn pow_frame_constraint_profile_stays_cubic() {
         use stwo_constraint_framework::expr::ExprEvaluator;
 
-        let eval = FrameEval {
-            log_size: 4,
-            pow_relations: PowRelations::dummy(),
-            binding_relations: TranscriptBindingRelations::dummy(),
-        };
+        let eval = frame_eval(
+            4,
+            &PowRelations::dummy(),
+            &TranscriptBindingRelations::dummy(),
+        );
         let degrees = eval
             .evaluate(ExprEvaluator::new())
             .constraint_degree_bounds();

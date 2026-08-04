@@ -16,15 +16,10 @@ use stwo::core::fields::qm31::QM31;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::simd::column::BaseColumn;
-use stwo::prover::backend::simd::m31::PackedM31;
-use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, RelationEntry, relation,
-};
-use stwo_macros::define_component_tables;
+use stwo_constraint_framework::relation;
 
 use super::control_air::{
     LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
@@ -54,46 +49,8 @@ const ARG_3_COLUMN: usize = 9;
 const KIND_COLUMN: usize = 10;
 const ITEM_BASE_COLUMN: usize = 11;
 const QUERY_ITEMS_COLUMN: usize = 12;
-const SEMANTIC_USE_COUNT_COLUMN: usize = 13;
-const WORD_MASK_START_COLUMN: usize = 14;
-const PREPROCESSED_COLUMN_COUNT: usize = WORD_MASK_START_COLUMN + DRAW_WORDS;
-
-const PREPROCESSED_COLUMN_IDS: [&str; PREPROCESSED_COLUMN_COUNT] = [
-    "recursion_verifier_randomness_row_mask",
-    "recursion_verifier_randomness_segment_mask",
-    "recursion_verifier_randomness_binary_mask",
-    "recursion_verifier_randomness_verifier_id",
-    "recursion_verifier_randomness_sequence",
-    "recursion_verifier_randomness_tag",
-    "recursion_verifier_randomness_arg_0",
-    "recursion_verifier_randomness_arg_1",
-    "recursion_verifier_randomness_arg_2",
-    "recursion_verifier_randomness_arg_3",
-    "recursion_verifier_randomness_kind",
-    "recursion_verifier_randomness_item_base",
-    "recursion_verifier_randomness_query_items",
-    "recursion_verifier_randomness_semantic_use_count",
-    "recursion_verifier_randomness_word_0_mask",
-    "recursion_verifier_randomness_word_1_mask",
-    "recursion_verifier_randomness_word_2_mask",
-    "recursion_verifier_randomness_word_3_mask",
-    "recursion_verifier_randomness_word_4_mask",
-    "recursion_verifier_randomness_word_5_mask",
-    "recursion_verifier_randomness_word_6_mask",
-    "recursion_verifier_randomness_word_7_mask",
-];
-
-define_component_tables! {
-    verifier_randomness: {
-        committed: {
-            output_0, output_1, output_2, output_3,
-            output_4, output_5, output_6, output_7,
-        },
-        constraints: {},
-    },
-}
-
-use prover_columns::VerifierRandomnessColumns;
+const SEMANTIC_MULTIPLICITY_START_COLUMN: usize = 13;
+const PREPROCESSED_COLUMN_COUNT: usize = SEMANTIC_MULTIPLICITY_START_COLUMN + DRAW_WORDS;
 
 // Typed word: verifier, semantic kind, item, word index, and value.
 relation!(VerifierRandomnessWordRelation, 5);
@@ -233,10 +190,7 @@ impl VerifierRandomnessPreprocessed {
     }
 
     pub fn column_ids() -> Vec<PreProcessedColumnId> {
-        PREPROCESSED_COLUMN_IDS
-            .iter()
-            .map(|id| PreProcessedColumnId { id: (*id).into() })
-            .collect()
+        preprocessed_column_ids()
     }
 
     pub fn gen_columns(
@@ -264,10 +218,10 @@ impl VerifierRandomnessPreprocessed {
             columns[KIND_COLUMN][index] = row.descriptor.kind.as_u32();
             columns[ITEM_BASE_COLUMN][index] = row.descriptor.item_base;
             columns[QUERY_ITEMS_COLUMN][index] = u32::from(row.descriptor.query_items);
-            columns[SEMANTIC_USE_COUNT_COLUMN][index] = row.descriptor.semantic_use_count();
             for word in 0..DRAW_WORDS {
-                columns[WORD_MASK_START_COLUMN + word][index] =
-                    u32::from(word < row.descriptor.word_count as usize);
+                columns[SEMANTIC_MULTIPLICITY_START_COLUMN + word][index] =
+                    row.descriptor.semantic_use_count()
+                        * u32::from(word < row.descriptor.word_count as usize);
             }
         }
         let domain = CanonicCoset::new(self.log_size).circle_domain();
@@ -374,114 +328,143 @@ fn draw_descriptor(step: VerifierStep) -> Result<Option<DrawDescriptor>, Verifie
     Ok(Some(descriptor))
 }
 
-pub type Component = FrameworkComponent<Eval>;
-
+/// Relation instances used by the macro-generated randomness component.
 #[derive(Clone)]
-pub struct Eval {
-    pub log_size: u32,
-    pub proof_kind: ProofKind,
-    pub transcript_relations: TranscriptStateRelations,
-    pub randomness_relations: VerifierRandomnessRelations,
+pub struct VerifierRandomnessComponentRelations {
+    pub draw_output: super::transcript_state_air::TranscriptDrawOutputRelation,
+    pub word: VerifierRandomnessWordRelation,
 }
 
-impl FrameworkEval for Eval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
-
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
-
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = VerifierRandomnessColumns::from_eval(&mut eval);
-        let ids = VerifierRandomnessPreprocessed::column_ids();
-        let row_mask = eval.get_preprocessed_column(ids[ROW_MASK_COLUMN].clone());
-        let segment_mask = eval.get_preprocessed_column(ids[SEGMENT_MASK_COLUMN].clone());
-        let binary_mask = eval.get_preprocessed_column(ids[BINARY_MASK_COLUMN].clone());
-        let verifier_id = eval.get_preprocessed_column(ids[VERIFIER_ID_COLUMN].clone());
-        let sequence = eval.get_preprocessed_column(ids[SEQUENCE_COLUMN].clone());
-        let tag = eval.get_preprocessed_column(ids[TAG_COLUMN].clone());
-        let arg_0 = eval.get_preprocessed_column(ids[ARG_0_COLUMN].clone());
-        let arg_1 = eval.get_preprocessed_column(ids[ARG_1_COLUMN].clone());
-        let arg_2 = eval.get_preprocessed_column(ids[ARG_2_COLUMN].clone());
-        let arg_3 = eval.get_preprocessed_column(ids[ARG_3_COLUMN].clone());
-        let kind = eval.get_preprocessed_column(ids[KIND_COLUMN].clone());
-        let item_base = eval.get_preprocessed_column(ids[ITEM_BASE_COLUMN].clone());
-        let query_items = eval.get_preprocessed_column(ids[QUERY_ITEMS_COLUMN].clone());
-        let semantic_use_count =
-            eval.get_preprocessed_column(ids[SEMANTIC_USE_COUNT_COLUMN].clone());
-        let word_masks = core::array::from_fn::<_, DRAW_WORDS, _>(|word| {
-            eval.get_preprocessed_column(ids[WORD_MASK_START_COLUMN + word].clone())
-        });
-        let output = output_columns(&cols);
-        let segment = E::F::from(BaseField::from(u32::from(
-            self.proof_kind == ProofKind::SegmentLeaf,
-        )));
-        let binary = E::F::from(BaseField::from(u32::from(
-            self.proof_kind == ProofKind::BinaryNode,
-        )));
-        let active = row_mask * (segment_mask * segment + binary_mask * binary);
-        let one = E::F::from(BaseField::from(1));
-        eval.add_constraint(cols.enabler.clone() - active.clone());
-        for value in &output {
-            eval.add_constraint((one.clone() - active.clone()) * value.clone());
+impl VerifierRandomnessComponentRelations {
+    /// Combine transcript-draw and typed-randomness relation instances.
+    pub fn new(
+        transcript_relations: &TranscriptStateRelations,
+        randomness_relations: &VerifierRandomnessRelations,
+    ) -> Self {
+        Self {
+            draw_output: transcript_relations.draw_output.clone(),
+            word: randomness_relations.word.clone(),
         }
-
-        let mut draw_tuple = vec![
-            verifier_id.clone(),
-            sequence,
-            tag,
-            arg_0,
-            arg_1,
-            arg_2,
-            arg_3,
-        ];
-        draw_tuple.extend(output.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.transcript_relations.draw_output,
-            -E::EF::from(active.clone()),
-            &draw_tuple,
-        ));
-        for (word_index, value) in output.into_iter().enumerate() {
-            let word = E::F::from(BaseField::from(
-                u32::try_from(word_index).expect("draw word index fits u32"),
-            ));
-            let item = item_base.clone() + query_items.clone() * word.clone();
-            let semantic_word_index = (one.clone() - query_items.clone()) * word;
-            eval.add_to_relation(RelationEntry::new(
-                &self.randomness_relations.word,
-                E::EF::from(
-                    active.clone() * semantic_use_count.clone() * word_masks[word_index].clone(),
-                ),
-                &[
-                    verifier_id.clone(),
-                    kind.clone(),
-                    item,
-                    semantic_word_index,
-                    value,
-                ],
-            ));
-        }
-        eval.finalize_logup_in_pairs();
-        eval
     }
 }
 
-fn output_columns<F: Clone>(cols: &VerifierRandomnessColumns<F>) -> [F; DRAW_WORDS] {
-    [
-        cols.output_0.clone(),
-        cols.output_1.clone(),
-        cols.output_2.clone(),
-        cols.output_3.clone(),
-        cols.output_4.clone(),
-        cols.output_5.clone(),
-        cols.output_6.clone(),
-        cols.output_7.clone(),
-    ]
+stwo_macros::define_air_fns! {
+    max_degree: 3,
+    embedded: [],
+    embedded_component: true,
+    embedded_enabler_boolean: false,
+    embedded_relations:
+        crate::verifier_randomness_air::VerifierRandomnessComponentRelations,
+    logup_batch: 2,
+    embedded_preprocessed: {
+        row_mask: "recursion_verifier_randomness_row_mask",
+        segment_mask: "recursion_verifier_randomness_segment_mask",
+        binary_mask: "recursion_verifier_randomness_binary_mask",
+        verifier_id: "recursion_verifier_randomness_verifier_id",
+        sequence: "recursion_verifier_randomness_sequence",
+        tag: "recursion_verifier_randomness_tag",
+        arg_0: "recursion_verifier_randomness_arg_0",
+        arg_1: "recursion_verifier_randomness_arg_1",
+        arg_2: "recursion_verifier_randomness_arg_2",
+        arg_3: "recursion_verifier_randomness_arg_3",
+        kind: "recursion_verifier_randomness_kind",
+        item_base: "recursion_verifier_randomness_item_base",
+        query_items: "recursion_verifier_randomness_query_items",
+        word_0_multiplicity: "recursion_verifier_randomness_word_0_multiplicity",
+        word_1_multiplicity: "recursion_verifier_randomness_word_1_multiplicity",
+        word_2_multiplicity: "recursion_verifier_randomness_word_2_multiplicity",
+        word_3_multiplicity: "recursion_verifier_randomness_word_3_multiplicity",
+        word_4_multiplicity: "recursion_verifier_randomness_word_4_multiplicity",
+        word_5_multiplicity: "recursion_verifier_randomness_word_5_multiplicity",
+        word_6_multiplicity: "recursion_verifier_randomness_word_6_multiplicity",
+        word_7_multiplicity: "recursion_verifier_randomness_word_7_multiplicity",
+    },
+    embedded_params: [segment_active, binary_active],
+
+    relation draw_output(15);
+    relation word(5);
+
+    fn verifier_randomness(
+        output_0, output_1, output_2, output_3,
+        output_4, output_5, output_6, output_7,
+        row_mask, segment_mask, binary_mask, verifier_id,
+        sequence, tag, arg_0, arg_1, arg_2, arg_3,
+        kind, item_base, query_items,
+        word_0_multiplicity, word_1_multiplicity,
+        word_2_multiplicity, word_3_multiplicity,
+        word_4_multiplicity, word_5_multiplicity,
+        word_6_multiplicity, word_7_multiplicity,
+        segment_active, binary_active,
+    ) {
+        let mode_active =
+            row_mask * (segment_mask * segment_active + binary_mask * binary_active);
+        let inactive = 1 - enabler;
+
+        constrain enabler - mode_active;
+        constrain inactive * output_0;
+        constrain inactive * output_1;
+        constrain inactive * output_2;
+        constrain inactive * output_3;
+        constrain inactive * output_4;
+        constrain inactive * output_5;
+        constrain inactive * output_6;
+        constrain inactive * output_7;
+
+        consume(enabler) draw_output(
+            verifier_id, sequence, tag, arg_0, arg_1, arg_2, arg_3,
+            output_0, output_1, output_2, output_3,
+            output_4, output_5, output_6, output_7,
+        );
+        emit(enabler * word_0_multiplicity) word(
+            verifier_id, kind, item_base, 0, output_0,
+        );
+        emit(enabler * word_1_multiplicity) word(
+            verifier_id, kind, item_base + query_items, 1 - query_items, output_1,
+        );
+        emit(enabler * word_2_multiplicity) word(
+            verifier_id, kind, item_base + query_items * 2, (1 - query_items) * 2, output_2,
+        );
+        emit(enabler * word_3_multiplicity) word(
+            verifier_id, kind, item_base + query_items * 3, (1 - query_items) * 3, output_3,
+        );
+        emit(enabler * word_4_multiplicity) word(
+            verifier_id, kind, item_base + query_items * 4, (1 - query_items) * 4, output_4,
+        );
+        emit(enabler * word_5_multiplicity) word(
+            verifier_id, kind, item_base + query_items * 5, (1 - query_items) * 5, output_5,
+        );
+        emit(enabler * word_6_multiplicity) word(
+            verifier_id, kind, item_base + query_items * 6, (1 - query_items) * 6, output_6,
+        );
+        emit(enabler * word_7_multiplicity) word(
+            verifier_id, kind, item_base + query_items * 7, (1 - query_items) * 7, output_7,
+        );
+
+        return output_0;
+    }
 }
 
-/// Generates atomic draw consumers and typed randomness-word producers.
+pub use component::air::{Component, Eval};
+
+/// Construct the generated evaluator with verifier-owned mode selectors.
+pub fn eval_for_proof_kind(
+    log_size: u32,
+    proof_kind: ProofKind,
+    transcript_relations: &TranscriptStateRelations,
+    randomness_relations: &VerifierRandomnessRelations,
+) -> Eval {
+    Eval {
+        log_size,
+        segment_active: BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        binary_active: BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        relations: VerifierRandomnessComponentRelations::new(
+            transcript_relations,
+            randomness_relations,
+        ),
+    }
+}
+
+/// Generate atomic draw consumers and typed randomness-word producers.
 pub fn gen_interaction_trace(
     trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     preprocessed: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
@@ -492,130 +475,16 @@ pub fn gen_interaction_trace(
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     QM31,
 ) {
-    let cols = VerifierRandomnessColumns::from_iter(
-        trace.iter().map(|evaluation| &evaluation.values.data),
-    );
-    let pp = preprocessed
-        .iter()
-        .map(|column| &column.values.data)
-        .collect::<Vec<_>>();
-    let simd_size = cols.enabler.len();
-    let log_size = trace[0].domain.log_size();
-    let segment = BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf));
-    let binary = BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode));
-    let active = (0..simd_size)
-        .map(|row| {
-            PackedQM31::from(
-                pp[ROW_MASK_COLUMN][row]
-                    * (pp[SEGMENT_MASK_COLUMN][row] * segment
-                        + pp[BINARY_MASK_COLUMN][row] * binary),
-            )
-        })
-        .collect::<Vec<_>>();
-    let negative_active = active.iter().map(|value| -*value).collect::<Vec<_>>();
-    let output = [
-        cols.output_0,
-        cols.output_1,
-        cols.output_2,
-        cols.output_3,
-        cols.output_4,
-        cols.output_5,
-        cols.output_6,
-        cols.output_7,
-    ];
-    let draw_denom = combine!(
-        transcript_relations.draw_output,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            pp[SEQUENCE_COLUMN],
-            pp[TAG_COLUMN],
-            pp[ARG_0_COLUMN],
-            pp[ARG_1_COLUMN],
-            pp[ARG_2_COLUMN],
-            pp[ARG_3_COLUMN],
-            output[0],
-            output[1],
-            output[2],
-            output[3],
-            output[4],
-            output[5],
-            output[6],
-            output[7]
-        ]
-    );
-    let semantic_numerators = (0..DRAW_WORDS)
-        .map(|word| {
-            (0..simd_size)
-                .map(|row| {
-                    active[row]
-                        * PackedQM31::from(pp[SEMANTIC_USE_COUNT_COLUMN][row])
-                        * PackedQM31::from(pp[WORD_MASK_START_COLUMN + word][row])
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    let semantic_denoms = (0..DRAW_WORDS)
-        .map(|word_index| {
-            let word =
-                BaseField::from(u32::try_from(word_index).expect("draw word index fits u32"));
-            let item = (0..simd_size)
-                .map(|row| {
-                    pp[ITEM_BASE_COLUMN][row]
-                        + pp[QUERY_ITEMS_COLUMN][row] * PackedM31::broadcast(word)
-                })
-                .collect::<Vec<_>>();
-            let semantic_word_index = (0..simd_size)
-                .map(|row| {
-                    (PackedM31::broadcast(BaseField::from(1)) - pp[QUERY_ITEMS_COLUMN][row])
-                        * PackedM31::broadcast(word)
-                })
-                .collect::<Vec<_>>();
-            combine!(
-                randomness_relations.word,
-                [
-                    pp[VERIFIER_ID_COLUMN],
-                    pp[KIND_COLUMN],
-                    item,
-                    semantic_word_index,
-                    output[word_index]
-                ]
-            )
-        })
-        .collect::<Vec<_>>();
-
-    let mut logup_gen = LogupTraceGenerator::new(log_size);
-    write_pair!(
-        &negative_active,
-        &draw_denom,
-        &semantic_numerators[0],
-        &semantic_denoms[0],
-        logup_gen
-    );
-    write_pair!(
-        &semantic_numerators[1],
-        &semantic_denoms[1],
-        &semantic_numerators[2],
-        &semantic_denoms[2],
-        logup_gen
-    );
-    write_pair!(
-        &semantic_numerators[3],
-        &semantic_denoms[3],
-        &semantic_numerators[4],
-        &semantic_denoms[4],
-        logup_gen
-    );
-    write_pair!(
-        &semantic_numerators[5],
-        &semantic_denoms[5],
-        &semantic_numerators[6],
-        &semantic_denoms[6],
-        logup_gen
-    );
-    write_col!(&semantic_numerators[7], &semantic_denoms[7], logup_gen);
-    logup_gen.finalize_last()
+    component::witness::gen_interaction_trace(
+        trace,
+        preprocessed,
+        BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        &VerifierRandomnessComponentRelations::new(transcript_relations, randomness_relations),
+    )
 }
 
+/// Materializes the trusted non-relation draws for the selected verifier lanes.
 /// Materializes the trusted non-relation draws for the selected verifier lanes.
 pub fn push_verifier_randomness(
     table: &mut VerifierRandomnessTable,
@@ -746,7 +615,7 @@ mod tests {
     use stwo::core::fields::FieldExpOps;
     use stwo::core::fields::m31::M31;
     use stwo::core::pcs::TreeVec;
-    use stwo_constraint_framework::{Relation, assert_constraints_on_polys};
+    use stwo_constraint_framework::{FrameworkEval, Relation, assert_constraints_on_polys};
 
     use super::*;
     use crate::kernel::VerifierProgramSpec;
@@ -825,12 +694,12 @@ mod tests {
         );
         let traces = TreeVec::new(vec![preprocessed, trace, interaction]);
         let trace_polys = traces.map_cols(|column| column.interpolate());
-        let eval = Eval {
-            log_size: preprocessing.log_size(),
-            proof_kind: kind,
-            transcript_relations,
-            randomness_relations,
-        };
+        let eval = eval_for_proof_kind(
+            preprocessing.log_size(),
+            kind,
+            &transcript_relations,
+            &randomness_relations,
+        );
         assert_constraints_on_polys(
             &trace_polys,
             CanonicCoset::new(preprocessing.log_size()),

@@ -17,14 +17,10 @@ use stwo::core::fields::qm31::QM31;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::simd::column::BaseColumn;
-use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, RelationEntry, relation,
-};
-use stwo_macros::define_component_tables;
+use stwo_constraint_framework::relation;
 
 use super::control_air::{
     ControlRelations, LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
@@ -59,41 +55,6 @@ const IS_DRAW_COLUMN: usize = 15;
 const IS_OPERATION_FIRST_COLUMN: usize = 16;
 const POW_FINAL_MASK_COLUMN: usize = 17;
 const PREPROCESSED_COLUMN_COUNT: usize = 18;
-
-const PREPROCESSED_COLUMN_IDS: [&str; PREPROCESSED_COLUMN_COUNT] = [
-    "recursion_transcript_call_row_mask",
-    "recursion_transcript_call_segment_mask",
-    "recursion_transcript_call_binary_mask",
-    "recursion_transcript_call_verifier_id",
-    "recursion_transcript_call_sequence",
-    "recursion_transcript_call_tag",
-    "recursion_transcript_call_arg_0",
-    "recursion_transcript_call_arg_1",
-    "recursion_transcript_call_arg_2",
-    "recursion_transcript_call_arg_3",
-    "recursion_transcript_call_call_id",
-    "recursion_transcript_call_hash_id",
-    "recursion_transcript_call_hash_step",
-    "recursion_transcript_call_is_first",
-    "recursion_transcript_call_is_last",
-    "recursion_transcript_call_is_draw",
-    "recursion_transcript_call_is_operation_first",
-    "recursion_transcript_call_pow_final_mask",
-];
-
-define_component_tables! {
-    transcript_call_binding: {
-        committed: {
-            chunk_0, chunk_1, chunk_2, chunk_3,
-            chunk_4, chunk_5, chunk_6, chunk_7,
-            output_0, output_1, output_2, output_3,
-            output_4, output_5, output_6, output_7,
-        },
-        constraints: {},
-    },
-}
-
-use prover_columns::TranscriptCallBindingColumns;
 
 // One padded frame word: verifier, hash session, word index, and value.
 relation!(TranscriptFrameWordRelation, 4);
@@ -255,10 +216,7 @@ impl TranscriptCallPreprocessed {
     }
 
     pub fn column_ids() -> Vec<PreProcessedColumnId> {
-        PREPROCESSED_COLUMN_IDS
-            .iter()
-            .map(|id| PreProcessedColumnId { id: (*id).into() })
-            .collect()
+        preprocessed_column_ids()
     }
 
     pub fn gen_columns(
@@ -355,172 +313,178 @@ fn append_layout_rows(
     Ok(())
 }
 
-pub type Component = FrameworkComponent<Eval>;
-
+/// Relation instances used by the macro-generated call-binding component.
 #[derive(Clone)]
-pub struct Eval {
-    pub log_size: u32,
-    pub proof_kind: ProofKind,
-    pub control_relations: ControlRelations,
-    pub transcript_relations: TranscriptAirRelations,
-    pub binding_relations: TranscriptBindingRelations,
+pub struct TranscriptCallBindingRelations {
+    pub hash_control: super::transcript_air::HashCallControlRelation,
+    pub hash_data: super::transcript_air::HashDataRelation,
+    pub hash_output: super::transcript_air::HashOutputRelation,
+    pub frame_output: TranscriptFrameOutputRelation,
+    pub pow_frame: TranscriptPowFrameRelation,
+    pub step: super::control_air::VerifierStepRelation,
+    pub frame_word: TranscriptFrameWordRelation,
 }
 
-impl FrameworkEval for Eval {
-    fn log_size(&self) -> u32 {
-        self.log_size
+impl TranscriptCallBindingRelations {
+    /// Combine the control, hash-call, and binding relation instances.
+    pub fn new(
+        control: &ControlRelations,
+        transcript: &TranscriptAirRelations,
+        binding: &TranscriptBindingRelations,
+    ) -> Self {
+        Self {
+            hash_control: transcript.control.clone(),
+            hash_data: transcript.data.clone(),
+            hash_output: transcript.output.clone(),
+            frame_output: binding.frame_output.clone(),
+            pow_frame: binding.pow_frame.clone(),
+            step: control.step.clone(),
+            frame_word: binding.frame_word.clone(),
+        }
     }
+}
 
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
+stwo_macros::define_air_fns! {
+    max_degree: 3,
+    embedded: [],
+    embedded_component: true,
+    embedded_enabler_boolean: false,
+    embedded_relations: crate::transcript_binding_air::TranscriptCallBindingRelations,
+    logup_batch: 2,
+    embedded_preprocessed: {
+        row_mask: "recursion_transcript_call_row_mask",
+        segment_mask: "recursion_transcript_call_segment_mask",
+        binary_mask: "recursion_transcript_call_binary_mask",
+        verifier_id: "recursion_transcript_call_verifier_id",
+        sequence: "recursion_transcript_call_sequence",
+        tag: "recursion_transcript_call_tag",
+        arg_0: "recursion_transcript_call_arg_0",
+        arg_1: "recursion_transcript_call_arg_1",
+        arg_2: "recursion_transcript_call_arg_2",
+        arg_3: "recursion_transcript_call_arg_3",
+        call_id: "recursion_transcript_call_call_id",
+        hash_id: "recursion_transcript_call_hash_id",
+        hash_step: "recursion_transcript_call_hash_step",
+        is_first: "recursion_transcript_call_is_first",
+        is_last: "recursion_transcript_call_is_last",
+        is_draw: "recursion_transcript_call_is_draw",
+        is_operation_first: "recursion_transcript_call_is_operation_first",
+        pow_final_mask: "recursion_transcript_call_pow_final_mask",
+    },
+    embedded_params: [segment_active, binary_active],
 
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = TranscriptCallBindingColumns::from_eval(&mut eval);
-        let column_ids = TranscriptCallPreprocessed::column_ids();
-        let row_mask = eval.get_preprocessed_column(column_ids[ROW_MASK_COLUMN].clone());
-        let segment_mask = eval.get_preprocessed_column(column_ids[SEGMENT_MASK_COLUMN].clone());
-        let binary_mask = eval.get_preprocessed_column(column_ids[BINARY_MASK_COLUMN].clone());
-        let verifier_id = eval.get_preprocessed_column(column_ids[VERIFIER_ID_COLUMN].clone());
-        let sequence = eval.get_preprocessed_column(column_ids[SEQUENCE_COLUMN].clone());
-        let tag = eval.get_preprocessed_column(column_ids[TAG_COLUMN].clone());
-        let arg_0 = eval.get_preprocessed_column(column_ids[ARG_0_COLUMN].clone());
-        let arg_1 = eval.get_preprocessed_column(column_ids[ARG_1_COLUMN].clone());
-        let arg_2 = eval.get_preprocessed_column(column_ids[ARG_2_COLUMN].clone());
-        let arg_3 = eval.get_preprocessed_column(column_ids[ARG_3_COLUMN].clone());
-        let call_id = eval.get_preprocessed_column(column_ids[CALL_ID_COLUMN].clone());
-        let hash_id = eval.get_preprocessed_column(column_ids[HASH_ID_COLUMN].clone());
-        let hash_step = eval.get_preprocessed_column(column_ids[HASH_STEP_COLUMN].clone());
-        let is_first = eval.get_preprocessed_column(column_ids[IS_FIRST_COLUMN].clone());
-        let is_last = eval.get_preprocessed_column(column_ids[IS_LAST_COLUMN].clone());
-        let is_draw = eval.get_preprocessed_column(column_ids[IS_DRAW_COLUMN].clone());
-        let is_operation_first =
-            eval.get_preprocessed_column(column_ids[IS_OPERATION_FIRST_COLUMN].clone());
-        let pow_final_mask =
-            eval.get_preprocessed_column(column_ids[POW_FINAL_MASK_COLUMN].clone());
-        eval.add_constraint(cols.enabler.clone() - row_mask.clone());
+    relation hash_control(7);
+    relation hash_data(11);
+    relation hash_output(12);
+    relation frame_output(10);
+    relation pow_frame(14);
+    relation step(7);
+    relation frame_word(4);
 
-        let segment_active = BaseField::from(u32::from(self.proof_kind == ProofKind::SegmentLeaf));
-        let binary_active = BaseField::from(u32::from(self.proof_kind == ProofKind::BinaryNode));
+    fn transcript_call_binding(
+        chunk_0, chunk_1, chunk_2, chunk_3,
+        chunk_4, chunk_5, chunk_6, chunk_7,
+        output_0, output_1, output_2, output_3,
+        output_4, output_5, output_6, output_7,
+        row_mask, segment_mask, binary_mask, verifier_id,
+        sequence, tag, arg_0, arg_1, arg_2, arg_3,
+        call_id, hash_id, hash_step, is_first, is_last, is_draw,
+        is_operation_first, pow_final_mask,
+        segment_active, binary_active,
+    ) {
         let active = segment_mask * segment_active + binary_mask * binary_active;
-        let active_last = active.clone() * is_last.clone();
-        let active_operation_first = active.clone() * is_operation_first;
-        let active_pow_final = active.clone() * pow_final_mask;
-        let chunk = [
-            cols.chunk_0.clone(),
-            cols.chunk_1.clone(),
-            cols.chunk_2.clone(),
-            cols.chunk_3.clone(),
-            cols.chunk_4.clone(),
-            cols.chunk_5.clone(),
-            cols.chunk_6.clone(),
-            cols.chunk_7.clone(),
-        ];
-        let output = [
-            cols.output_0.clone(),
-            cols.output_1.clone(),
-            cols.output_2.clone(),
-            cols.output_3.clone(),
-            cols.output_4.clone(),
-            cols.output_5.clone(),
-            cols.output_6.clone(),
-            cols.output_7.clone(),
-        ];
-        for value in &chunk {
-            eval.add_constraint((row_mask.clone() - active.clone()) * value.clone());
-        }
-        for value in &output {
-            eval.add_constraint((row_mask.clone() - is_last.clone()) * value.clone());
-            eval.add_constraint((row_mask.clone() - active.clone()) * value.clone());
-        }
 
-        eval.add_to_relation(RelationEntry::new(
-            &self.transcript_relations.control,
-            E::EF::from(active.clone()),
-            &[
-                verifier_id.clone(),
-                call_id.clone(),
-                hash_id.clone(),
-                hash_step.clone(),
-                is_first,
-                is_last.clone(),
-                is_draw.clone(),
-            ],
-        ));
-        let mut data_tuple = vec![verifier_id.clone(), hash_id.clone(), hash_step.clone()];
-        data_tuple.extend(chunk.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.transcript_relations.data,
-            E::EF::from(active.clone()),
-            &data_tuple,
-        ));
+        constrain enabler - row_mask;
+        constrain (row_mask - active) * chunk_0;
+        constrain (row_mask - active) * chunk_1;
+        constrain (row_mask - active) * chunk_2;
+        constrain (row_mask - active) * chunk_3;
+        constrain (row_mask - active) * chunk_4;
+        constrain (row_mask - active) * chunk_5;
+        constrain (row_mask - active) * chunk_6;
+        constrain (row_mask - active) * chunk_7;
+        constrain (row_mask - is_last) * output_0;
+        constrain (row_mask - is_last) * output_1;
+        constrain (row_mask - is_last) * output_2;
+        constrain (row_mask - is_last) * output_3;
+        constrain (row_mask - is_last) * output_4;
+        constrain (row_mask - is_last) * output_5;
+        constrain (row_mask - is_last) * output_6;
+        constrain (row_mask - is_last) * output_7;
+        constrain (row_mask - active) * output_0;
+        constrain (row_mask - active) * output_1;
+        constrain (row_mask - active) * output_2;
+        constrain (row_mask - active) * output_3;
+        constrain (row_mask - active) * output_4;
+        constrain (row_mask - active) * output_5;
+        constrain (row_mask - active) * output_6;
+        constrain (row_mask - active) * output_7;
 
-        let mut hash_output_tuple = vec![
-            verifier_id.clone(),
-            hash_id.clone(),
-            call_id.clone(),
-            is_draw,
-        ];
-        hash_output_tuple.extend(output.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.transcript_relations.output,
-            -E::EF::from(active_last.clone()),
-            &hash_output_tuple,
-        ));
-        let mut frame_output_tuple = vec![verifier_id.clone(), hash_id.clone()];
-        frame_output_tuple.extend(output.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.binding_relations.frame_output,
-            E::EF::from(active_last),
-            &frame_output_tuple,
-        ));
+        emit(active) hash_control(
+            verifier_id, call_id, hash_id, hash_step, is_first, is_last, is_draw,
+        );
+        emit(active) hash_data(
+            verifier_id, hash_id, hash_step,
+            chunk_0, chunk_1, chunk_2, chunk_3,
+            chunk_4, chunk_5, chunk_6, chunk_7,
+        );
+        consume(active * is_last) hash_output(
+            verifier_id, hash_id, call_id, is_draw,
+            output_0, output_1, output_2, output_3,
+            output_4, output_5, output_6, output_7,
+        );
+        emit(active * is_last) frame_output(
+            verifier_id, hash_id,
+            output_0, output_1, output_2, output_3,
+            output_4, output_5, output_6, output_7,
+        );
+        emit(active * pow_final_mask) pow_frame(
+            verifier_id, sequence, tag, hash_id, call_id, arg_0,
+            output_0, output_1, output_2, output_3,
+            output_4, output_5, output_6, output_7,
+        );
+        consume(active * is_operation_first) step(
+            verifier_id, sequence, tag, arg_0, arg_1, arg_2, arg_3,
+        );
+        consume(active) frame_word(verifier_id, hash_id, hash_step * 8, chunk_0);
+        consume(active) frame_word(verifier_id, hash_id, hash_step * 8 + 1, chunk_1);
+        consume(active) frame_word(verifier_id, hash_id, hash_step * 8 + 2, chunk_2);
+        consume(active) frame_word(verifier_id, hash_id, hash_step * 8 + 3, chunk_3);
+        consume(active) frame_word(verifier_id, hash_id, hash_step * 8 + 4, chunk_4);
+        consume(active) frame_word(verifier_id, hash_id, hash_step * 8 + 5, chunk_5);
+        consume(active) frame_word(verifier_id, hash_id, hash_step * 8 + 6, chunk_6);
+        consume(active) frame_word(verifier_id, hash_id, hash_step * 8 + 7, chunk_7);
 
-        let mut pow_frame_tuple = vec![
-            verifier_id.clone(),
-            sequence.clone(),
-            tag.clone(),
-            hash_id.clone(),
-            call_id,
-            arg_0.clone(),
-        ];
-        pow_frame_tuple.extend(output.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.binding_relations.pow_frame,
-            E::EF::from(active_pow_final),
-            &pow_frame_tuple,
-        ));
-
-        eval.add_to_relation(RelationEntry::new(
-            &self.control_relations.step,
-            -E::EF::from(active_operation_first),
-            &[
-                verifier_id.clone(),
-                sequence,
-                tag,
-                arg_0,
-                arg_1,
-                arg_2,
-                arg_3,
-            ],
-        ));
-
-        let rate = E::F::from(BaseField::from(RATE as u32));
-        for (slot, value) in chunk.into_iter().enumerate() {
-            let word_index =
-                hash_step.clone() * rate.clone() + E::F::from(BaseField::from(slot as u32));
-            eval.add_to_relation(RelationEntry::new(
-                &self.binding_relations.frame_word,
-                -E::EF::from(active.clone()),
-                &[verifier_id.clone(), hash_id.clone(), word_index, value],
-            ));
-        }
-
-        eval.finalize_logup_in_pairs();
-        eval
+        return (
+            output_0, output_1, output_2, output_3,
+            output_4, output_5, output_6, output_7,
+        );
     }
 }
 
-/// Generates all call-binding relation fractions from fixed preprocessing.
+pub use component::air::{Component, Eval};
+
+/// Construct the generated evaluator with verifier-owned mode selectors.
+pub fn eval_for_proof_kind(
+    log_size: u32,
+    proof_kind: ProofKind,
+    control_relations: &ControlRelations,
+    transcript_relations: &TranscriptAirRelations,
+    binding_relations: &TranscriptBindingRelations,
+) -> Eval {
+    Eval {
+        log_size,
+        segment_active: BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        binary_active: BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        relations: TranscriptCallBindingRelations::new(
+            control_relations,
+            transcript_relations,
+            binding_relations,
+        ),
+    }
+}
+
+/// Generate all call-binding interaction entries from the macro-defined frame.
 pub fn gen_interaction_trace(
     trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     preprocessed: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
@@ -532,216 +496,17 @@ pub fn gen_interaction_trace(
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     QM31,
 ) {
-    let cols = TranscriptCallBindingColumns::from_iter(
-        trace.iter().map(|evaluation| &evaluation.values.data),
-    );
-    let pp = preprocessed
-        .iter()
-        .map(|column| &column.values.data)
-        .collect::<Vec<_>>();
-    let simd_size = cols.enabler.len();
-    let log_size = trace[0].domain.log_size();
-    let segment_active = BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf));
-    let binary_active = BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode));
-    let active: Vec<PackedQM31> = (0..simd_size)
-        .map(|row| {
-            PackedQM31::from(
-                pp[SEGMENT_MASK_COLUMN][row] * segment_active
-                    + pp[BINARY_MASK_COLUMN][row] * binary_active,
-            )
-        })
-        .collect();
-    let neg_active: Vec<_> = active.iter().map(|value| -*value).collect();
-    let active_last: Vec<PackedQM31> = (0..simd_size)
-        .map(|row| active[row] * PackedQM31::from(pp[IS_LAST_COLUMN][row]))
-        .collect();
-    let neg_active_last: Vec<_> = active_last.iter().map(|value| -*value).collect();
-    let active_pow_final: Vec<PackedQM31> = (0..simd_size)
-        .map(|row| active[row] * PackedQM31::from(pp[POW_FINAL_MASK_COLUMN][row]))
-        .collect();
-    let neg_active_operation_first: Vec<PackedQM31> = (0..simd_size)
-        .map(|row| -active[row] * PackedQM31::from(pp[IS_OPERATION_FIRST_COLUMN][row]))
-        .collect();
-
-    let call_control_denom = combine!(
-        transcript_relations.control,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            pp[CALL_ID_COLUMN],
-            pp[HASH_ID_COLUMN],
-            pp[HASH_STEP_COLUMN],
-            pp[IS_FIRST_COLUMN],
-            pp[IS_LAST_COLUMN],
-            pp[IS_DRAW_COLUMN]
-        ]
-    );
-    let data_denom = combine!(
-        transcript_relations.data,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            pp[HASH_ID_COLUMN],
-            pp[HASH_STEP_COLUMN],
-            cols.chunk_0,
-            cols.chunk_1,
-            cols.chunk_2,
-            cols.chunk_3,
-            cols.chunk_4,
-            cols.chunk_5,
-            cols.chunk_6,
-            cols.chunk_7
-        ]
-    );
-    let hash_output_denom = combine!(
-        transcript_relations.output,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            pp[HASH_ID_COLUMN],
-            pp[CALL_ID_COLUMN],
-            pp[IS_DRAW_COLUMN],
-            cols.output_0,
-            cols.output_1,
-            cols.output_2,
-            cols.output_3,
-            cols.output_4,
-            cols.output_5,
-            cols.output_6,
-            cols.output_7
-        ]
-    );
-    let frame_output_denom = combine!(
-        binding_relations.frame_output,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            pp[HASH_ID_COLUMN],
-            cols.output_0,
-            cols.output_1,
-            cols.output_2,
-            cols.output_3,
-            cols.output_4,
-            cols.output_5,
-            cols.output_6,
-            cols.output_7
-        ]
-    );
-    let pow_frame_denom = combine!(
-        binding_relations.pow_frame,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            pp[SEQUENCE_COLUMN],
-            pp[TAG_COLUMN],
-            pp[HASH_ID_COLUMN],
-            pp[CALL_ID_COLUMN],
-            pp[ARG_0_COLUMN],
-            cols.output_0,
-            cols.output_1,
-            cols.output_2,
-            cols.output_3,
-            cols.output_4,
-            cols.output_5,
-            cols.output_6,
-            cols.output_7
-        ]
-    );
-    let control_step_denom = combine!(
-        control_relations.step,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            pp[SEQUENCE_COLUMN],
-            pp[TAG_COLUMN],
-            pp[ARG_0_COLUMN],
-            pp[ARG_1_COLUMN],
-            pp[ARG_2_COLUMN],
-            pp[ARG_3_COLUMN]
-        ]
-    );
-
-    let rate = stwo::prover::backend::simd::m31::PackedM31::broadcast(BaseField::from(RATE as u32));
-    let word_indices = (0..RATE)
-        .map(|slot| {
-            let slot = stwo::prover::backend::simd::m31::PackedM31::broadcast(BaseField::from(
-                slot as u32,
-            ));
-            (0..simd_size)
-                .map(|row| pp[HASH_STEP_COLUMN][row] * rate + slot)
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    let word_denoms = [
-        cols.chunk_0,
-        cols.chunk_1,
-        cols.chunk_2,
-        cols.chunk_3,
-        cols.chunk_4,
-        cols.chunk_5,
-        cols.chunk_6,
-        cols.chunk_7,
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(slot, values)| {
-        combine!(
-            binding_relations.frame_word,
-            [
-                pp[VERIFIER_ID_COLUMN],
-                pp[HASH_ID_COLUMN],
-                &word_indices[slot],
-                values
-            ]
-        )
-    })
-    .collect::<Vec<_>>();
-
-    let mut logup_gen = LogupTraceGenerator::new(log_size);
-    write_pair!(
-        &active,
-        &call_control_denom,
-        &active,
-        &data_denom,
-        logup_gen
-    );
-    write_pair!(
-        &neg_active_last,
-        &hash_output_denom,
-        &active_last,
-        &frame_output_denom,
-        logup_gen
-    );
-    write_pair!(
-        &active_pow_final,
-        &pow_frame_denom,
-        &neg_active_operation_first,
-        &control_step_denom,
-        logup_gen
-    );
-    write_pair!(
-        &neg_active,
-        &word_denoms[0],
-        &neg_active,
-        &word_denoms[1],
-        logup_gen
-    );
-    write_pair!(
-        &neg_active,
-        &word_denoms[2],
-        &neg_active,
-        &word_denoms[3],
-        logup_gen
-    );
-    write_pair!(
-        &neg_active,
-        &word_denoms[4],
-        &neg_active,
-        &word_denoms[5],
-        logup_gen
-    );
-    write_pair!(
-        &neg_active,
-        &word_denoms[6],
-        &neg_active,
-        &word_denoms[7],
-        logup_gen
-    );
-    logup_gen.finalize_last()
+    component::witness::gen_interaction_trace(
+        trace,
+        preprocessed,
+        BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        &TranscriptCallBindingRelations::new(
+            control_relations,
+            transcript_relations,
+            binding_relations,
+        ),
+    )
 }
 
 /// Mode-indexed transcript executions accepted by the universal table.

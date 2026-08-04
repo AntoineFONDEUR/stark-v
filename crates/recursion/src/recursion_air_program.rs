@@ -739,46 +739,48 @@ impl RosterCollector {
             let log_size = log_size();
             super::transcript_air::Eval {
                 log_size,
-                relations: relations.vm.clone(),
-                transcript_relations: relations.transcript.clone(),
+                relations: super::transcript_air::TranscriptHashCallRelations::new(
+                    &relations.vm,
+                    &relations.transcript,
+                ),
             }
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[2], claimed_sum(), {
             let log_size = log_size();
-            super::transcript_binding_air::Eval {
+            super::transcript_binding_air::eval_for_proof_kind(
                 log_size,
-                proof_kind: kind,
-                control_relations: relations.control.clone(),
-                transcript_relations: relations.transcript.clone(),
-                binding_relations: relations.transcript_binding.clone(),
-            }
+                kind,
+                &relations.control,
+                &relations.transcript,
+                &relations.transcript_binding,
+            )
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[3], claimed_sum(), {
             let log_size = log_size();
-            super::transcript_state_air::Eval {
+            super::transcript_state_air::eval_for_proof_kind(
                 log_size,
-                proof_kind: kind,
-                binding_relations: relations.transcript_binding.clone(),
-                state_relations: relations.transcript_state.clone(),
-            }
+                kind,
+                &relations.transcript_binding,
+                &relations.transcript_state,
+            )
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[4], claimed_sum(), {
             let log_size = log_size();
-            super::transcript_word_air::Eval {
+            super::transcript_word_air::eval_for_proof_kind(
                 log_size,
-                proof_kind: kind,
-                binding_relations: relations.transcript_binding.clone(),
-                word_relations: relations.transcript_word.clone(),
-            }
+                kind,
+                &relations.transcript_binding,
+                &relations.transcript_word,
+            )
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[5], claimed_sum(), {
             let log_size = log_size();
-            super::transcript_payload_air::Eval {
+            super::transcript_payload_air::eval_for_proof_kind(
                 log_size,
-                proof_kind: kind,
-                word_relations: relations.transcript_word.clone(),
-                input_relations: relations.verifier_input.clone(),
-            }
+                kind,
+                &relations.transcript_word,
+                &relations.verifier_input,
+            )
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[6], claimed_sum(), {
             let log_size = log_size();
@@ -789,29 +791,25 @@ impl RosterCollector {
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[7], claimed_sum(), {
             let log_size = log_size();
-            super::pow::FrameEval {
-                log_size,
-                pow_relations: relations.pow.clone(),
-                binding_relations: relations.transcript_binding.clone(),
-            }
+            super::pow::frame_eval(log_size, &relations.pow, &relations.transcript_binding)
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[8], claimed_sum(), {
             let log_size = log_size();
-            super::relation_challenge_air::Eval {
+            super::relation_challenge_air::eval_for_proof_kind(
                 log_size,
-                proof_kind: kind,
-                transcript_relations: relations.transcript_state.clone(),
-                challenge_relations: relations.relation_challenge.clone(),
-            }
+                kind,
+                &relations.transcript_state,
+                &relations.relation_challenge,
+            )
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[9], claimed_sum(), {
             let log_size = log_size();
-            super::verifier_randomness_air::Eval {
+            super::verifier_randomness_air::eval_for_proof_kind(
                 log_size,
-                proof_kind: kind,
-                transcript_relations: relations.transcript_state.clone(),
-                randomness_relations: relations.verifier_randomness.clone(),
-            }
+                kind,
+                &relations.transcript_state,
+                &relations.verifier_randomness,
+            )
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[10], claimed_sum(), {
             let log_size = log_size();

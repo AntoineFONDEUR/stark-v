@@ -16,14 +16,10 @@ use stwo::core::fields::qm31::QM31;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::simd::column::BaseColumn;
-use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, RelationEntry, relation,
-};
-use stwo_macros::define_component_tables;
+use stwo_constraint_framework::relation;
 
 use super::control_air::{
     LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
@@ -56,33 +52,6 @@ const IS_PAYLOAD_COLUMN: usize = 12;
 const PAYLOAD_INDEX_COLUMN: usize = 13;
 const CONSTANT_COLUMN: usize = 14;
 const PREPROCESSED_COLUMN_COUNT: usize = 15;
-
-const PREPROCESSED_COLUMN_IDS: [&str; PREPROCESSED_COLUMN_COUNT] = [
-    "recursion_transcript_word_row_mask",
-    "recursion_transcript_word_segment_mask",
-    "recursion_transcript_word_binary_mask",
-    "recursion_transcript_word_verifier_id",
-    "recursion_transcript_word_sequence",
-    "recursion_transcript_word_tag",
-    "recursion_transcript_word_arg_0",
-    "recursion_transcript_word_arg_1",
-    "recursion_transcript_word_arg_2",
-    "recursion_transcript_word_arg_3",
-    "recursion_transcript_word_hash_id",
-    "recursion_transcript_word_index",
-    "recursion_transcript_word_is_payload",
-    "recursion_transcript_word_payload_index",
-    "recursion_transcript_word_constant",
-];
-
-define_component_tables! {
-    transcript_word: {
-        committed: { value },
-        constraints: {},
-    },
-}
-
-use prover_columns::TranscriptWordColumns;
 
 // One typed payload word scoped by verifier and exact control coordinates.
 relation!(TranscriptPayloadWordRelation, 9);
@@ -207,10 +176,7 @@ impl TranscriptWordPreprocessed {
     }
 
     pub fn column_ids() -> Vec<PreProcessedColumnId> {
-        PREPROCESSED_COLUMN_IDS
-            .iter()
-            .map(|id| PreProcessedColumnId { id: (*id).into() })
-            .collect()
+        preprocessed_column_ids()
     }
 
     pub fn gen_columns(
@@ -357,82 +323,98 @@ fn append_layout_rows(
     Ok(())
 }
 
-pub type Component = FrameworkComponent<Eval>;
-
+/// Relation instances used by the macro-generated transcript-word component.
 #[derive(Clone)]
-pub struct Eval {
-    pub log_size: u32,
-    pub proof_kind: ProofKind,
-    pub binding_relations: TranscriptBindingRelations,
-    pub word_relations: TranscriptWordRelations,
+pub struct TranscriptWordComponentRelations {
+    pub frame_word: super::transcript_binding_air::TranscriptFrameWordRelation,
+    pub payload_word: TranscriptPayloadWordRelation,
 }
 
-impl FrameworkEval for Eval {
-    fn log_size(&self) -> u32 {
-        self.log_size
+impl TranscriptWordComponentRelations {
+    /// Combine binding and payload-word relation instances.
+    pub fn new(binding: &TranscriptBindingRelations, word: &TranscriptWordRelations) -> Self {
+        Self {
+            frame_word: binding.frame_word.clone(),
+            payload_word: word.payload_word.clone(),
+        }
     }
+}
 
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
+stwo_macros::define_air_fns! {
+    max_degree: 3,
+    embedded: [],
+    embedded_component: true,
+    embedded_enabler_boolean: false,
+    embedded_relations: crate::transcript_word_air::TranscriptWordComponentRelations,
+    logup_batch: 2,
+    embedded_preprocessed: {
+        row_mask: "recursion_transcript_word_row_mask",
+        segment_mask: "recursion_transcript_word_segment_mask",
+        binary_mask: "recursion_transcript_word_binary_mask",
+        verifier_id: "recursion_transcript_word_verifier_id",
+        sequence: "recursion_transcript_word_sequence",
+        tag: "recursion_transcript_word_tag",
+        arg_0: "recursion_transcript_word_arg_0",
+        arg_1: "recursion_transcript_word_arg_1",
+        arg_2: "recursion_transcript_word_arg_2",
+        arg_3: "recursion_transcript_word_arg_3",
+        hash_id: "recursion_transcript_word_hash_id",
+        word_index: "recursion_transcript_word_index",
+        is_payload: "recursion_transcript_word_is_payload",
+        payload_index: "recursion_transcript_word_payload_index",
+        constant_value: "recursion_transcript_word_constant",
+    },
+    embedded_params: [segment_active, binary_active],
 
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = TranscriptWordColumns::from_eval(&mut eval);
-        let column_ids = TranscriptWordPreprocessed::column_ids();
-        let row_mask = eval.get_preprocessed_column(column_ids[ROW_MASK_COLUMN].clone());
-        let segment_mask = eval.get_preprocessed_column(column_ids[SEGMENT_MASK_COLUMN].clone());
-        let binary_mask = eval.get_preprocessed_column(column_ids[BINARY_MASK_COLUMN].clone());
-        let verifier_id = eval.get_preprocessed_column(column_ids[VERIFIER_ID_COLUMN].clone());
-        let sequence = eval.get_preprocessed_column(column_ids[SEQUENCE_COLUMN].clone());
-        let tag = eval.get_preprocessed_column(column_ids[TAG_COLUMN].clone());
-        let arg_0 = eval.get_preprocessed_column(column_ids[ARG_0_COLUMN].clone());
-        let arg_1 = eval.get_preprocessed_column(column_ids[ARG_1_COLUMN].clone());
-        let arg_2 = eval.get_preprocessed_column(column_ids[ARG_2_COLUMN].clone());
-        let arg_3 = eval.get_preprocessed_column(column_ids[ARG_3_COLUMN].clone());
-        let hash_id = eval.get_preprocessed_column(column_ids[HASH_ID_COLUMN].clone());
-        let word_index = eval.get_preprocessed_column(column_ids[WORD_INDEX_COLUMN].clone());
-        let is_payload = eval.get_preprocessed_column(column_ids[IS_PAYLOAD_COLUMN].clone());
-        let payload_index = eval.get_preprocessed_column(column_ids[PAYLOAD_INDEX_COLUMN].clone());
-        let constant = eval.get_preprocessed_column(column_ids[CONSTANT_COLUMN].clone());
-        eval.add_constraint(cols.enabler.clone() - row_mask.clone());
+    relation frame_word(4);
+    relation payload_word(9);
 
-        let segment_active = BaseField::from(u32::from(self.proof_kind == ProofKind::SegmentLeaf));
-        let binary_active = BaseField::from(u32::from(self.proof_kind == ProofKind::BinaryNode));
+    fn transcript_word(
+        value,
+        row_mask, segment_mask, binary_mask, verifier_id,
+        sequence, tag, arg_0, arg_1, arg_2, arg_3,
+        hash_id, word_index, is_payload, payload_index, constant_value,
+        segment_active, binary_active,
+    ) {
         let active = segment_mask * segment_active + binary_mask * binary_active;
-        let inactive = row_mask - active.clone();
-        let one = E::F::from(BaseField::from(1));
-        let constant_mask = one.clone() - is_payload.clone();
-        let value = is_payload.clone() * cols.value.clone() + constant_mask.clone() * constant;
-        eval.add_constraint(inactive * cols.value.clone());
-        eval.add_constraint(active.clone() * constant_mask * cols.value.clone());
+        let constant_mask = 1 - is_payload;
 
-        eval.add_to_relation(RelationEntry::new(
-            &self.binding_relations.frame_word,
-            E::EF::from(active.clone()),
-            &[verifier_id.clone(), hash_id, word_index, value],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.word_relations.payload_word,
-            -E::EF::from(active * is_payload),
-            &[
-                verifier_id,
-                sequence,
-                tag,
-                arg_0,
-                arg_1,
-                arg_2,
-                arg_3,
-                payload_index,
-                cols.value,
-            ],
-        ));
+        constrain enabler - row_mask;
+        constrain (row_mask - active) * value;
+        constrain active * constant_mask * value;
 
-        eval.finalize_logup_in_pairs();
-        eval
+        emit(active) frame_word(
+            verifier_id,
+            hash_id,
+            word_index,
+            is_payload * value + constant_mask * constant_value,
+        );
+        consume(active * is_payload) payload_word(
+            verifier_id, sequence, tag, arg_0, arg_1, arg_2, arg_3, payload_index, value,
+        );
+
+        return value;
     }
 }
 
-/// Generates all fixed-word and payload-slot relation fractions.
+pub use component::air::{Component, Eval};
+
+/// Construct the generated evaluator with verifier-owned mode selectors.
+pub fn eval_for_proof_kind(
+    log_size: u32,
+    proof_kind: ProofKind,
+    binding_relations: &TranscriptBindingRelations,
+    word_relations: &TranscriptWordRelations,
+) -> Eval {
+    Eval {
+        log_size,
+        segment_active: BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        binary_active: BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        relations: TranscriptWordComponentRelations::new(binding_relations, word_relations),
+    }
+}
+
+/// Generate fixed-word and payload-slot entries from the macro-defined frame.
 pub fn gen_interaction_trace(
     trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     preprocessed: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
@@ -443,68 +425,13 @@ pub fn gen_interaction_trace(
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     QM31,
 ) {
-    let cols =
-        TranscriptWordColumns::from_iter(trace.iter().map(|evaluation| &evaluation.values.data));
-    let pp = preprocessed
-        .iter()
-        .map(|column| &column.values.data)
-        .collect::<Vec<_>>();
-    let simd_size = cols.enabler.len();
-    let log_size = trace[0].domain.log_size();
-    let segment_active = BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf));
-    let binary_active = BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode));
-    let active: Vec<PackedQM31> = (0..simd_size)
-        .map(|row| {
-            PackedQM31::from(
-                pp[SEGMENT_MASK_COLUMN][row] * segment_active
-                    + pp[BINARY_MASK_COLUMN][row] * binary_active,
-            )
-        })
-        .collect();
-    let neg_payload: Vec<PackedQM31> = (0..simd_size)
-        .map(|row| -active[row] * PackedQM31::from(pp[IS_PAYLOAD_COLUMN][row]))
-        .collect();
-    let one = stwo::prover::backend::simd::m31::PackedM31::broadcast(BaseField::from(1));
-    let values = (0..simd_size)
-        .map(|row| {
-            pp[IS_PAYLOAD_COLUMN][row] * cols.value[row]
-                + (one - pp[IS_PAYLOAD_COLUMN][row]) * pp[CONSTANT_COLUMN][row]
-        })
-        .collect::<Vec<_>>();
-
-    let frame_word_denom = combine!(
-        binding_relations.frame_word,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            pp[HASH_ID_COLUMN],
-            pp[WORD_INDEX_COLUMN],
-            &values
-        ]
-    );
-    let payload_word_denom = combine!(
-        word_relations.payload_word,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            pp[SEQUENCE_COLUMN],
-            pp[TAG_COLUMN],
-            pp[ARG_0_COLUMN],
-            pp[ARG_1_COLUMN],
-            pp[ARG_2_COLUMN],
-            pp[ARG_3_COLUMN],
-            pp[PAYLOAD_INDEX_COLUMN],
-            cols.value
-        ]
-    );
-
-    let mut logup_gen = LogupTraceGenerator::new(log_size);
-    write_pair!(
-        &active,
-        &frame_word_denom,
-        &neg_payload,
-        &payload_word_denom,
-        logup_gen
-    );
-    logup_gen.finalize_last()
+    component::witness::gen_interaction_trace(
+        trace,
+        preprocessed,
+        BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        &TranscriptWordComponentRelations::new(binding_relations, word_relations),
+    )
 }
 
 /// Materializes only active payload words; fixed and inactive rows stay zero.

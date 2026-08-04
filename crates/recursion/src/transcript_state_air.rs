@@ -17,14 +17,10 @@ use stwo::core::fields::qm31::QM31;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::simd::column::BaseColumn;
-use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, RelationEntry, relation,
-};
-use stwo_macros::define_component_tables;
+use stwo_constraint_framework::relation;
 
 use super::control_air::{
     LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
@@ -59,40 +55,6 @@ const STATE_CONSUME_MASK_COLUMN: usize = 14;
 const STATE_PRODUCE_MULTIPLICITY_COLUMN: usize = 15;
 const DRAW_OUTPUT_MASK_COLUMN: usize = 16;
 const PREPROCESSED_COLUMN_COUNT: usize = 17;
-
-const PREPROCESSED_COLUMN_IDS: [&str; PREPROCESSED_COLUMN_COUNT] = [
-    "recursion_transcript_state_row_mask",
-    "recursion_transcript_state_segment_mask",
-    "recursion_transcript_state_binary_mask",
-    "recursion_transcript_state_verifier_id",
-    "recursion_transcript_state_sequence",
-    "recursion_transcript_state_tag",
-    "recursion_transcript_state_arg_0",
-    "recursion_transcript_state_arg_1",
-    "recursion_transcript_state_arg_2",
-    "recursion_transcript_state_arg_3",
-    "recursion_transcript_state_hash_id",
-    "recursion_transcript_state_input_key",
-    "recursion_transcript_state_output_key",
-    "recursion_transcript_state_initial_mask",
-    "recursion_transcript_state_consume_mask",
-    "recursion_transcript_state_produce_multiplicity",
-    "recursion_transcript_state_draw_output_mask",
-];
-
-define_component_tables! {
-    transcript_frame_state: {
-        committed: {
-            input_0, input_1, input_2, input_3,
-            input_4, input_5, input_6, input_7,
-            output_0, output_1, output_2, output_3,
-            output_4, output_5, output_6, output_7,
-        },
-        constraints: {},
-    },
-}
-
-use prover_columns::TranscriptFrameStateColumns;
 
 // Persistent digest state: verifier, operation boundary, and eight words.
 relation!(TranscriptDigestStateRelation, 10);
@@ -212,10 +174,7 @@ impl TranscriptStatePreprocessed {
     }
 
     pub fn column_ids() -> Vec<PreProcessedColumnId> {
-        PREPROCESSED_COLUMN_IDS
-            .iter()
-            .map(|id| PreProcessedColumnId { id: (*id).into() })
-            .collect()
+        preprocessed_column_ids()
     }
 
     pub fn gen_columns(
@@ -353,145 +312,154 @@ fn append_layout_rows(
     Ok(())
 }
 
-pub type Component = FrameworkComponent<Eval>;
-
+/// Relation instances used by the macro-generated frame-state component.
 #[derive(Clone)]
-pub struct Eval {
-    pub log_size: u32,
-    pub proof_kind: ProofKind,
-    pub binding_relations: TranscriptBindingRelations,
-    pub state_relations: TranscriptStateRelations,
+pub struct TranscriptFrameStateRelations {
+    pub frame_output: super::transcript_binding_air::TranscriptFrameOutputRelation,
+    pub draw_output: TranscriptDrawOutputRelation,
+    pub digest_state: TranscriptDigestStateRelation,
+    pub frame_word: super::transcript_binding_air::TranscriptFrameWordRelation,
 }
 
-impl FrameworkEval for Eval {
-    fn log_size(&self) -> u32 {
-        self.log_size
+impl TranscriptFrameStateRelations {
+    /// Combine binding and state relation instances for one universal proof.
+    pub fn new(binding: &TranscriptBindingRelations, state: &TranscriptStateRelations) -> Self {
+        Self {
+            frame_output: binding.frame_output.clone(),
+            draw_output: state.draw_output.clone(),
+            digest_state: state.digest_state.clone(),
+            frame_word: binding.frame_word.clone(),
+        }
     }
+}
 
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
+stwo_macros::define_air_fns! {
+    max_degree: 3,
+    embedded: [],
+    embedded_component: true,
+    embedded_enabler_boolean: false,
+    embedded_relations: crate::transcript_state_air::TranscriptFrameStateRelations,
+    logup_batch: 2,
+    embedded_preprocessed: {
+        row_mask: "recursion_transcript_state_row_mask",
+        segment_mask: "recursion_transcript_state_segment_mask",
+        binary_mask: "recursion_transcript_state_binary_mask",
+        verifier_id: "recursion_transcript_state_verifier_id",
+        sequence: "recursion_transcript_state_sequence",
+        tag: "recursion_transcript_state_tag",
+        arg_0: "recursion_transcript_state_arg_0",
+        arg_1: "recursion_transcript_state_arg_1",
+        arg_2: "recursion_transcript_state_arg_2",
+        arg_3: "recursion_transcript_state_arg_3",
+        hash_id: "recursion_transcript_state_hash_id",
+        input_state_key: "recursion_transcript_state_input_key",
+        output_state_key: "recursion_transcript_state_output_key",
+        initial_mask: "recursion_transcript_state_initial_mask",
+        state_consume_mask: "recursion_transcript_state_consume_mask",
+        state_produce_multiplicity: "recursion_transcript_state_produce_multiplicity",
+        draw_output_mask: "recursion_transcript_state_draw_output_mask",
+    },
+    embedded_params: [segment_active, binary_active],
 
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = TranscriptFrameStateColumns::from_eval(&mut eval);
-        let column_ids = TranscriptStatePreprocessed::column_ids();
-        let row_mask = eval.get_preprocessed_column(column_ids[ROW_MASK_COLUMN].clone());
-        let segment_mask = eval.get_preprocessed_column(column_ids[SEGMENT_MASK_COLUMN].clone());
-        let binary_mask = eval.get_preprocessed_column(column_ids[BINARY_MASK_COLUMN].clone());
-        let verifier_id = eval.get_preprocessed_column(column_ids[VERIFIER_ID_COLUMN].clone());
-        let sequence = eval.get_preprocessed_column(column_ids[SEQUENCE_COLUMN].clone());
-        let tag = eval.get_preprocessed_column(column_ids[TAG_COLUMN].clone());
-        let arg_0 = eval.get_preprocessed_column(column_ids[ARG_0_COLUMN].clone());
-        let arg_1 = eval.get_preprocessed_column(column_ids[ARG_1_COLUMN].clone());
-        let arg_2 = eval.get_preprocessed_column(column_ids[ARG_2_COLUMN].clone());
-        let arg_3 = eval.get_preprocessed_column(column_ids[ARG_3_COLUMN].clone());
-        let hash_id = eval.get_preprocessed_column(column_ids[HASH_ID_COLUMN].clone());
-        let input_state_key =
-            eval.get_preprocessed_column(column_ids[INPUT_STATE_KEY_COLUMN].clone());
-        let output_state_key =
-            eval.get_preprocessed_column(column_ids[OUTPUT_STATE_KEY_COLUMN].clone());
-        let initial_mask = eval.get_preprocessed_column(column_ids[INITIAL_MASK_COLUMN].clone());
-        let state_consume_mask =
-            eval.get_preprocessed_column(column_ids[STATE_CONSUME_MASK_COLUMN].clone());
-        let state_produce_multiplicity =
-            eval.get_preprocessed_column(column_ids[STATE_PRODUCE_MULTIPLICITY_COLUMN].clone());
-        let draw_output_mask =
-            eval.get_preprocessed_column(column_ids[DRAW_OUTPUT_MASK_COLUMN].clone());
-        eval.add_constraint(cols.enabler.clone() - row_mask.clone());
+    relation frame_output(10);
+    relation draw_output(15);
+    relation digest_state(10);
+    relation frame_word(4);
 
-        let segment_active = BaseField::from(u32::from(self.proof_kind == ProofKind::SegmentLeaf));
-        let binary_active = BaseField::from(u32::from(self.proof_kind == ProofKind::BinaryNode));
+    fn transcript_frame_state(
+        input_0, input_1, input_2, input_3,
+        input_4, input_5, input_6, input_7,
+        output_0, output_1, output_2, output_3,
+        output_4, output_5, output_6, output_7,
+        row_mask, segment_mask, binary_mask, verifier_id,
+        sequence, tag, arg_0, arg_1, arg_2, arg_3,
+        hash_id, input_state_key, output_state_key, initial_mask,
+        state_consume_mask, state_produce_multiplicity, draw_output_mask,
+        segment_active, binary_active,
+    ) {
         let active = segment_mask * segment_active + binary_mask * binary_active;
-        let inactive = row_mask - active.clone();
-        let initial_active = active.clone() * initial_mask;
-        let state_consume = active.clone() * state_consume_mask;
-        let state_produce = active.clone() * state_produce_multiplicity;
-        let draw_output = active.clone() * draw_output_mask;
-        let input = [
-            cols.input_0.clone(),
-            cols.input_1.clone(),
-            cols.input_2.clone(),
-            cols.input_3.clone(),
-            cols.input_4.clone(),
-            cols.input_5.clone(),
-            cols.input_6.clone(),
-            cols.input_7.clone(),
-        ];
-        let output = [
-            cols.output_0.clone(),
-            cols.output_1.clone(),
-            cols.output_2.clone(),
-            cols.output_3.clone(),
-            cols.output_4.clone(),
-            cols.output_5.clone(),
-            cols.output_6.clone(),
-            cols.output_7.clone(),
-        ];
-        for value in input.iter().chain(&output) {
-            eval.add_constraint(inactive.clone() * value.clone());
-        }
-        for value in &input {
-            eval.add_constraint(initial_active.clone() * value.clone());
-        }
+        let inactive = row_mask - active;
 
-        let mut frame_output_tuple = vec![verifier_id.clone(), hash_id.clone()];
-        frame_output_tuple.extend(output.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.binding_relations.frame_output,
-            -E::EF::from(active.clone()),
-            &frame_output_tuple,
-        ));
+        constrain enabler - row_mask;
+        constrain inactive * input_0;
+        constrain inactive * input_1;
+        constrain inactive * input_2;
+        constrain inactive * input_3;
+        constrain inactive * input_4;
+        constrain inactive * input_5;
+        constrain inactive * input_6;
+        constrain inactive * input_7;
+        constrain inactive * output_0;
+        constrain inactive * output_1;
+        constrain inactive * output_2;
+        constrain inactive * output_3;
+        constrain inactive * output_4;
+        constrain inactive * output_5;
+        constrain inactive * output_6;
+        constrain inactive * output_7;
+        constrain active * initial_mask * input_0;
+        constrain active * initial_mask * input_1;
+        constrain active * initial_mask * input_2;
+        constrain active * initial_mask * input_3;
+        constrain active * initial_mask * input_4;
+        constrain active * initial_mask * input_5;
+        constrain active * initial_mask * input_6;
+        constrain active * initial_mask * input_7;
 
-        let mut draw_output_tuple = vec![
-            verifier_id.clone(),
-            sequence,
-            tag,
-            arg_0,
-            arg_1,
-            arg_2,
-            arg_3,
-        ];
-        draw_output_tuple.extend(output.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.state_relations.draw_output,
-            E::EF::from(draw_output),
-            &draw_output_tuple,
-        ));
+        consume(active) frame_output(
+            verifier_id, hash_id,
+            output_0, output_1, output_2, output_3,
+            output_4, output_5, output_6, output_7,
+        );
+        emit(active * draw_output_mask) draw_output(
+            verifier_id, sequence, tag, arg_0, arg_1, arg_2, arg_3,
+            output_0, output_1, output_2, output_3,
+            output_4, output_5, output_6, output_7,
+        );
+        consume(active * state_consume_mask) digest_state(
+            verifier_id, input_state_key,
+            input_0, input_1, input_2, input_3,
+            input_4, input_5, input_6, input_7,
+        );
+        emit(active * state_produce_multiplicity) digest_state(
+            verifier_id, output_state_key,
+            output_0, output_1, output_2, output_3,
+            output_4, output_5, output_6, output_7,
+        );
+        emit(active) frame_word(verifier_id, hash_id, 0, input_0);
+        emit(active) frame_word(verifier_id, hash_id, 1, input_1);
+        emit(active) frame_word(verifier_id, hash_id, 2, input_2);
+        emit(active) frame_word(verifier_id, hash_id, 3, input_3);
+        emit(active) frame_word(verifier_id, hash_id, 4, input_4);
+        emit(active) frame_word(verifier_id, hash_id, 5, input_5);
+        emit(active) frame_word(verifier_id, hash_id, 6, input_6);
+        emit(active) frame_word(verifier_id, hash_id, 7, input_7);
 
-        let mut state_input_tuple = vec![verifier_id.clone(), input_state_key];
-        state_input_tuple.extend(input.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.state_relations.digest_state,
-            -E::EF::from(state_consume),
-            &state_input_tuple,
-        ));
-        let mut state_output_tuple = vec![verifier_id.clone(), output_state_key];
-        state_output_tuple.extend(output.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.state_relations.digest_state,
-            E::EF::from(state_produce),
-            &state_output_tuple,
-        ));
-
-        for (word_index, value) in input.into_iter().enumerate() {
-            eval.add_to_relation(RelationEntry::new(
-                &self.binding_relations.frame_word,
-                E::EF::from(active.clone()),
-                &[
-                    verifier_id.clone(),
-                    hash_id.clone(),
-                    E::F::from(BaseField::from(word_index as u32)),
-                    value,
-                ],
-            ));
-        }
-
-        eval.finalize_logup_in_pairs();
-        eval
+        return (
+            output_0, output_1, output_2, output_3,
+            output_4, output_5, output_6, output_7,
+        );
     }
 }
 
-/// Generates all frame-state relation fractions from fixed preprocessing.
+pub use component::air::{Component, Eval};
+
+/// Construct the generated evaluator with verifier-owned mode selectors.
+pub fn eval_for_proof_kind(
+    log_size: u32,
+    proof_kind: ProofKind,
+    binding_relations: &TranscriptBindingRelations,
+    state_relations: &TranscriptStateRelations,
+) -> Eval {
+    Eval {
+        log_size,
+        segment_active: BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        binary_active: BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        relations: TranscriptFrameStateRelations::new(binding_relations, state_relations),
+    }
+}
+
+/// Generate all frame-state interaction entries from the macro-defined frame.
 pub fn gen_interaction_trace(
     trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     preprocessed: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
@@ -502,174 +470,13 @@ pub fn gen_interaction_trace(
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     QM31,
 ) {
-    let cols = TranscriptFrameStateColumns::from_iter(
-        trace.iter().map(|evaluation| &evaluation.values.data),
-    );
-    let pp = preprocessed
-        .iter()
-        .map(|column| &column.values.data)
-        .collect::<Vec<_>>();
-    let simd_size = cols.enabler.len();
-    let log_size = trace[0].domain.log_size();
-    let segment_active = BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf));
-    let binary_active = BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode));
-    let active: Vec<PackedQM31> = (0..simd_size)
-        .map(|row| {
-            PackedQM31::from(
-                pp[SEGMENT_MASK_COLUMN][row] * segment_active
-                    + pp[BINARY_MASK_COLUMN][row] * binary_active,
-            )
-        })
-        .collect();
-    let neg_active: Vec<_> = active.iter().map(|value| -*value).collect();
-    let draw_output: Vec<PackedQM31> = (0..simd_size)
-        .map(|row| active[row] * PackedQM31::from(pp[DRAW_OUTPUT_MASK_COLUMN][row]))
-        .collect();
-    let neg_state_consume: Vec<PackedQM31> = (0..simd_size)
-        .map(|row| -active[row] * PackedQM31::from(pp[STATE_CONSUME_MASK_COLUMN][row]))
-        .collect();
-    let state_produce: Vec<PackedQM31> = (0..simd_size)
-        .map(|row| active[row] * PackedQM31::from(pp[STATE_PRODUCE_MULTIPLICITY_COLUMN][row]))
-        .collect();
-
-    let frame_output_denom = combine!(
-        binding_relations.frame_output,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            pp[HASH_ID_COLUMN],
-            cols.output_0,
-            cols.output_1,
-            cols.output_2,
-            cols.output_3,
-            cols.output_4,
-            cols.output_5,
-            cols.output_6,
-            cols.output_7
-        ]
-    );
-    let draw_output_denom = combine!(
-        state_relations.draw_output,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            pp[SEQUENCE_COLUMN],
-            pp[TAG_COLUMN],
-            pp[ARG_0_COLUMN],
-            pp[ARG_1_COLUMN],
-            pp[ARG_2_COLUMN],
-            pp[ARG_3_COLUMN],
-            cols.output_0,
-            cols.output_1,
-            cols.output_2,
-            cols.output_3,
-            cols.output_4,
-            cols.output_5,
-            cols.output_6,
-            cols.output_7
-        ]
-    );
-    let state_input_denom = combine!(
-        state_relations.digest_state,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            pp[INPUT_STATE_KEY_COLUMN],
-            cols.input_0,
-            cols.input_1,
-            cols.input_2,
-            cols.input_3,
-            cols.input_4,
-            cols.input_5,
-            cols.input_6,
-            cols.input_7
-        ]
-    );
-    let state_output_denom = combine!(
-        state_relations.digest_state,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            pp[OUTPUT_STATE_KEY_COLUMN],
-            cols.output_0,
-            cols.output_1,
-            cols.output_2,
-            cols.output_3,
-            cols.output_4,
-            cols.output_5,
-            cols.output_6,
-            cols.output_7
-        ]
-    );
-    let word_denoms = [
-        cols.input_0,
-        cols.input_1,
-        cols.input_2,
-        cols.input_3,
-        cols.input_4,
-        cols.input_5,
-        cols.input_6,
-        cols.input_7,
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(word_index, values)| {
-        let word_index = stwo::prover::backend::simd::m31::PackedM31::broadcast(BaseField::from(
-            word_index as u32,
-        ));
-        let word_index = (0..simd_size).map(|_| word_index).collect::<Vec<_>>();
-        combine!(
-            binding_relations.frame_word,
-            [
-                pp[VERIFIER_ID_COLUMN],
-                pp[HASH_ID_COLUMN],
-                &word_index,
-                values
-            ]
-        )
-    })
-    .collect::<Vec<_>>();
-
-    let mut logup_gen = LogupTraceGenerator::new(log_size);
-    write_pair!(
-        &neg_active,
-        &frame_output_denom,
-        &draw_output,
-        &draw_output_denom,
-        logup_gen
-    );
-    write_pair!(
-        &neg_state_consume,
-        &state_input_denom,
-        &state_produce,
-        &state_output_denom,
-        logup_gen
-    );
-    write_pair!(
-        &active,
-        &word_denoms[0],
-        &active,
-        &word_denoms[1],
-        logup_gen
-    );
-    write_pair!(
-        &active,
-        &word_denoms[2],
-        &active,
-        &word_denoms[3],
-        logup_gen
-    );
-    write_pair!(
-        &active,
-        &word_denoms[4],
-        &active,
-        &word_denoms[5],
-        logup_gen
-    );
-    write_pair!(
-        &active,
-        &word_denoms[6],
-        &active,
-        &word_denoms[7],
-        logup_gen
-    );
-    logup_gen.finalize_last()
+    component::witness::gen_interaction_trace(
+        trace,
+        preprocessed,
+        BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        &TranscriptFrameStateRelations::new(binding_relations, state_relations),
+    )
 }
 
 /// Materializes frame inputs and verified rate outputs for the active lanes.

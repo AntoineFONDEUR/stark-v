@@ -7,7 +7,7 @@
 //! supplies control and data, while frame semantics consume final outputs.
 
 use air::digest::M31Word;
-use air::poseidon2::{T, poseidon2_traced_state};
+use air::poseidon2::poseidon2_traced_state;
 use air::trace::Poseidon2Table;
 use prover::relations::Relations;
 use stwo::core::ColumnVec;
@@ -15,62 +15,11 @@ use stwo::core::channel::Channel;
 use stwo::core::fields::m31::{BaseField, P};
 use stwo::core::fields::qm31::QM31;
 use stwo::prover::backend::simd::SimdBackend;
-use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::CircleEvaluation;
-use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, RelationEntry, relation,
-};
-use stwo_macros::define_component_tables;
+use stwo_constraint_framework::relation;
 
 use super::transcript::{HashPurpose, TranscriptError, TranscriptTrace};
-
-const RATE: usize = T / 2;
-
-define_component_tables! {
-    transcript_hash_call: {
-        committed: {
-            verifier_id, call_id, hash_id, step, is_first, is_last, is_draw,
-            previous_0, previous_1, previous_2, previous_3,
-            previous_4, previous_5, previous_6, previous_7,
-            previous_8, previous_9, previous_10, previous_11,
-            previous_12, previous_13, previous_14, previous_15,
-            chunk_0, chunk_1, chunk_2, chunk_3,
-            chunk_4, chunk_5, chunk_6, chunk_7,
-            output_0, output_1, output_2, output_3,
-            output_4, output_5, output_6, output_7,
-            output_8, output_9, output_10, output_11,
-            output_12, output_13, output_14, output_15,
-        },
-        constraints: {
-            is_first * (1 - is_first),
-            is_last * (1 - is_last),
-            is_draw * (1 - is_draw),
-            is_first * (1 - enabler),
-            is_last * (1 - enabler),
-            is_draw * (1 - enabler),
-            is_first * step,
-            is_first * previous_0,
-            is_first * previous_1,
-            is_first * previous_2,
-            is_first * previous_3,
-            is_first * previous_4,
-            is_first * previous_5,
-            is_first * previous_6,
-            is_first * previous_7,
-            is_first * previous_8,
-            is_first * previous_9,
-            is_first * previous_10,
-            is_first * previous_11,
-            is_first * previous_12,
-            is_first * previous_13,
-            is_first * previous_14,
-            is_first * previous_15,
-        },
-    },
-}
-
-use prover_columns::TranscriptHashCallColumns;
 
 // State tuple: verifier, hash session, step, and the complete 16-word state.
 relation!(HashStateRelation, 19);
@@ -110,161 +59,133 @@ impl TranscriptAirRelations {
     }
 }
 
-pub type Component = FrameworkComponent<Eval>;
-
+/// Relation instances used by the macro-generated hash-call component.
 #[derive(Clone)]
-pub struct Eval {
-    pub log_size: u32,
-    pub relations: Relations,
-    pub transcript_relations: TranscriptAirRelations,
+pub struct TranscriptHashCallRelations {
+    pub poseidon2_io: air::relations::relation_types::poseidon2_io,
+    pub state: HashStateRelation,
+    pub data: HashDataRelation,
+    pub output: HashOutputRelation,
+    pub control: HashCallControlRelation,
 }
 
-impl FrameworkEval for Eval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
-
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
-
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = TranscriptHashCallColumns::from_eval(&mut eval);
-        for constraint in cols.constraints() {
-            eval.add_constraint(constraint);
+impl TranscriptHashCallRelations {
+    /// Combine the universal VM Poseidon2 relation with transcript-local relations.
+    pub fn new(vm: &Relations, transcript: &TranscriptAirRelations) -> Self {
+        Self {
+            poseidon2_io: vm.poseidon2_io.clone(),
+            state: transcript.state.clone(),
+            data: transcript.data.clone(),
+            output: transcript.output.clone(),
+            control: transcript.control.clone(),
         }
-
-        let one = E::F::from(BaseField::from(1));
-        let previous = [
-            cols.previous_0.clone(),
-            cols.previous_1.clone(),
-            cols.previous_2.clone(),
-            cols.previous_3.clone(),
-            cols.previous_4.clone(),
-            cols.previous_5.clone(),
-            cols.previous_6.clone(),
-            cols.previous_7.clone(),
-            cols.previous_8.clone(),
-            cols.previous_9.clone(),
-            cols.previous_10.clone(),
-            cols.previous_11.clone(),
-            cols.previous_12.clone(),
-            cols.previous_13.clone(),
-            cols.previous_14.clone(),
-            cols.previous_15.clone(),
-        ];
-        let chunk = [
-            cols.chunk_0.clone(),
-            cols.chunk_1.clone(),
-            cols.chunk_2.clone(),
-            cols.chunk_3.clone(),
-            cols.chunk_4.clone(),
-            cols.chunk_5.clone(),
-            cols.chunk_6.clone(),
-            cols.chunk_7.clone(),
-        ];
-        let output = [
-            cols.output_0.clone(),
-            cols.output_1.clone(),
-            cols.output_2.clone(),
-            cols.output_3.clone(),
-            cols.output_4.clone(),
-            cols.output_5.clone(),
-            cols.output_6.clone(),
-            cols.output_7.clone(),
-            cols.output_8.clone(),
-            cols.output_9.clone(),
-            cols.output_10.clone(),
-            cols.output_11.clone(),
-            cols.output_12.clone(),
-            cols.output_13.clone(),
-            cols.output_14.clone(),
-            cols.output_15.clone(),
-        ];
-
-        let mut poseidon_tuple = Vec::with_capacity(2 * T);
-        for (word, previous_word) in previous.iter().enumerate() {
-            poseidon_tuple.push(if word < RATE {
-                previous_word.clone() + chunk[word].clone()
-            } else {
-                previous_word.clone()
-            });
-        }
-        poseidon_tuple.extend(output.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.relations.poseidon2_io,
-            -E::EF::from(cols.enabler.clone()),
-            &poseidon_tuple,
-        ));
-
-        eval.add_to_relation(RelationEntry::new(
-            &self.transcript_relations.control,
-            -E::EF::from(cols.enabler.clone()),
-            &[
-                cols.verifier_id.clone(),
-                cols.call_id.clone(),
-                cols.hash_id.clone(),
-                cols.step.clone(),
-                cols.is_first.clone(),
-                cols.is_last.clone(),
-                cols.is_draw.clone(),
-            ],
-        ));
-
-        let mut data_tuple = vec![
-            cols.verifier_id.clone(),
-            cols.hash_id.clone(),
-            cols.step.clone(),
-        ];
-        data_tuple.extend(chunk.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.transcript_relations.data,
-            -E::EF::from(cols.enabler.clone()),
-            &data_tuple,
-        ));
-
-        let mut previous_tuple = vec![
-            cols.verifier_id.clone(),
-            cols.hash_id.clone(),
-            cols.step.clone(),
-        ];
-        previous_tuple.extend(previous.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.transcript_relations.state,
-            -E::EF::from(cols.enabler.clone() - cols.is_first.clone()),
-            &previous_tuple,
-        ));
-        let mut next_tuple = vec![
-            cols.verifier_id.clone(),
-            cols.hash_id.clone(),
-            cols.step.clone() + one,
-        ];
-        next_tuple.extend(output.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.transcript_relations.state,
-            E::EF::from(cols.enabler.clone() - cols.is_last.clone()),
-            &next_tuple,
-        ));
-
-        let mut output_tuple = vec![
-            cols.verifier_id.clone(),
-            cols.hash_id.clone(),
-            cols.call_id.clone(),
-            cols.is_draw.clone(),
-        ];
-        output_tuple.extend(output[..RATE].iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.transcript_relations.output,
-            E::EF::from(cols.is_last.clone()),
-            &output_tuple,
-        ));
-
-        eval.finalize_logup_in_pairs();
-        eval
     }
 }
 
-/// Generates the interaction trace for all six hash-call relation entries.
+stwo_macros::define_air_fns! {
+    max_degree: 3,
+    embedded: [],
+    embedded_component: true,
+    embedded_relations: crate::transcript_air::TranscriptHashCallRelations,
+    logup_batch: 2,
+
+    relation poseidon2_io(32);
+    relation control(7);
+    relation data(11);
+    relation state(19);
+    relation output(12);
+
+    fn transcript_hash_call(
+        verifier_id, call_id, hash_id, step, is_first, is_last, is_draw,
+        previous_0, previous_1, previous_2, previous_3,
+        previous_4, previous_5, previous_6, previous_7,
+        previous_8, previous_9, previous_10, previous_11,
+        previous_12, previous_13, previous_14, previous_15,
+        chunk_0, chunk_1, chunk_2, chunk_3,
+        chunk_4, chunk_5, chunk_6, chunk_7,
+        output_0, output_1, output_2, output_3,
+        output_4, output_5, output_6, output_7,
+        output_8, output_9, output_10, output_11,
+        output_12, output_13, output_14, output_15,
+    ) {
+        constrain is_first * (1 - is_first);
+        constrain is_last * (1 - is_last);
+        constrain is_draw * (1 - is_draw);
+        constrain is_first * (1 - enabler);
+        constrain is_last * (1 - enabler);
+        constrain is_draw * (1 - enabler);
+        constrain is_first * step;
+        constrain is_first * previous_0;
+        constrain is_first * previous_1;
+        constrain is_first * previous_2;
+        constrain is_first * previous_3;
+        constrain is_first * previous_4;
+        constrain is_first * previous_5;
+        constrain is_first * previous_6;
+        constrain is_first * previous_7;
+        constrain is_first * previous_8;
+        constrain is_first * previous_9;
+        constrain is_first * previous_10;
+        constrain is_first * previous_11;
+        constrain is_first * previous_12;
+        constrain is_first * previous_13;
+        constrain is_first * previous_14;
+        constrain is_first * previous_15;
+
+        consume poseidon2_io(
+            previous_0 + chunk_0,
+            previous_1 + chunk_1,
+            previous_2 + chunk_2,
+            previous_3 + chunk_3,
+            previous_4 + chunk_4,
+            previous_5 + chunk_5,
+            previous_6 + chunk_6,
+            previous_7 + chunk_7,
+            previous_8, previous_9, previous_10, previous_11,
+            previous_12, previous_13, previous_14, previous_15,
+            output_0, output_1, output_2, output_3,
+            output_4, output_5, output_6, output_7,
+            output_8, output_9, output_10, output_11,
+            output_12, output_13, output_14, output_15,
+        );
+        consume control(
+            verifier_id, call_id, hash_id, step, is_first, is_last, is_draw,
+        );
+        consume data(
+            verifier_id, hash_id, step,
+            chunk_0, chunk_1, chunk_2, chunk_3,
+            chunk_4, chunk_5, chunk_6, chunk_7,
+        );
+        consume(enabler - is_first) state(
+            verifier_id, hash_id, step,
+            previous_0, previous_1, previous_2, previous_3,
+            previous_4, previous_5, previous_6, previous_7,
+            previous_8, previous_9, previous_10, previous_11,
+            previous_12, previous_13, previous_14, previous_15,
+        );
+        emit(enabler - is_last) state(
+            verifier_id, hash_id, step + 1,
+            output_0, output_1, output_2, output_3,
+            output_4, output_5, output_6, output_7,
+            output_8, output_9, output_10, output_11,
+            output_12, output_13, output_14, output_15,
+        );
+        emit(is_last) output(
+            verifier_id, hash_id, call_id, is_draw,
+            output_0, output_1, output_2, output_3,
+            output_4, output_5, output_6, output_7,
+        );
+
+        return (
+            output_0, output_1, output_2, output_3,
+            output_4, output_5, output_6, output_7,
+        );
+    }
+}
+
+pub use component::air::{Component, Eval};
+
+/// Generate all six interaction entries from the macro-defined frame.
 pub fn gen_interaction_trace(
     trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     relations: &Relations,
@@ -273,195 +194,10 @@ pub fn gen_interaction_trace(
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     QM31,
 ) {
-    let cols = TranscriptHashCallColumns::from_iter(trace.iter().map(|eval| &eval.values.data));
-    let simd_size = cols.enabler.len();
-    let log_size = trace[0].domain.log_size();
-    let enabled: Vec<PackedQM31> = cols
-        .enabler
-        .iter()
-        .map(|&value| PackedQM31::from(value))
-        .collect();
-    let neg_enabled: Vec<PackedQM31> = enabled.iter().map(|&value| -value).collect();
-    let neg_non_first: Vec<PackedQM31> = (0..simd_size)
-        .map(|row| -PackedQM31::from(cols.enabler[row] - cols.is_first[row]))
-        .collect();
-    let non_last: Vec<PackedQM31> = (0..simd_size)
-        .map(|row| PackedQM31::from(cols.enabler[row] - cols.is_last[row]))
-        .collect();
-    let last: Vec<PackedQM31> = cols
-        .is_last
-        .iter()
-        .map(|&value| PackedQM31::from(value))
-        .collect();
-
-    let in_rate: Vec<Vec<_>> = [
-        (cols.previous_0, cols.chunk_0),
-        (cols.previous_1, cols.chunk_1),
-        (cols.previous_2, cols.chunk_2),
-        (cols.previous_3, cols.chunk_3),
-        (cols.previous_4, cols.chunk_4),
-        (cols.previous_5, cols.chunk_5),
-        (cols.previous_6, cols.chunk_6),
-        (cols.previous_7, cols.chunk_7),
-    ]
-    .into_iter()
-    .map(|(previous, chunk)| {
-        (0..simd_size)
-            .map(|row| previous[row] + chunk[row])
-            .collect()
-    })
-    .collect();
-    let one = stwo::prover::backend::simd::m31::PackedM31::broadcast(BaseField::from(1));
-    let next_step: Vec<_> = (0..simd_size).map(|row| cols.step[row] + one).collect();
-
-    let poseidon_denom = combine!(
-        relations.poseidon2_io,
-        [
-            &in_rate[0],
-            &in_rate[1],
-            &in_rate[2],
-            &in_rate[3],
-            &in_rate[4],
-            &in_rate[5],
-            &in_rate[6],
-            &in_rate[7],
-            cols.previous_8,
-            cols.previous_9,
-            cols.previous_10,
-            cols.previous_11,
-            cols.previous_12,
-            cols.previous_13,
-            cols.previous_14,
-            cols.previous_15,
-            cols.output_0,
-            cols.output_1,
-            cols.output_2,
-            cols.output_3,
-            cols.output_4,
-            cols.output_5,
-            cols.output_6,
-            cols.output_7,
-            cols.output_8,
-            cols.output_9,
-            cols.output_10,
-            cols.output_11,
-            cols.output_12,
-            cols.output_13,
-            cols.output_14,
-            cols.output_15
-        ]
-    );
-    let control_denom = combine!(
-        transcript_relations.control,
-        [
-            cols.verifier_id,
-            cols.call_id,
-            cols.hash_id,
-            cols.step,
-            cols.is_first,
-            cols.is_last,
-            cols.is_draw
-        ]
-    );
-    let data_denom = combine!(
-        transcript_relations.data,
-        [
-            cols.verifier_id,
-            cols.hash_id,
-            cols.step,
-            cols.chunk_0,
-            cols.chunk_1,
-            cols.chunk_2,
-            cols.chunk_3,
-            cols.chunk_4,
-            cols.chunk_5,
-            cols.chunk_6,
-            cols.chunk_7
-        ]
-    );
-    let previous_denom = combine!(
-        transcript_relations.state,
-        [
-            cols.verifier_id,
-            cols.hash_id,
-            cols.step,
-            cols.previous_0,
-            cols.previous_1,
-            cols.previous_2,
-            cols.previous_3,
-            cols.previous_4,
-            cols.previous_5,
-            cols.previous_6,
-            cols.previous_7,
-            cols.previous_8,
-            cols.previous_9,
-            cols.previous_10,
-            cols.previous_11,
-            cols.previous_12,
-            cols.previous_13,
-            cols.previous_14,
-            cols.previous_15
-        ]
-    );
-    let next_denom = combine!(
-        transcript_relations.state,
-        [
-            cols.verifier_id,
-            cols.hash_id,
-            &next_step,
-            cols.output_0,
-            cols.output_1,
-            cols.output_2,
-            cols.output_3,
-            cols.output_4,
-            cols.output_5,
-            cols.output_6,
-            cols.output_7,
-            cols.output_8,
-            cols.output_9,
-            cols.output_10,
-            cols.output_11,
-            cols.output_12,
-            cols.output_13,
-            cols.output_14,
-            cols.output_15
-        ]
-    );
-    let output_denom = combine!(
-        transcript_relations.output,
-        [
-            cols.verifier_id,
-            cols.hash_id,
-            cols.call_id,
-            cols.is_draw,
-            cols.output_0,
-            cols.output_1,
-            cols.output_2,
-            cols.output_3,
-            cols.output_4,
-            cols.output_5,
-            cols.output_6,
-            cols.output_7
-        ]
-    );
-
-    let mut logup_gen = LogupTraceGenerator::new(log_size);
-    write_pair!(
-        &neg_enabled,
-        &poseidon_denom,
-        &neg_enabled,
-        &control_denom,
-        logup_gen
-    );
-    write_pair!(
-        &neg_enabled,
-        &data_denom,
-        &neg_non_first,
-        &previous_denom,
-        logup_gen
-    );
-    write_pair!(&non_last, &next_denom, &last, &output_denom, logup_gen);
-    logup_gen.finalize_last()
+    component::witness::gen_interaction_trace(
+        trace,
+        &TranscriptHashCallRelations::new(relations, transcript_relations),
+    )
 }
 
 /// Materializes validated transcript calls and matching Poseidon2 rows.
@@ -519,7 +255,7 @@ mod tests {
     use rstest::rstest;
     use stwo::core::pcs::TreeVec;
     use stwo::core::poly::circle::CanonicCoset;
-    use stwo_constraint_framework::assert_constraints_on_polys;
+    use stwo_constraint_framework::{FrameworkEval, assert_constraints_on_polys};
 
     use super::*;
     use crate::transcript::{RecordingTranscriptBackend, TranscriptKernel};
@@ -547,8 +283,7 @@ mod tests {
         let trace_polys = traces.map_cols(|column| column.interpolate());
         let eval = Eval {
             log_size,
-            relations,
-            transcript_relations,
+            relations: TranscriptHashCallRelations::new(&relations, &transcript_relations),
         };
         assert_constraints_on_polys(
             &trace_polys,
@@ -620,8 +355,10 @@ mod tests {
 
         let eval = Eval {
             log_size: 4,
-            relations: Relations::dummy(),
-            transcript_relations: TranscriptAirRelations::dummy(),
+            relations: TranscriptHashCallRelations::new(
+                &Relations::dummy(),
+                &TranscriptAirRelations::dummy(),
+            ),
         };
         let degrees = eval
             .evaluate(ExprEvaluator::new())

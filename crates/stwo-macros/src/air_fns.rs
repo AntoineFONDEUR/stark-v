@@ -122,6 +122,10 @@ struct AirFnsInput {
     /// When set with `embedded`, also emit the narrow/wide/io LogUp component
     /// adapter wired to `crate::relations::Relations`.
     embedded_component: bool,
+    /// Whether the generated component enforces booleanity of its committed
+    /// enabler column. Trusted schedules can disable this when an explicit
+    /// equality binds the enabler to a boolean preprocessed row mask.
+    embedded_enabler_boolean: bool,
     /// Relation bundle used by a generated embedded component. The default is
     /// the zkVM prover bundle; recursion supplies a bundle containing the exact
     /// shared relation instances used by its universal registry.
@@ -195,6 +199,20 @@ impl Parse for AirFnsInput {
             lit.value
         } else {
             false
+        };
+
+        let embedded_enabler_boolean = if input
+            .cursor()
+            .ident()
+            .is_some_and(|(ident, _)| ident == "embedded_enabler_boolean")
+        {
+            input.parse::<Ident>()?;
+            input.parse::<Token![:]>()?;
+            let lit: syn::LitBool = input.parse()?;
+            input.parse::<Token![,]>()?;
+            lit.value
+        } else {
+            true
         };
 
         let embedded_relations = if input
@@ -312,6 +330,7 @@ impl Parse for AirFnsInput {
             max_degree,
             embedded,
             embedded_component,
+            embedded_enabler_boolean,
             embedded_relations,
             logup_batch,
             embedded_dynamic_component,
@@ -1461,6 +1480,7 @@ fn lower_fn(
     relation_arities: &HashMap<String, usize>,
     inline_fns: &HashMap<String, AirFn>,
     materialize_rets: bool,
+    fixed_params: &std::collections::HashSet<String>,
 ) -> syn::Result<LoweredFn> {
     // Lookup-tuple elements appear in LogUp denominators whose singleton
     // constraint multiplies by one cumsum mask: budget max_degree - 1.
@@ -1511,7 +1531,8 @@ fn lower_fn(
             None => {
                 let cell = lowerer.register_column(&param.name);
                 arg_columns.push(cell.clone());
-                Value::Scalar { cell, degree: 1 }
+                let degree = usize::from(!fixed_params.contains(&param.name.to_string()));
+                Value::Scalar { cell, degree }
             }
             Some(size) => {
                 let elements = (0..size)
@@ -1893,6 +1914,7 @@ pub fn define_air_fns(input: TokenStream) -> TokenStream {
         max_degree,
         embedded,
         embedded_component,
+        embedded_enabler_boolean,
         embedded_relations,
         logup_batch,
         embedded_dynamic_component,
@@ -1934,6 +1956,8 @@ pub fn define_air_fns(input: TokenStream) -> TokenStream {
     // Lower in declaration order: calls reference earlier functions, so
     // flattened arities accumulate as we go.
     let mut arities: HashMap<String, (usize, usize)> = HashMap::new();
+    let fixed_params: std::collections::HashSet<String> =
+        embedded_params.iter().map(ToString::to_string).collect();
     #[allow(unused_mut)]
     let mut lowered: Vec<LoweredFn> = Vec::new();
     for function in fns.iter().filter(|f| !f.inline) {
@@ -1944,6 +1968,7 @@ pub fn define_air_fns(input: TokenStream) -> TokenStream {
             &relation_arities,
             &inline_fns,
             embedded.is_some(),
+            &fixed_params,
         ) {
             Ok(result) => {
                 arities.insert(function.name.to_string(), (result.n_args, result.n_rets));
@@ -1975,6 +2000,7 @@ pub fn define_air_fns(input: TokenStream) -> TokenStream {
                 &mut lowered,
                 &embedded_relations,
                 logup_batch,
+                embedded_enabler_boolean,
                 &embedded_preprocessed,
                 &embedded_params,
             );
@@ -2133,6 +2159,7 @@ fn generate_embedded_preprocessed(
     lowered: &mut [LoweredFn],
     relations_path: &Path,
     logup_batch: usize,
+    enabler_boolean: bool,
     preprocessed: &[(Ident, LitStr)],
     params: &[Ident],
 ) -> TokenStream {
@@ -2148,6 +2175,14 @@ fn generate_embedded_preprocessed(
         return syn::Error::new(
             proc_macro2::Span::call_site(),
             "embedded_preprocessed functions cannot activate other functions",
+        )
+        .to_compile_error()
+        .into();
+    }
+    if function.table.fields.len() != function.n_args {
+        return syn::Error::new(
+            function.name.span(),
+            "embedded_preprocessed functions must stay within the declared degree budget without materialized intermediates",
         )
         .to_compile_error()
         .into();
@@ -2210,23 +2245,41 @@ fn generate_embedded_preprocessed(
                 .into();
         }
     }
-    for field in &function.table.fields {
-        if !preprocessed_by_name.contains_key(&field.to_string())
-            && !param_names.contains(&field.to_string())
-        {
-            return syn::Error::new(
-                field.span(),
-                format!(
-                    "preprocessed component field `{field}` needs an embedded_preprocessed ID or embedded_params entry"
-                ),
-            )
-            .to_compile_error()
-            .into();
-        }
-    }
+    // Any remaining function parameters are committed witness columns. The
+    // generated table contains only these fields, while the logical columns
+    // frame also includes preprocessing and verifier-owned constants.
+    let committed_fields: Vec<Ident> = function
+        .table
+        .fields
+        .iter()
+        .filter(|field| {
+            !preprocessed_by_name.contains_key(&field.to_string())
+                && !param_names.contains(&field.to_string())
+        })
+        .cloned()
+        .collect();
+    let committed_positions: HashMap<String, usize> = committed_fields
+        .iter()
+        .enumerate()
+        .map(|(position, field)| (field.to_string(), position + 1))
+        .collect();
+    let has_committed = !committed_fields.is_empty();
 
     let columns_type = column_struct_name(&function.name);
     let preprocessed_ids: Vec<&LitStr> = preprocessed.iter().map(|(_, id)| id).collect();
+    let table = if has_committed {
+        let committed_table = OpcodeDef {
+            name: function.table.name.clone(),
+            fields: committed_fields,
+            derived: Vec::new(),
+            constraints: Vec::new(),
+            lookups: LookupsDef::default(),
+            air_only: false,
+        };
+        generate_table(&committed_table)
+    } else {
+        quote! {}
+    };
     let prover_columns =
         generate_prover_columns(&function.table).unwrap_or_else(|error| error.to_compile_error());
     let evaluation =
@@ -2252,8 +2305,10 @@ fn generate_embedded_preprocessed(
                         },
                     )
                 }
-            } else {
+            } else if param_names.contains(&field.to_string()) {
                 quote! { E::F::from(self.#field) }
+            } else {
+                quote! { eval.next_trace_mask() }
             }
         })
         .collect();
@@ -2264,12 +2319,50 @@ fn generate_embedded_preprocessed(
         .map(|field| {
             if let Some((position, _)) = preprocessed_by_name.get(&field.to_string()) {
                 quote! { preprocessed[#position].values.data[i] }
-            } else {
+            } else if param_names.contains(&field.to_string()) {
                 quote! { PackedM31::broadcast(#field) }
+            } else {
+                let position = committed_positions
+                    .get(&field.to_string())
+                    .expect("committed field has a trace position");
+                quote! { trace[#position].values.data[i] }
             }
         })
         .collect();
+    let air_enabler = if has_committed {
+        quote! { eval.next_trace_mask() }
+    } else {
+        quote! { E::F::from(BaseField::from_u32_unchecked(1)) }
+    };
+    let witness_trace_param = if has_committed {
+        quote! {
+            trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
+        }
+    } else {
+        quote! {}
+    };
+    let witness_empty_check = if has_committed {
+        quote! { trace.is_empty() || preprocessed.is_empty() }
+    } else {
+        quote! { preprocessed.is_empty() }
+    };
+    let witness_enabler = if has_committed {
+        quote! { trace[0].values.data[i] }
+    } else {
+        quote! { PackedM31::broadcast(BaseField::from_u32_unchecked(1)) }
+    };
+    let witness_size = if has_committed {
+        quote! { trace[0].values.data.len() }
+    } else {
+        quote! { preprocessed[0].values.data.len() }
+    };
+    let witness_log_size = if has_committed {
+        quote! { trace[0].domain.log_size() }
+    } else {
+        quote! { preprocessed[0].domain.log_size() }
+    };
 
+    let constraint_skip = usize::from(!enabler_boolean);
     let finalize_logup = if logup_batch == 2 {
         quote! { eval.finalize_logup_in_pairs(); }
     } else {
@@ -2314,6 +2407,8 @@ fn generate_embedded_preprocessed(
         .collect();
 
     quote! {
+        #table
+
         pub mod prover_columns {
             #[allow(unused_imports)]
             use stwo_constraint_framework::EvalAtRow;
@@ -2366,11 +2461,11 @@ fn generate_embedded_preprocessed(
 
                     fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
                         let columns = #columns_type::from_iter([
-                            E::F::from(BaseField::from_u32_unchecked(1)),
+                            #air_enabler,
                             #(#air_values),*
                         ]);
                         let (constraints, entries) = columns.evaluation();
-                        for constraint in constraints {
+                        for constraint in constraints.into_iter().skip(#constraint_skip) {
                             eval.add_constraint(constraint);
                         }
                         let mut entries = entries.into_iter();
@@ -2412,6 +2507,7 @@ fn generate_embedded_preprocessed(
                 /// Build interaction columns from the trusted preprocessing and
                 /// the same lowered relation entries used by the AIR.
                 pub fn gen_interaction_trace(
+                    #witness_trace_param
                     preprocessed: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
                     #(#params: BaseField,)*
                     relations: &Relations,
@@ -2419,11 +2515,11 @@ fn generate_embedded_preprocessed(
                     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
                     QM31,
                 ) {
-                    if preprocessed.is_empty() {
+                    if #witness_empty_check {
                         return (vec![], QM31::zero());
                     }
-                    let simd_size = preprocessed[0].values.data.len();
-                    let log_size = preprocessed[0].domain.log_size();
+                    let simd_size = #witness_size;
+                    let log_size = #witness_log_size;
                     let mut logup_gen = LogupTraceGenerator::new(log_size);
                     let mut numerators: Vec<Vec<PackedQM31>> =
                         vec![Vec::with_capacity(simd_size); #n_entries];
@@ -2431,7 +2527,7 @@ fn generate_embedded_preprocessed(
                         vec![Vec::with_capacity(simd_size); #n_entries];
                     for i in 0..simd_size {
                         let columns = #columns_type::from_iter([
-                            PackedM31::broadcast(BaseField::from_u32_unchecked(1)),
+                            #witness_enabler,
                             #(#witness_values),*
                         ]);
                         let (_, entries) = columns.evaluation();

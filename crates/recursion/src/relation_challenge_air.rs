@@ -16,15 +16,10 @@ use stwo::core::fields::qm31::QM31;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::simd::column::BaseColumn;
-use stwo::prover::backend::simd::m31::PackedM31;
-use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, RelationEntry, relation,
-};
-use stwo_macros::define_component_tables;
+use stwo_constraint_framework::relation;
 
 use super::control_air::{
     LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
@@ -58,33 +53,6 @@ const ARG_2_COLUMN: usize = 9;
 const ARG_3_COLUMN: usize = 10;
 const CHALLENGE_COLUMN: usize = 11;
 const PREPROCESSED_COLUMN_COUNT: usize = 12;
-
-const PREPROCESSED_COLUMN_IDS: [&str; PREPROCESSED_COLUMN_COUNT] = [
-    "recursion_relation_challenge_row_mask",
-    "recursion_relation_challenge_segment_mask",
-    "recursion_relation_challenge_binary_mask",
-    "recursion_relation_challenge_public_logup_mask",
-    "recursion_relation_challenge_verifier_id",
-    "recursion_relation_challenge_sequence",
-    "recursion_relation_challenge_tag",
-    "recursion_relation_challenge_arg_0",
-    "recursion_relation_challenge_arg_1",
-    "recursion_relation_challenge_arg_2",
-    "recursion_relation_challenge_arg_3",
-    "recursion_relation_challenge_index",
-];
-
-define_component_tables! {
-    relation_challenge: {
-        committed: {
-            output_0, output_1, output_2, output_3,
-            output_4, output_5, output_6, output_7,
-        },
-        constraints: {},
-    },
-}
-
-use prover_columns::RelationChallengeColumns;
 
 // Scoped word: verifier, consumer scope, challenge, word index, and value.
 relation!(RelationChallengeWordRelation, 5);
@@ -186,10 +154,7 @@ impl RelationChallengePreprocessed {
     }
 
     pub fn column_ids() -> Vec<PreProcessedColumnId> {
-        PREPROCESSED_COLUMN_IDS
-            .iter()
-            .map(|id| PreProcessedColumnId { id: (*id).into() })
-            .collect()
+        preprocessed_column_ids()
     }
 
     pub fn gen_columns(
@@ -270,115 +235,139 @@ fn append_plan_rows(
     Ok(expected_challenge)
 }
 
-pub type Component = FrameworkComponent<Eval>;
-
+/// Relation instances used by the macro-generated challenge component.
 #[derive(Clone)]
-pub struct Eval {
-    pub log_size: u32,
-    pub proof_kind: ProofKind,
-    pub transcript_relations: TranscriptStateRelations,
-    pub challenge_relations: RelationChallengeRelations,
+pub struct RelationChallengeComponentRelations {
+    pub draw_output: super::transcript_state_air::TranscriptDrawOutputRelation,
+    pub word: RelationChallengeWordRelation,
 }
 
-impl FrameworkEval for Eval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
-
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
-
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = RelationChallengeColumns::from_eval(&mut eval);
-        let ids = RelationChallengePreprocessed::column_ids();
-        let row_mask = eval.get_preprocessed_column(ids[ROW_MASK_COLUMN].clone());
-        let segment_mask = eval.get_preprocessed_column(ids[SEGMENT_MASK_COLUMN].clone());
-        let binary_mask = eval.get_preprocessed_column(ids[BINARY_MASK_COLUMN].clone());
-        let public_logup_mask = eval.get_preprocessed_column(ids[PUBLIC_LOGUP_MASK_COLUMN].clone());
-        let verifier_id = eval.get_preprocessed_column(ids[VERIFIER_ID_COLUMN].clone());
-        let sequence = eval.get_preprocessed_column(ids[SEQUENCE_COLUMN].clone());
-        let tag = eval.get_preprocessed_column(ids[TAG_COLUMN].clone());
-        let arg_0 = eval.get_preprocessed_column(ids[ARG_0_COLUMN].clone());
-        let arg_1 = eval.get_preprocessed_column(ids[ARG_1_COLUMN].clone());
-        let arg_2 = eval.get_preprocessed_column(ids[ARG_2_COLUMN].clone());
-        let arg_3 = eval.get_preprocessed_column(ids[ARG_3_COLUMN].clone());
-        let challenge = eval.get_preprocessed_column(ids[CHALLENGE_COLUMN].clone());
-        let output = output_columns(&cols);
-        let segment = E::F::from(BaseField::from(u32::from(
-            self.proof_kind == ProofKind::SegmentLeaf,
-        )));
-        let binary = E::F::from(BaseField::from(u32::from(
-            self.proof_kind == ProofKind::BinaryNode,
-        )));
-        let active = row_mask * (segment_mask * segment + binary_mask * binary);
-        let one = E::F::from(BaseField::from(1));
-        eval.add_constraint(cols.enabler.clone() - active.clone());
-        for value in &output {
-            eval.add_constraint((one.clone() - active.clone()) * value.clone());
+impl RelationChallengeComponentRelations {
+    /// Combine transcript-draw and scoped challenge relation instances.
+    pub fn new(
+        transcript_relations: &TranscriptStateRelations,
+        challenge_relations: &RelationChallengeRelations,
+    ) -> Self {
+        Self {
+            draw_output: transcript_relations.draw_output.clone(),
+            word: challenge_relations.word.clone(),
         }
-
-        let mut draw_tuple = vec![
-            verifier_id.clone(),
-            sequence,
-            tag,
-            arg_0,
-            arg_1,
-            arg_2,
-            arg_3,
-        ];
-        draw_tuple.extend(output.iter().cloned());
-        eval.add_to_relation(RelationEntry::new(
-            &self.transcript_relations.draw_output,
-            -E::EF::from(active.clone()),
-            &draw_tuple,
-        ));
-        for (word_index, value) in output.into_iter().enumerate() {
-            let word_index = E::F::from(BaseField::from(
-                u32::try_from(word_index).expect("challenge word index fits u32"),
-            ));
-            eval.add_to_relation(RelationEntry::new(
-                &self.challenge_relations.word,
-                E::EF::from(active.clone()),
-                &[
-                    verifier_id.clone(),
-                    E::F::from(BaseField::from(AIR_EVALUATION_CHALLENGE_SCOPE)),
-                    challenge.clone(),
-                    word_index.clone(),
-                    value.clone(),
-                ],
-            ));
-            eval.add_to_relation(RelationEntry::new(
-                &self.challenge_relations.word,
-                E::EF::from(active.clone() * public_logup_mask.clone()),
-                &[
-                    verifier_id.clone(),
-                    E::F::from(BaseField::from(VM_PUBLIC_LOGUP_CHALLENGE_SCOPE)),
-                    challenge.clone(),
-                    word_index,
-                    value,
-                ],
-            ));
-        }
-        eval.finalize_logup_in_pairs();
-        eval
     }
 }
 
-fn output_columns<F: Clone>(cols: &RelationChallengeColumns<F>) -> [F; RATE] {
-    [
-        cols.output_0.clone(),
-        cols.output_1.clone(),
-        cols.output_2.clone(),
-        cols.output_3.clone(),
-        cols.output_4.clone(),
-        cols.output_5.clone(),
-        cols.output_6.clone(),
-        cols.output_7.clone(),
-    ]
+stwo_macros::define_air_fns! {
+    max_degree: 3,
+    embedded: [],
+    embedded_component: true,
+    embedded_enabler_boolean: false,
+    embedded_relations:
+        crate::relation_challenge_air::RelationChallengeComponentRelations,
+    logup_batch: 2,
+    embedded_preprocessed: {
+        row_mask: "recursion_relation_challenge_row_mask",
+        segment_mask: "recursion_relation_challenge_segment_mask",
+        binary_mask: "recursion_relation_challenge_binary_mask",
+        public_logup_mask: "recursion_relation_challenge_public_logup_mask",
+        verifier_id: "recursion_relation_challenge_verifier_id",
+        sequence: "recursion_relation_challenge_sequence",
+        tag: "recursion_relation_challenge_tag",
+        arg_0: "recursion_relation_challenge_arg_0",
+        arg_1: "recursion_relation_challenge_arg_1",
+        arg_2: "recursion_relation_challenge_arg_2",
+        arg_3: "recursion_relation_challenge_arg_3",
+        challenge: "recursion_relation_challenge_index",
+    },
+    embedded_params: [segment_active, binary_active, air_scope, public_scope],
+
+    relation draw_output(15);
+    relation word(5);
+
+    fn relation_challenge(
+        output_0, output_1, output_2, output_3,
+        output_4, output_5, output_6, output_7,
+        row_mask, segment_mask, binary_mask, public_logup_mask,
+        verifier_id, sequence, tag, arg_0, arg_1, arg_2, arg_3, challenge,
+        segment_active, binary_active, air_scope, public_scope,
+    ) {
+        let mode_active =
+            row_mask * (segment_mask * segment_active + binary_mask * binary_active);
+        let inactive = 1 - enabler;
+
+        constrain enabler - mode_active;
+        constrain inactive * output_0;
+        constrain inactive * output_1;
+        constrain inactive * output_2;
+        constrain inactive * output_3;
+        constrain inactive * output_4;
+        constrain inactive * output_5;
+        constrain inactive * output_6;
+        constrain inactive * output_7;
+
+        consume(enabler) draw_output(
+            verifier_id, sequence, tag, arg_0, arg_1, arg_2, arg_3,
+            output_0, output_1, output_2, output_3,
+            output_4, output_5, output_6, output_7,
+        );
+        emit(enabler) word(verifier_id, air_scope, challenge, 0, output_0);
+        emit(enabler * public_logup_mask) word(
+            verifier_id, public_scope, challenge, 0, output_0,
+        );
+        emit(enabler) word(verifier_id, air_scope, challenge, 1, output_1);
+        emit(enabler * public_logup_mask) word(
+            verifier_id, public_scope, challenge, 1, output_1,
+        );
+        emit(enabler) word(verifier_id, air_scope, challenge, 2, output_2);
+        emit(enabler * public_logup_mask) word(
+            verifier_id, public_scope, challenge, 2, output_2,
+        );
+        emit(enabler) word(verifier_id, air_scope, challenge, 3, output_3);
+        emit(enabler * public_logup_mask) word(
+            verifier_id, public_scope, challenge, 3, output_3,
+        );
+        emit(enabler) word(verifier_id, air_scope, challenge, 4, output_4);
+        emit(enabler * public_logup_mask) word(
+            verifier_id, public_scope, challenge, 4, output_4,
+        );
+        emit(enabler) word(verifier_id, air_scope, challenge, 5, output_5);
+        emit(enabler * public_logup_mask) word(
+            verifier_id, public_scope, challenge, 5, output_5,
+        );
+        emit(enabler) word(verifier_id, air_scope, challenge, 6, output_6);
+        emit(enabler * public_logup_mask) word(
+            verifier_id, public_scope, challenge, 6, output_6,
+        );
+        emit(enabler) word(verifier_id, air_scope, challenge, 7, output_7);
+        emit(enabler * public_logup_mask) word(
+            verifier_id, public_scope, challenge, 7, output_7,
+        );
+
+        return output_0;
+    }
 }
 
-/// Generates transcript-draw consumers and scoped challenge-word producers.
+pub use component::air::{Component, Eval};
+
+/// Construct the generated evaluator with verifier-owned mode and scope values.
+pub fn eval_for_proof_kind(
+    log_size: u32,
+    proof_kind: ProofKind,
+    transcript_relations: &TranscriptStateRelations,
+    challenge_relations: &RelationChallengeRelations,
+) -> Eval {
+    Eval {
+        log_size,
+        segment_active: BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        binary_active: BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        air_scope: BaseField::from(AIR_EVALUATION_CHALLENGE_SCOPE),
+        public_scope: BaseField::from(VM_PUBLIC_LOGUP_CHALLENGE_SCOPE),
+        relations: RelationChallengeComponentRelations::new(
+            transcript_relations,
+            challenge_relations,
+        ),
+    }
+}
+
+/// Generate transcript-draw consumers and scoped word producers.
 pub fn gen_interaction_trace(
     trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     preprocessed: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
@@ -389,163 +378,15 @@ pub fn gen_interaction_trace(
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     QM31,
 ) {
-    let cols =
-        RelationChallengeColumns::from_iter(trace.iter().map(|evaluation| &evaluation.values.data));
-    let pp = preprocessed
-        .iter()
-        .map(|column| &column.values.data)
-        .collect::<Vec<_>>();
-    let simd_size = cols.enabler.len();
-    let log_size = trace[0].domain.log_size();
-    let segment = BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf));
-    let binary = BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode));
-    let active = (0..simd_size)
-        .map(|row| {
-            PackedQM31::from(
-                pp[ROW_MASK_COLUMN][row]
-                    * (pp[SEGMENT_MASK_COLUMN][row] * segment
-                        + pp[BINARY_MASK_COLUMN][row] * binary),
-            )
-        })
-        .collect::<Vec<_>>();
-    let negative_active = active.iter().map(|value| -*value).collect::<Vec<_>>();
-    let public_active = (0..simd_size)
-        .map(|row| active[row] * PackedQM31::from(pp[PUBLIC_LOGUP_MASK_COLUMN][row]))
-        .collect::<Vec<_>>();
-    let output = [
-        cols.output_0,
-        cols.output_1,
-        cols.output_2,
-        cols.output_3,
-        cols.output_4,
-        cols.output_5,
-        cols.output_6,
-        cols.output_7,
-    ];
-    let draw_denom = combine!(
-        transcript_relations.draw_output,
-        [
-            pp[VERIFIER_ID_COLUMN],
-            pp[SEQUENCE_COLUMN],
-            pp[TAG_COLUMN],
-            pp[ARG_0_COLUMN],
-            pp[ARG_1_COLUMN],
-            pp[ARG_2_COLUMN],
-            pp[ARG_3_COLUMN],
-            output[0],
-            output[1],
-            output[2],
-            output[3],
-            output[4],
-            output[5],
-            output[6],
-            output[7]
-        ]
-    );
-    let air_scope =
-        vec![PackedM31::broadcast(BaseField::from(AIR_EVALUATION_CHALLENGE_SCOPE)); simd_size];
-    let public_scope =
-        vec![PackedM31::broadcast(BaseField::from(VM_PUBLIC_LOGUP_CHALLENGE_SCOPE)); simd_size];
-    let air_denoms = (0..RATE)
-        .map(|word_index| {
-            let word_index_column = vec![
-                PackedM31::broadcast(BaseField::from(
-                    u32::try_from(word_index).expect("challenge word index fits u32"),
-                ));
-                simd_size
-            ];
-            combine!(
-                challenge_relations.word,
-                [
-                    pp[VERIFIER_ID_COLUMN],
-                    &air_scope,
-                    pp[CHALLENGE_COLUMN],
-                    word_index_column,
-                    output[word_index]
-                ]
-            )
-        })
-        .collect::<Vec<_>>();
-    let public_denoms = (0..RATE)
-        .map(|word_index| {
-            let word_index_column = vec![
-                PackedM31::broadcast(BaseField::from(
-                    u32::try_from(word_index).expect("challenge word index fits u32"),
-                ));
-                simd_size
-            ];
-            combine!(
-                challenge_relations.word,
-                [
-                    pp[VERIFIER_ID_COLUMN],
-                    &public_scope,
-                    pp[CHALLENGE_COLUMN],
-                    word_index_column,
-                    output[word_index]
-                ]
-            )
-        })
-        .collect::<Vec<_>>();
-
-    let mut logup_gen = LogupTraceGenerator::new(log_size);
-    write_pair!(
-        &negative_active,
-        &draw_denom,
-        &active,
-        &air_denoms[0],
-        logup_gen
-    );
-    write_pair!(
-        &public_active,
-        &public_denoms[0],
-        &active,
-        &air_denoms[1],
-        logup_gen
-    );
-    write_pair!(
-        &public_active,
-        &public_denoms[1],
-        &active,
-        &air_denoms[2],
-        logup_gen
-    );
-    write_pair!(
-        &public_active,
-        &public_denoms[2],
-        &active,
-        &air_denoms[3],
-        logup_gen
-    );
-    write_pair!(
-        &public_active,
-        &public_denoms[3],
-        &active,
-        &air_denoms[4],
-        logup_gen
-    );
-    write_pair!(
-        &public_active,
-        &public_denoms[4],
-        &active,
-        &air_denoms[5],
-        logup_gen
-    );
-    write_pair!(
-        &public_active,
-        &public_denoms[5],
-        &active,
-        &air_denoms[6],
-        logup_gen
-    );
-    write_pair!(
-        &public_active,
-        &public_denoms[6],
-        &active,
-        &air_denoms[7],
-        logup_gen
-    );
-    write_col!(&public_active, &public_denoms[7], logup_gen);
-    logup_gen.finalize_last()
+    component::witness::gen_interaction_trace(
+        trace,
+        preprocessed,
+        BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        BaseField::from(AIR_EVALUATION_CHALLENGE_SCOPE),
+        BaseField::from(VM_PUBLIC_LOGUP_CHALLENGE_SCOPE),
+        &RelationChallengeComponentRelations::new(transcript_relations, challenge_relations),
+    )
 }
 
 /// Materializes the trusted relation-challenge draws for the selected lanes.
@@ -679,7 +520,7 @@ mod tests {
     use stwo::core::fields::FieldExpOps;
     use stwo::core::fields::m31::M31;
     use stwo::core::pcs::TreeVec;
-    use stwo_constraint_framework::{Relation, assert_constraints_on_polys};
+    use stwo_constraint_framework::{FrameworkEval, Relation, assert_constraints_on_polys};
 
     use super::*;
     use crate::transcript_program::tests::{plan_for_schema, recording_execution_for};
@@ -725,12 +566,12 @@ mod tests {
         );
         let traces = TreeVec::new(vec![preprocessed, trace, interaction]);
         let trace_polys = traces.map_cols(|column| column.interpolate());
-        let eval = Eval {
-            log_size: preprocessing.log_size(),
-            proof_kind: kind,
-            transcript_relations,
-            challenge_relations,
-        };
+        let eval = eval_for_proof_kind(
+            preprocessing.log_size(),
+            kind,
+            &transcript_relations,
+            &challenge_relations,
+        );
         assert_constraints_on_polys(
             &trace_polys,
             CanonicCoset::new(preprocessing.log_size()),

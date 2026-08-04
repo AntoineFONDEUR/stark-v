@@ -369,6 +369,46 @@ mod preprocessed_schedule {
     }
 }
 
+mod mixed_preprocessed_schedule {
+    stwo_constraint_framework::relation!(PassRelation, 1);
+
+    /// Relation instances used by the mixed committed/preprocessed component.
+    #[derive(Clone)]
+    pub struct Relations {
+        pub pass: PassRelation,
+    }
+
+    impl Relations {
+        pub fn dummy() -> Self {
+            Self {
+                pass: PassRelation::dummy(),
+            }
+        }
+    }
+
+    stwo_macros::define_air_fns! {
+        max_degree: 3,
+        embedded: [],
+        embedded_component: true,
+        embedded_enabler_boolean: false,
+        embedded_relations: crate::mixed_preprocessed_schedule::Relations,
+        embedded_preprocessed: {
+            row_mask: "test_mixed_schedule_row_mask",
+            expected: "test_mixed_schedule_expected",
+        },
+        embedded_params: [active],
+
+        relation pass(1);
+
+        fn mixed_schedule(value, row_mask, expected, active) {
+            constrain enabler - row_mask;
+            constrain enabler * active * (value - expected);
+            emit(enabler * active) pass(value);
+            return value;
+        }
+    }
+}
+
 #[test]
 fn test_embedded_component_uses_custom_relation_bundle() {
     use embedded_relation_bundle::component::air::Eval;
@@ -430,6 +470,83 @@ fn test_preprocessed_component_shares_air_and_interaction_frame() {
     let traces = TreeVec::new(vec![preprocessed, vec![], interaction]);
     let trace_polys = traces.map_cols(|column| column.interpolate());
     let eval = preprocessed_schedule::component::air::Eval {
+        log_size,
+        active: felt(1),
+        relations,
+    };
+    assert_constraints_on_polys(
+        &trace_polys,
+        CanonicCoset::new(log_size),
+        |row| {
+            eval.evaluate(row);
+        },
+        claimed_sum,
+    );
+}
+
+#[test]
+fn test_mixed_component_commits_only_witness_columns() {
+    let mut table = mixed_preprocessed_schedule::MixedScheduleTable::new();
+    table.push(7);
+
+    assert_eq!(table.into_witness().len(), 2);
+}
+
+#[test]
+fn test_mixed_component_uses_trusted_enabler_profile() {
+    use stwo_constraint_framework::FrameworkEval;
+    use stwo_constraint_framework::expr::ExprEvaluator;
+
+    let constraints = mixed_preprocessed_schedule::component::air::Eval {
+        log_size: 4,
+        active: felt(1),
+        relations: mixed_preprocessed_schedule::Relations::dummy(),
+    }
+    .evaluate(ExprEvaluator::new())
+    .constraint_degree_bounds();
+
+    assert_eq!(constraints.len(), 3);
+}
+
+#[test]
+fn test_mixed_component_shares_air_and_interaction_frame() {
+    use simd::AlignedVec;
+    use stwo::core::pcs::TreeVec;
+    use stwo::core::poly::circle::CanonicCoset;
+    use stwo::prover::backend::simd::SimdBackend;
+    use stwo::prover::backend::simd::column::BaseColumn;
+    use stwo::prover::poly::BitReversedOrder;
+    use stwo::prover::poly::circle::CircleEvaluation;
+    use stwo_constraint_framework::{FrameworkEval, assert_constraints_on_polys};
+
+    let log_size = 4;
+    let domain = CanonicCoset::new(log_size).circle_domain();
+    let make_column = |value, first_row_only| {
+        let mut data = AlignedVec::with_capacity(1 << log_size);
+        data.resize(1 << log_size, if first_row_only { 0 } else { value });
+        if first_row_only {
+            data[0] = value;
+        }
+        CircleEvaluation::<SimdBackend, BaseField, BitReversedOrder>::new(
+            domain,
+            BaseColumn::from(data),
+        )
+    };
+    let preprocessed = vec![make_column(1, true), make_column(7, false)];
+    let mut table = mixed_preprocessed_schedule::MixedScheduleTable::new();
+    table.push(7);
+    let trace = table.into_witness();
+    let relations = mixed_preprocessed_schedule::Relations::dummy();
+    let (interaction, claimed_sum) =
+        mixed_preprocessed_schedule::component::witness::gen_interaction_trace(
+            &trace,
+            &preprocessed,
+            felt(1),
+            &relations,
+        );
+    let traces = TreeVec::new(vec![preprocessed, trace, interaction]);
+    let trace_polys = traces.map_cols(|column| column.interpolate());
+    let eval = mixed_preprocessed_schedule::component::air::Eval {
         log_size,
         active: felt(1),
         relations,

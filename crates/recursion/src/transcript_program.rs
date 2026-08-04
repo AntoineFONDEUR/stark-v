@@ -672,25 +672,25 @@ pub(crate) mod tests {
     use crate::transcript::{NativeTranscriptBackend, RecordingTranscriptBackend};
     use crate::transcript_air::TranscriptAirRelations;
     use crate::transcript_binding_air::{
-        Eval as TranscriptBindingEval, TranscriptBindingRelations, TranscriptCallBindingTable,
-        TranscriptCallPreprocessed, UniversalTranscriptWitness,
+        TranscriptBindingRelations, TranscriptCallBindingTable, TranscriptCallPreprocessed,
+        UniversalTranscriptWitness, eval_for_proof_kind as transcript_binding_eval,
         gen_interaction_trace as gen_binding_interaction_trace, push_call_bindings,
     };
     use crate::transcript_layout::TranscriptLayout;
     use crate::transcript_payload_air::{
-        Eval as TranscriptPayloadEval, TranscriptPayloadPreprocessed, TranscriptPayloadTable,
-        VerifierInputRelations, gen_interaction_trace as gen_payload_interaction_trace,
-        push_transcript_payloads,
+        TranscriptPayloadPreprocessed, TranscriptPayloadTable, VerifierInputRelations,
+        eval_for_proof_kind as transcript_payload_eval,
+        gen_interaction_trace as gen_payload_interaction_trace, push_transcript_payloads,
     };
     use crate::transcript_state_air::{
-        Eval as TranscriptStateEval, TranscriptFrameStateTable, TranscriptStatePreprocessed,
-        TranscriptStateRelations, gen_interaction_trace as gen_state_interaction_trace,
-        push_frame_states,
+        TranscriptFrameStateTable, TranscriptStatePreprocessed, TranscriptStateRelations,
+        eval_for_proof_kind as transcript_state_eval,
+        gen_interaction_trace as gen_state_interaction_trace, push_frame_states,
     };
     use crate::transcript_word_air::{
-        Eval as TranscriptWordEval, TranscriptWordPreprocessed, TranscriptWordRelations,
-        TranscriptWordTable, gen_interaction_trace as gen_word_interaction_trace,
-        push_transcript_words,
+        TranscriptWordPreprocessed, TranscriptWordRelations, TranscriptWordTable,
+        eval_for_proof_kind as transcript_word_eval,
+        gen_interaction_trace as gen_word_interaction_trace, push_transcript_words,
     };
     use crate::wire::{FriLayerWire, FriQueryWire, MerklePathWire, ProofKind};
 
@@ -920,13 +920,13 @@ pub(crate) mod tests {
         );
         let traces = TreeVec::new(vec![preprocessed, trace, interaction]);
         let trace_polys = traces.map_cols(|column| column.interpolate());
-        let eval = TranscriptBindingEval {
-            log_size: preprocessing.log_size(),
-            proof_kind: kind,
-            control_relations,
-            transcript_relations,
-            binding_relations,
-        };
+        let eval = transcript_binding_eval(
+            preprocessing.log_size(),
+            kind,
+            &control_relations,
+            &transcript_relations,
+            &binding_relations,
+        );
         assert_constraints_on_polys(
             &trace_polys,
             CanonicCoset::new(preprocessing.log_size()),
@@ -978,12 +978,12 @@ pub(crate) mod tests {
         );
         let traces = TreeVec::new(vec![preprocessed, trace, interaction]);
         let trace_polys = traces.map_cols(|column| column.interpolate());
-        let eval = TranscriptStateEval {
-            log_size: preprocessing.log_size(),
-            proof_kind: kind,
-            binding_relations,
-            state_relations,
-        };
+        let eval = transcript_state_eval(
+            preprocessing.log_size(),
+            kind,
+            &binding_relations,
+            &state_relations,
+        );
         assert_constraints_on_polys(
             &trace_polys,
             CanonicCoset::new(preprocessing.log_size()),
@@ -1035,12 +1035,12 @@ pub(crate) mod tests {
         );
         let traces = TreeVec::new(vec![preprocessed, trace, interaction]);
         let trace_polys = traces.map_cols(|column| column.interpolate());
-        let eval = TranscriptWordEval {
-            log_size: preprocessing.log_size(),
-            proof_kind: kind,
-            binding_relations,
-            word_relations,
-        };
+        let eval = transcript_word_eval(
+            preprocessing.log_size(),
+            kind,
+            &binding_relations,
+            &word_relations,
+        );
         assert_constraints_on_polys(
             &trace_polys,
             CanonicCoset::new(preprocessing.log_size()),
@@ -1092,12 +1092,12 @@ pub(crate) mod tests {
         );
         let traces = TreeVec::new(vec![preprocessed, trace, interaction]);
         let trace_polys = traces.map_cols(|column| column.interpolate());
-        let eval = TranscriptPayloadEval {
-            log_size: preprocessing.log_size(),
-            proof_kind: kind,
-            word_relations,
-            input_relations,
-        };
+        let eval = transcript_payload_eval(
+            preprocessing.log_size(),
+            kind,
+            &word_relations,
+            &input_relations,
+        );
         assert_constraints_on_polys(
             &trace_polys,
             CanonicCoset::new(preprocessing.log_size()),
@@ -1182,13 +1182,13 @@ pub(crate) mod tests {
     fn transcript_call_binding_constraint_profile_stays_cubic() {
         use stwo_constraint_framework::expr::ExprEvaluator;
 
-        let eval = TranscriptBindingEval {
-            log_size: 4,
-            proof_kind: ProofKind::SegmentLeaf,
-            control_relations: ControlRelations::dummy(),
-            transcript_relations: TranscriptAirRelations::dummy(),
-            binding_relations: TranscriptBindingRelations::dummy(),
-        };
+        let eval = transcript_binding_eval(
+            4,
+            ProofKind::SegmentLeaf,
+            &ControlRelations::dummy(),
+            &TranscriptAirRelations::dummy(),
+            &TranscriptBindingRelations::dummy(),
+        );
         let degrees = eval
             .evaluate(ExprEvaluator::new())
             .constraint_degree_bounds();
@@ -1237,12 +1237,12 @@ pub(crate) mod tests {
     fn transcript_state_constraint_profile_stays_cubic() {
         use stwo_constraint_framework::expr::ExprEvaluator;
 
-        let eval = TranscriptStateEval {
-            log_size: 4,
-            proof_kind: ProofKind::SegmentLeaf,
-            binding_relations: TranscriptBindingRelations::dummy(),
-            state_relations: TranscriptStateRelations::dummy(),
-        };
+        let eval = transcript_state_eval(
+            4,
+            ProofKind::SegmentLeaf,
+            &TranscriptBindingRelations::dummy(),
+            &TranscriptStateRelations::dummy(),
+        );
         let degrees = eval
             .evaluate(ExprEvaluator::new())
             .constraint_degree_bounds();
@@ -1298,12 +1298,12 @@ pub(crate) mod tests {
     fn transcript_word_constraint_profile_stays_cubic() {
         use stwo_constraint_framework::expr::ExprEvaluator;
 
-        let eval = TranscriptWordEval {
-            log_size: 4,
-            proof_kind: ProofKind::SegmentLeaf,
-            binding_relations: TranscriptBindingRelations::dummy(),
-            word_relations: TranscriptWordRelations::dummy(),
-        };
+        let eval = transcript_word_eval(
+            4,
+            ProofKind::SegmentLeaf,
+            &TranscriptBindingRelations::dummy(),
+            &TranscriptWordRelations::dummy(),
+        );
         let degrees = eval
             .evaluate(ExprEvaluator::new())
             .constraint_degree_bounds();
@@ -1359,12 +1359,12 @@ pub(crate) mod tests {
     fn transcript_payload_constraint_profile_stays_cubic() {
         use stwo_constraint_framework::expr::ExprEvaluator;
 
-        let eval = TranscriptPayloadEval {
-            log_size: 4,
-            proof_kind: ProofKind::SegmentLeaf,
-            word_relations: TranscriptWordRelations::dummy(),
-            input_relations: VerifierInputRelations::dummy(),
-        };
+        let eval = transcript_payload_eval(
+            4,
+            ProofKind::SegmentLeaf,
+            &TranscriptWordRelations::dummy(),
+            &VerifierInputRelations::dummy(),
+        );
         let degrees = eval
             .evaluate(ExprEvaluator::new())
             .constraint_degree_bounds();
@@ -1449,6 +1449,67 @@ pub(crate) mod tests {
         assert_eq!(
             layout.validate_execution(execution.operations(), execution.backend().trace()),
             Ok(())
+        );
+    }
+
+    #[rstest]
+    fn changed_transcript_payload_is_rejected_by_the_trusted_layout() {
+        let plan = plan(1);
+        let execution = recording_execution();
+        let layout = TranscriptLayout::new(&plan).expect("trusted plan has a finite layout");
+        let mut trace = execution.backend().trace().clone();
+        trace.hash_frames[0].words[8] = canonical(99);
+
+        assert!(
+            layout
+                .validate_execution(execution.operations(), &trace)
+                .is_err()
+        );
+    }
+
+    #[rstest]
+    fn missing_transcript_payload_is_rejected_by_the_trusted_layout() {
+        let plan = plan(1);
+        let execution = recording_execution();
+        let layout = TranscriptLayout::new(&plan).expect("trusted plan has a finite layout");
+        let mut trace = execution.backend().trace().clone();
+        trace.hash_frames[0].words.remove(8);
+
+        assert!(
+            layout
+                .validate_execution(execution.operations(), &trace)
+                .is_err()
+        );
+    }
+
+    #[rstest]
+    fn duplicated_transcript_payload_is_rejected_by_the_trusted_layout() {
+        let plan = plan(1);
+        let execution = recording_execution();
+        let layout = TranscriptLayout::new(&plan).expect("trusted plan has a finite layout");
+        let mut trace = execution.backend().trace().clone();
+        let duplicated = trace.hash_frames[0].words[8];
+        trace.hash_frames[0].words.insert(9, duplicated);
+
+        assert!(
+            layout
+                .validate_execution(execution.operations(), &trace)
+                .is_err()
+        );
+    }
+
+    #[rstest]
+    fn reordered_transcript_payload_is_rejected_by_the_trusted_layout() {
+        let plan = plan(1);
+        let execution = recording_execution();
+        let layout = TranscriptLayout::new(&plan).expect("trusted plan has a finite layout");
+        let mut trace = execution.backend().trace().clone();
+        trace.hash_frames[0].words.swap(8, 9);
+
+        assert!(
+            layout
+                .validate_execution(execution.operations(), &trace)
+                .is_err()
         );
     }
 

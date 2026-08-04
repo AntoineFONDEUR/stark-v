@@ -393,46 +393,48 @@ mod tests {
             &mut usage,
             super::super::transcript_air::Eval {
                 log_size: LOG_SIZE,
-                relations: relations.vm.clone(),
-                transcript_relations: relations.transcript.clone(),
+                relations: super::super::transcript_air::TranscriptHashCallRelations::new(
+                    &relations.vm,
+                    &relations.transcript,
+                ),
             },
         );
         usage_of(
             &mut usage,
-            super::super::transcript_binding_air::Eval {
-                log_size: LOG_SIZE,
-                proof_kind: KIND,
-                control_relations: relations.control.clone(),
-                transcript_relations: relations.transcript.clone(),
-                binding_relations: relations.transcript_binding.clone(),
-            },
+            super::super::transcript_binding_air::eval_for_proof_kind(
+                LOG_SIZE,
+                KIND,
+                &relations.control,
+                &relations.transcript,
+                &relations.transcript_binding,
+            ),
         );
         usage_of(
             &mut usage,
-            super::super::transcript_state_air::Eval {
-                log_size: LOG_SIZE,
-                proof_kind: KIND,
-                binding_relations: relations.transcript_binding.clone(),
-                state_relations: relations.transcript_state.clone(),
-            },
+            super::super::transcript_state_air::eval_for_proof_kind(
+                LOG_SIZE,
+                KIND,
+                &relations.transcript_binding,
+                &relations.transcript_state,
+            ),
         );
         usage_of(
             &mut usage,
-            super::super::transcript_word_air::Eval {
-                log_size: LOG_SIZE,
-                proof_kind: KIND,
-                binding_relations: relations.transcript_binding.clone(),
-                word_relations: relations.transcript_word.clone(),
-            },
+            super::super::transcript_word_air::eval_for_proof_kind(
+                LOG_SIZE,
+                KIND,
+                &relations.transcript_binding,
+                &relations.transcript_word,
+            ),
         );
         usage_of(
             &mut usage,
-            super::super::transcript_payload_air::Eval {
-                log_size: LOG_SIZE,
-                proof_kind: KIND,
-                word_relations: relations.transcript_word.clone(),
-                input_relations: relations.verifier_input.clone(),
-            },
+            super::super::transcript_payload_air::eval_for_proof_kind(
+                LOG_SIZE,
+                KIND,
+                &relations.transcript_word,
+                &relations.verifier_input,
+            ),
         );
         usage_of(
             &mut usage,
@@ -443,29 +445,25 @@ mod tests {
         );
         usage_of(
             &mut usage,
-            super::super::pow::FrameEval {
-                log_size: LOG_SIZE,
-                pow_relations: relations.pow.clone(),
-                binding_relations: relations.transcript_binding.clone(),
-            },
+            super::super::pow::frame_eval(LOG_SIZE, &relations.pow, &relations.transcript_binding),
         );
         usage_of(
             &mut usage,
-            super::super::relation_challenge_air::Eval {
-                log_size: LOG_SIZE,
-                proof_kind: KIND,
-                transcript_relations: relations.transcript_state.clone(),
-                challenge_relations: relations.relation_challenge.clone(),
-            },
+            super::super::relation_challenge_air::eval_for_proof_kind(
+                LOG_SIZE,
+                KIND,
+                &relations.transcript_state,
+                &relations.relation_challenge,
+            ),
         );
         usage_of(
             &mut usage,
-            super::super::verifier_randomness_air::Eval {
-                log_size: LOG_SIZE,
-                proof_kind: KIND,
-                transcript_relations: relations.transcript_state.clone(),
-                randomness_relations: relations.verifier_randomness.clone(),
-            },
+            super::super::verifier_randomness_air::eval_for_proof_kind(
+                LOG_SIZE,
+                KIND,
+                &relations.transcript_state,
+                &relations.verifier_randomness,
+            ),
         );
         usage_of(
             &mut usage,

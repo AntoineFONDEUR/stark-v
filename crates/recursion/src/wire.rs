@@ -188,11 +188,11 @@ impl<const FOLD_WIDTH: usize, const MAX_DEPTH: usize> Default
 }
 
 /// One FRI commitment round with fixed raw-query slots.
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct FriLayerWire<const N_QUERIES: usize, const FOLD_WIDTH: usize, const MAX_DEPTH: usize> {
     active_width: u32,
     commitment: Digest8,
-    queries: [FriQueryWire<FOLD_WIDTH, MAX_DEPTH>; N_QUERIES],
+    queries: Box<[FriQueryWire<FOLD_WIDTH, MAX_DEPTH>; N_QUERIES]>,
 }
 
 impl<const N_QUERIES: usize, const FOLD_WIDTH: usize, const MAX_DEPTH: usize>
@@ -201,7 +201,7 @@ impl<const N_QUERIES: usize, const FOLD_WIDTH: usize, const MAX_DEPTH: usize>
     pub fn new(
         active_width: u32,
         commitment: Digest8,
-        queries: [FriQueryWire<FOLD_WIDTH, MAX_DEPTH>; N_QUERIES],
+        queries: Box<[FriQueryWire<FOLD_WIDTH, MAX_DEPTH>; N_QUERIES]>,
     ) -> Result<Self, WireError> {
         let active_width_usize =
             usize::try_from(active_width).map_err(|_| WireError::FriFoldWidthOutOfRange {
@@ -262,9 +262,9 @@ pub struct FixedStarkProofWire<
     pub commitments: [Digest8; N_COMMITMENTS],
     pub claimed_sums: [Qm31Wire; N_CLAIMED_SUMS],
     pub sampled_values: [Qm31Wire; N_SAMPLED_VALUES],
-    pub queried_values: [M31Word; N_QUERY_VALUES],
-    pub trace_paths: [MerklePathWire<MAX_MERKLE_DEPTH>; N_TRACE_PATHS],
-    pub fri_layers: [FriLayerWire<N_QUERIES, FOLD_WIDTH, MAX_MERKLE_DEPTH>; N_FRI_LAYERS],
+    pub queried_values: Box<[M31Word; N_QUERY_VALUES]>,
+    pub trace_paths: Box<[MerklePathWire<MAX_MERKLE_DEPTH>; N_TRACE_PATHS]>,
+    pub fri_layers: Box<[FriLayerWire<N_QUERIES, FOLD_WIDTH, MAX_MERKLE_DEPTH>; N_FRI_LAYERS]>,
     pub last_layer_coefficients: [Qm31Wire; N_LAST_LAYER_COEFFICIENTS],
     pub interaction_pow: u64,
     pub pcs_pow: u64,
@@ -802,13 +802,13 @@ fn write_fixed_stark_proof<
     for sampled_value in proof.sampled_values {
         writer.write_qm31(sampled_value);
     }
-    for queried_value in proof.queried_values {
+    for queried_value in proof.queried_values.iter().copied() {
         writer.write_m31_word(queried_value);
     }
-    for path in &proof.trace_paths {
+    for path in proof.trace_paths.iter() {
         write_merkle_path(writer, path);
     }
-    for layer in &proof.fri_layers {
+    for layer in proof.fri_layers.iter() {
         write_fri_layer(writer, layer);
     }
     for coefficient in proof.last_layer_coefficients {
@@ -934,9 +934,9 @@ fn read_fixed_stark_proof<
     let commitments = read_array(|| reader.read_digest())?;
     let claimed_sums = read_array(|| reader.read_qm31())?;
     let sampled_values = read_array(|| reader.read_qm31())?;
-    let queried_values = read_array(|| reader.read_m31_word())?;
-    let trace_paths = read_array(|| read_merkle_path(reader))?;
-    let fri_layers = read_array(|| read_fri_layer(reader))?;
+    let queried_values = Box::new(read_array(|| reader.read_m31_word())?);
+    let trace_paths = Box::new(read_array(|| read_merkle_path(reader))?);
+    let fri_layers = Box::new(read_array(|| read_fri_layer(reader))?);
     let last_layer_coefficients = read_array(|| reader.read_qm31())?;
     let interaction_pow = reader.read_u64()?;
     let pcs_pow = reader.read_u64()?;
@@ -971,7 +971,7 @@ fn read_fri_layer<const N_QUERIES: usize, const FOLD_WIDTH: usize, const MAX_DEP
         let path = read_merkle_path(reader)?;
         Ok(FriQueryWire::new(values, path))
     })?;
-    FriLayerWire::new(active_width, commitment, queries)
+    FriLayerWire::new(active_width, commitment, Box::new(queries))
 }
 
 fn read_span_statement(reader: &mut Reader<'_>) -> Result<SpanStatement, WireError> {
@@ -1708,15 +1708,15 @@ mod tests {
         let fri_path = MerklePathWire::new(1, [digest(100), Digest8::ZERO])
             .expect("the FRI path authenticates above the complete fold pair");
         let query = FriQueryWire::new([qm31(90), qm31(94)], fri_path);
-        let layer = FriLayerWire::new(2, digest(110), [query])
+        let layer = FriLayerWire::new(2, digest(110), Box::new([query]))
             .expect("the FRI query fills the fixed maximum width");
         FixedStarkProofWire {
             commitments: [digest(60)],
             claimed_sums: [qm31(61)],
             sampled_values: [qm31(65)],
-            queried_values: [M31Word::from(70)],
-            trace_paths: [trace_path],
-            fri_layers: [layer],
+            queried_values: Box::new([M31Word::from(70)]),
+            trace_paths: Box::new([trace_path]),
+            fri_layers: Box::new([layer]),
             last_layer_coefficients: [qm31(120)],
             interaction_pow: 0x1122_3344_5566_7788,
             pcs_pow: 0x8877_6655_4433_2211,

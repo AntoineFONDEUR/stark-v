@@ -29,6 +29,12 @@ The implemented foundation includes:
 - one frozen protocol profile without a version suffix, derived from both
   generated AIR rosters, with 193 FRI queries, 4 KiB public-input and
   public-output capacities, and an exact 3,080,316-byte universal proof wire;
+- fixed VM trace generation that pads ordinary instruction and access tables to
+  log size 6 and the finalized program, memory, Merkle, and Poseidon2 tables to
+  log size 11, rejecting a segment instead of changing verifier-owned geometry;
+- checked adaptation of an in-memory Poseidon VM proof into the fixed leaf wire,
+  including expansion of deduplicated query values, Merkle siblings, and FRI
+  cosets from prover-retained authentication data;
 - typed complete-execution, job, slot, executed-span, and empty-span statements;
 - a fixed verifier control plan shared by native transcript execution and AIR
   tables;
@@ -46,8 +52,8 @@ The implemented foundation includes:
 
 The missing integration is substantial: the existing components are not yet
 assembled into a complete universal trace, committed by an outer prover, or
-verified through a public root API. In particular, a real recursion proof cannot
-yet be used as a binary child.
+verified through a public root API. The fixed VM leaf is an input artifact, not
+a recursion proof; a real recursion proof cannot yet be used as a binary child.
 
 The live universal roster has 36 components. Every recursion-local component is
 authored directly through `define_air_fns!`; Poseidon2 uses the same macro, and

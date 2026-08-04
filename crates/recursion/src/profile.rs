@@ -68,9 +68,19 @@ pub const LAST_LAYER_COEFFICIENT_COUNT: usize = 1;
 pub const MAX_PUBLIC_INPUT_WORDS: u32 = 1024;
 /// Maximum public output coverage includes the length word and 4 KiB of data.
 pub const MAX_PUBLIC_OUTPUT_WORDS: u32 = 1025;
+/// Exact canonical word count of the frozen VM public-claim capacity.
+///
+/// The profile constructor checks this constant against the canonical claim
+/// encoder, so a claim-layout change cannot leave the fixed leaf type stale.
+pub const VM_PUBLIC_CLAIM_WORD_COUNT: usize = 10_506;
 
-/// Maximum rows allocated to each execution-dependent VM component.
+/// Maximum rows allocated to ordinary instruction and access components.
 pub const VM_DYNAMIC_COMPONENT_LOG_SIZE: u32 = 6;
+/// Fixed capacity for program, memory, Merkle, and Poseidon commitment work.
+///
+/// Even a short segment finalizes a complete sparse commitment boundary, so
+/// these tables require more rows than its instruction tables.
+pub const VM_COMMITMENT_COMPONENT_LOG_SIZE: u32 = 11;
 /// Maximum rows allocated to every execution-dependent universal component.
 pub const RECURSION_COMPONENT_LOG_SIZE: u32 = 20;
 
@@ -102,7 +112,7 @@ pub const RECURSION_TRACE_PATH_COUNT: usize = COMMITMENT_TREE_COUNT * FRI_QUERY_
 
 /// Canonical protocol identifier limbs for cross-language conformance.
 pub const PROTOCOL_ID_WORDS: [u32; 8] = [
-    1652171419, 1590417197, 197779048, 927218326, 675052838, 980679464, 1483989404, 1842475866,
+    1944644389, 1135441973, 1743486779, 1673021574, 1185365817, 1671132422, 875754423, 1496784385,
 ];
 /// Digest of all ordered VM preprocessing identifiers and log sizes.
 pub const VM_PREPROCESSING_WORDS: [u32; 8] = [
@@ -280,6 +290,13 @@ pub fn frozen_protocol_profile() -> Result<FrozenProtocolProfile, ProfileError> 
     let public_claim_shape =
         VmPublicClaimShape::new(MAX_PUBLIC_INPUT_WORDS, MAX_PUBLIC_OUTPUT_WORDS)
             .map_err(|error| ProfileError::at("VM public-claim shape", error))?;
+    if public_claim_shape.claim_word_count() != VM_PUBLIC_CLAIM_WORD_COUNT {
+        return Err(ProfileError::mismatch(
+            "VM public-claim word count",
+            VM_PUBLIC_CLAIM_WORD_COUNT,
+            public_claim_shape.claim_word_count(),
+        ));
+    }
     build_frozen_protocol_profile(public_claim_shape)
 }
 
@@ -393,6 +410,7 @@ pub fn vm_component_log_sizes() -> [u32; COMPONENT_COUNT] {
         "range_check_8_11" => 19,
         "range_check_8_8" => 16,
         "range_check_m31" => 15,
+        "program" | "memory" | "merkle" | "poseidon2" => VM_COMMITMENT_COMPONENT_LOG_SIZE,
         _ => VM_DYNAMIC_COMPONENT_LOG_SIZE,
     })
 }
@@ -767,8 +785,8 @@ mod tests {
             digest(VM_PREPROCESSING_WORDS),
             digest(RECURSION_PREPROCESSING_WORDS),
             digest([
-                107756570, 1731778370, 1235987332, 1773853250, 730245751, 1209478822, 1607413427,
-                898983955,
+                1940684376, 1216409119, 2128749894, 302174351, 1395663902, 39884388, 39687935,
+                2112168674,
             ]),
             digest([
                 536313152, 2087585680, 1313041157, 1291748295, 487230201, 1661880789, 33362580,

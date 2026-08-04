@@ -1619,24 +1619,44 @@ pub(crate) fn generate_table(opcode: &OpcodeDef) -> proc_macro2::TokenStream {
                 stwo::core::fields::m31::BaseField,
                 stwo::prover::poly::BitReversedOrder,
             >> {
+                let len = self.len() as u32;
+                let log_size = len.next_power_of_two().ilog2().max(4);
+                self.into_witness_with_log_size(log_size)
+                    .expect("the natural trace log size contains every row")
+            }
+
+            /// Converts this table to a verifier-selected fixed trace size.
+            ///
+            /// Returning `None` keeps capacity overflow at the caller boundary;
+            /// a recursive profile must never silently change its committed
+            /// column geometry to accommodate a larger execution.
+            pub fn into_witness_with_log_size(
+                self,
+                log_size: u32,
+            ) -> Option<Vec<stwo::prover::poly::circle::CircleEvaluation<
+                stwo::prover::backend::simd::SimdBackend,
+                stwo::core::fields::m31::BaseField,
+                stwo::prover::poly::BitReversedOrder,
+            >>> {
                 use stwo::core::poly::circle::CanonicCoset;
                 use stwo::prover::backend::simd::column::BaseColumn;
                 use stwo::prover::poly::circle::CircleEvaluation;
 
-                let len = self.len() as u32;
-                let log_size = len.next_power_of_two().ilog2().max(4);
-                let padded_len = 1 << log_size;
+                let padded_len = 1_u32.checked_shl(log_size)?;
+                if log_size < 4 || self.len() > padded_len as usize {
+                    return None;
+                }
                 let columns = self.into_columns();
                 let domain = CanonicCoset::new(log_size).circle_domain();
 
-                columns
+                Some(columns
                     .into_iter()
                     .map(|mut col| {
                         col.resize(padded_len as usize, 0);
                         let base_col: BaseColumn = col.into();
                         CircleEvaluation::new(domain, base_col)
                     })
-                    .collect()
+                    .collect())
             }
 
             /// Convert this table to a formatted Table for debugging.

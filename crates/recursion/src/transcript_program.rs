@@ -831,14 +831,14 @@ pub(crate) mod tests {
             commitments: [digest(80), digest(90), digest(100), digest(110)],
             claimed_sums: [qm31(120)],
             sampled_values: [qm31(130)],
-            queried_values: [word(140)],
-            trace_paths: [trace_path; 4],
-            fri_layers: [
-                FriLayerWire::new(4, digest(150), [first_query])
+            queried_values: Box::new([word(140)]),
+            trace_paths: Box::new([trace_path; 4]),
+            fri_layers: Box::new([
+                FriLayerWire::new(4, digest(150), Box::new([first_query]))
                     .expect("first FRI layer uses its full fold width"),
-                FriLayerWire::new(2, digest(160), [last_query])
+                FriLayerWire::new(2, digest(160), Box::new([last_query]))
                     .expect("last FRI layer zero-pads inactive values"),
-            ],
+            ]),
             last_layer_coefficients: [qm31(170)],
             interaction_pow: 0x1122_3344_5566_7788,
             pcs_pow: 0x8877_6655_4433_2211,

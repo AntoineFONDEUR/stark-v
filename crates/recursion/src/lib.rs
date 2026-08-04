@@ -38,6 +38,7 @@ pub mod recorder;
 pub mod recursion_air_program;
 pub mod relation_challenge_air;
 pub mod relations;
+pub mod segment_leaf;
 pub mod statement;
 pub mod statement_input_air;
 pub mod statement_semantics_circuit;

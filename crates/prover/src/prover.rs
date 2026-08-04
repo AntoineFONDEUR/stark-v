@@ -11,11 +11,14 @@ use stwo::core::proof_of_work::GrindOps;
 use stwo::core::vcs_lifted::blake2_merkle::{Blake2sMerkleChannel, Blake2sMerkleHasher};
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::poly::circle::PolyOps;
-use stwo::prover::{CommitmentSchemeProver, CommitmentTreeProver, prove};
+use stwo::prover::{CommitmentSchemeProver, CommitmentTreeProver, prove, prove_ex};
 use stwo_constraint_framework::TraceLocationAllocator;
 use tracing::{Level, info, span};
 
-use crate::components::{Components, gen_interaction_trace, gen_trace};
+use crate::components::{
+    COMPONENT_COUNT, Components, FixedTraceError, gen_interaction_trace, gen_trace,
+    gen_trace_at_log_sizes,
+};
 use crate::public_data::PublicData;
 use crate::relations::{INTERACTION_POW_BITS, Relations};
 use crate::{InteractionClaim, Preprocessing, Proof};
@@ -54,13 +57,64 @@ where
             >,
         >,
 {
+    prove_rv32im_with_channel_inner::<MC>(run_result, config, preprocessing, None)
+        .expect("dynamic trace generation has no fixed capacity")
+}
+
+/// Proves one execution against verifier-owned component log sizes.
+///
+/// The fixed layout is part of a recursive protocol identity. A segment that
+/// exceeds one component capacity is rejected instead of selecting a larger
+/// proof shape.
+pub fn prove_rv32im_with_channel_at_log_sizes<MC: MerkleChannel>(
+    run_result: runner::RunResult,
+    config: PcsConfig,
+    preprocessing: &Preprocessing<MC::H>,
+    component_log_sizes: [u32; COMPONENT_COUNT],
+) -> Result<Proof<MC::H>, FixedTraceError>
+where
+    SimdBackend: stwo::prover::backend::BackendForChannel<MC>
+        + stwo::prover::backend::ColumnOps<
+            <MC::H as stwo::core::vcs_lifted::merkle_hasher::MerkleHasherLifted>::Hash,
+            Column = Vec<
+                <MC::H as stwo::core::vcs_lifted::merkle_hasher::MerkleHasherLifted>::Hash,
+            >,
+        >,
+{
+    prove_rv32im_with_channel_inner::<MC>(
+        run_result,
+        config,
+        preprocessing,
+        Some(component_log_sizes),
+    )
+}
+
+fn prove_rv32im_with_channel_inner<MC: MerkleChannel>(
+    run_result: runner::RunResult,
+    config: PcsConfig,
+    preprocessing: &Preprocessing<MC::H>,
+    component_log_sizes: Option<[u32; COMPONENT_COUNT]>,
+) -> Result<Proof<MC::H>, FixedTraceError>
+where
+    SimdBackend: stwo::prover::backend::BackendForChannel<MC>
+        + stwo::prover::backend::ColumnOps<
+            <MC::H as stwo::core::vcs_lifted::merkle_hasher::MerkleHasherLifted>::Hash,
+            Column = Vec<
+                <MC::H as stwo::core::vcs_lifted::merkle_hasher::MerkleHasherLifted>::Hash,
+            >,
+        >,
+{
     let public_data = PublicData::new(&run_result);
+    let retain_query_expansion = component_log_sizes.is_some();
 
     // 1. Generate traces from execution
     let span = span!(Level::INFO, "Generate traces").entered();
     let tracer = run_result.tracer;
     info!("Tracer total_traces: {}", tracer.total_traces());
-    let traces = gen_trace(tracer);
+    let traces = match component_log_sizes {
+        Some(log_sizes) => gen_trace_at_log_sizes(tracer, log_sizes)?,
+        None => gen_trace(tracer),
+    };
     let log_size = traces.max_log_size();
     info!("Max trace log_size: {log_size}");
     span.exit();
@@ -185,15 +239,25 @@ where
 
     // 13. Generate proof
     let span = span!(Level::INFO, "Prove").entered();
-    let proof =
-        prove(&components.provers(), channel, commitment_scheme).expect("Proof generation failed");
+    let (stark_proof, stark_aux) = if retain_query_expansion {
+        // Recursion needs every raw opening independently, while ordinary VM
+        // proofs keep STWO's smaller deduplicated representation.
+        let extended = prove_ex(&components.provers(), channel, commitment_scheme, false)
+            .expect("Proof generation failed");
+        (extended.proof, Some(extended.aux))
+    } else {
+        let proof = prove(&components.provers(), channel, commitment_scheme)
+            .expect("Proof generation failed");
+        (proof, None)
+    };
     span.exit();
 
-    Proof {
+    Ok(Proof {
         claim,
         interaction_claim,
         public_data,
-        stark_proof: proof,
+        stark_proof,
+        stark_aux,
         interaction_pow,
-    }
+    })
 }

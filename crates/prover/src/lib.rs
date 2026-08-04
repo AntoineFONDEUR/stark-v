@@ -32,7 +32,7 @@ pub mod verifier;
 
 pub use errors::VerificationError;
 pub use preprocessed::{Preprocessing, preprocess, preprocess_with_channel};
-pub use prover::{prove_rv32im, prove_rv32im_with_channel};
+pub use prover::{prove_rv32im, prove_rv32im_with_channel, prove_rv32im_with_channel_at_log_sizes};
 pub use public_data::PublicData;
 pub use verifier::{verify_rv32im, verify_rv32im_with_channel};
 
@@ -46,6 +46,7 @@ pub mod e2e;
 
 use serde::{Deserialize, Serialize};
 use stwo::core::channel::Channel;
+use stwo::core::pcs::quotients::CommitmentSchemeProofAux;
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::MerkleHasherLifted;
 
@@ -75,5 +76,11 @@ pub struct Proof<H: MerkleHasherLifted> {
     pub interaction_claim: InteractionClaim,
     pub public_data: PublicData,
     pub stark_proof: StarkProof<H>,
+    /// Expansion data used to materialize independent raw-query openings.
+    ///
+    /// The fixed-layout prover retains this material until recursion adapts the
+    /// proof. Ordinary proving and every serialized VM proof omit it.
+    #[serde(skip, default)]
+    pub stark_aux: Option<CommitmentSchemeProofAux<H>>,
     pub interaction_pow: u64,
 }

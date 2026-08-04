@@ -378,8 +378,8 @@ fn test_mul_interaction_trace_prev_cur_deltas() {
             cols.len(),
             cols[0].domain.log_size()
         );
-        for col_idx in 0..cols.len() {
-            let values = cols[col_idx].values.to_cpu();
+        for (col_idx, column) in cols.iter().enumerate() {
+            let values = column.values.to_cpu();
             let mut diff_count = 0usize;
             for row in 0..values.len() {
                 let prev = values[(row + values.len() - 1) % values.len()];
@@ -397,9 +397,9 @@ fn test_mul_interaction_trace_prev_cur_deltas() {
             );
         let step = stwo::core::poly::circle::CanonicCoset::new(max_log).step();
         let shifted = point + step.mul_signed(-1).into_ef();
-        for col_idx in 28..32 {
-            let poly = cols[col_idx].clone().interpolate();
-            let fold = max_log - cols[col_idx].domain.log_size();
+        for (col_idx, column) in cols.iter().enumerate().take(32).skip(28) {
+            let poly = column.clone().interpolate();
+            let fold = max_log - column.domain.log_size();
             let v_cur = poly.eval_at_point(point.repeated_double(fold));
             let v_prev = poly.eval_at_point(shifted.repeated_double(fold));
             eprintln!(
@@ -1128,6 +1128,7 @@ fn test_prove_verify_poseidon2_channel() {
         PcsConfig::default(),
         &preprocessing,
     );
+    assert!(proof.stark_aux.is_none());
     verify_rv32im_with_channel::<Poseidon2M31MerkleChannel>(
         proof,
         PcsConfig::default(),

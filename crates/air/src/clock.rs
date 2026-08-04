@@ -145,24 +145,49 @@ impl ClockGapTable {
             stwo::prover::poly::BitReversedOrder,
         >,
     > {
+        let len = self.len() as u32;
+        let log_size = len.next_power_of_two().ilog2().max(4);
+        self.into_witness_with_log_size(log_size)
+            .expect("the natural clock trace log size contains every row")
+    }
+
+    /// Converts the clock table to a verifier-selected fixed trace size.
+    ///
+    /// Returning `None` lets the fixed-profile prover reject an oversized
+    /// segment before committing execution-dependent column geometry.
+    pub fn into_witness_with_log_size(
+        self,
+        log_size: u32,
+    ) -> Option<
+        Vec<
+            stwo::prover::poly::circle::CircleEvaluation<
+                stwo::prover::backend::simd::SimdBackend,
+                stwo::core::fields::m31::BaseField,
+                stwo::prover::poly::BitReversedOrder,
+            >,
+        >,
+    > {
         use stwo::core::poly::circle::CanonicCoset;
         use stwo::prover::backend::simd::column::BaseColumn;
         use stwo::prover::poly::circle::CircleEvaluation;
 
-        let len = self.len() as u32;
-        let log_size = len.next_power_of_two().ilog2().max(4);
-        let padded_len = 1 << log_size;
+        let padded_len = 1_u32.checked_shl(log_size)?;
+        if log_size < 4 || self.len() > padded_len as usize {
+            return None;
+        }
         let columns = self.into_columns();
         let domain = CanonicCoset::new(log_size).circle_domain();
 
-        columns
-            .into_iter()
-            .map(|mut col| {
-                col.resize(padded_len, 0);
-                let base_col: BaseColumn = col.into();
-                CircleEvaluation::new(domain, base_col)
-            })
-            .collect()
+        Some(
+            columns
+                .into_iter()
+                .map(|mut col| {
+                    col.resize(padded_len as usize, 0);
+                    let base_col: BaseColumn = col.into();
+                    CircleEvaluation::new(domain, base_col)
+                })
+                .collect(),
+        )
     }
 
     pub fn to_witness(
@@ -386,8 +411,10 @@ mod tests {
 
     #[test]
     fn test_trace_mem_access_first_access() {
-        let mut tracer = Tracer::default();
-        tracer.clock = 10;
+        let mut tracer = Tracer {
+            clock: 10,
+            ..Default::default()
+        };
 
         let access = tracer.trace_mem_access(MEM_ADDR, 0x42, 0x42);
 
@@ -401,9 +428,10 @@ mod tests {
 
     #[test]
     fn test_trace_mem_access_consecutive() {
-        let mut tracer = Tracer::default();
-
-        tracer.clock = 1;
+        let mut tracer = Tracer {
+            clock: 1,
+            ..Default::default()
+        };
         tracer.trace_mem_access(MEM_ADDR, 0x11, 0x11);
 
         tracer.clock = 2;
@@ -484,8 +512,10 @@ mod tests {
 
     #[test]
     fn test_trace_mem_access_updates_mem_clock() {
-        let mut tracer = Tracer::default();
-        tracer.clock = 10;
+        let mut tracer = Tracer {
+            clock: 10,
+            ..Default::default()
+        };
 
         tracer.trace_mem_access(MEM_ADDR, 0, 0);
 
@@ -498,8 +528,10 @@ mod tests {
 
     #[test]
     fn test_trace_reg_access_first_access() {
-        let mut tracer = Tracer::default();
-        tracer.clock = 10;
+        let mut tracer = Tracer {
+            clock: 10,
+            ..Default::default()
+        };
 
         let access = tracer.trace_reg_access(5, 0x42, 0x42);
 
@@ -513,9 +545,10 @@ mod tests {
 
     #[test]
     fn test_trace_reg_access_consecutive() {
-        let mut tracer = Tracer::default();
-
-        tracer.clock = 1;
+        let mut tracer = Tracer {
+            clock: 1,
+            ..Default::default()
+        };
         tracer.trace_reg_access(5, 0x11, 0x11);
 
         tracer.clock = 2;
@@ -560,8 +593,10 @@ mod tests {
 
     #[test]
     fn test_trace_reg_access_x0() {
-        let mut tracer = Tracer::default();
-        tracer.clock = 10;
+        let mut tracer = Tracer {
+            clock: 10,
+            ..Default::default()
+        };
 
         // x0 can still be traced - the caller handles x0 semantics
         let access = tracer.trace_reg_access(0, 0, 0);
@@ -574,8 +609,10 @@ mod tests {
 
     #[test]
     fn test_trace_reg_access_updates_reg_clock() {
-        let mut tracer = Tracer::default();
-        tracer.clock = 10;
+        let mut tracer = Tracer {
+            clock: 10,
+            ..Default::default()
+        };
 
         tracer.trace_reg_access(5, 0, 0);
 

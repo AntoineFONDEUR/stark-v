@@ -15,14 +15,14 @@ use air::poseidon2::Poseidon2Digest;
 
 use crate::relations::Relations;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutputWord {
     pub addr: u32,
     pub value: u32,
     pub clock: u32,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IoEntries {
     /// Input region start address.
     pub input_start: u32,
@@ -41,7 +41,7 @@ pub struct IoEntries {
 }
 
 /// Public data required to verify an RV32IM proof.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicData {
     /// Entry PC at start of execution.
     pub initial_pc: u32,

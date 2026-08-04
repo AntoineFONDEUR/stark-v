@@ -63,6 +63,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fixed_trace_generation_pads_to_the_requested_component_layout() {
+        let natural = super::gen_trace(air::trace::Tracer::default());
+        let mut log_sizes = super::Claim::from(&natural).component_log_sizes();
+        log_sizes[0] += 1;
+        let fixed = super::gen_trace_at_log_sizes(air::trace::Tracer::default(), log_sizes)
+            .expect("the larger fixed layout contains every trace row");
+        assert_eq!(super::Claim::from(&fixed).component_log_sizes(), log_sizes);
+    }
+
+    #[test]
+    fn fixed_trace_generation_rejects_a_component_below_the_minimum_layout() {
+        let natural = super::gen_trace(air::trace::Tracer::default());
+        let mut log_sizes = super::Claim::from(&natural).component_log_sizes();
+        log_sizes[0] = 3;
+        assert!(matches!(
+            super::gen_trace_at_log_sizes(air::trace::Tracer::default(), log_sizes),
+            Err(super::FixedTraceError::ComponentCapacityExceeded {
+                component: "auipc",
+                rows: 0,
+                log_size: 3,
+            })
+        ));
+    }
+
     // One end-to-end proof per opcode guest binary.
     crate::test_bin_e2e!(auipc, auipc);
     crate::test_bin_e2e!(base_alu_imm, addi);

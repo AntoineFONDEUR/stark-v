@@ -569,6 +569,47 @@ fn render_components(opcodes: Vec<ComponentEntry>, lookups: Vec<Ident>) -> Token
     let lookup_gen_trace_fields = lookups.iter().map(|lookup| {
         quote! { #lookup: counters.#lookup.into_trace(), }
     });
+    let fixed_trace_locals: Vec<_> = opcodes
+        .iter()
+        .enumerate()
+        .map(|(index, component)| {
+            let op = &component.name;
+            let op_str = op.to_string();
+            quote! {
+                let rows = tracer.#op.len();
+                let #op = tracer.#op
+                    .into_witness_with_log_size(log_sizes[#index])
+                    .ok_or(FixedTraceError::ComponentCapacityExceeded {
+                        component: #op_str,
+                        rows,
+                        log_size: log_sizes[#index],
+                    })?;
+            }
+        })
+        .collect();
+    let fixed_lookup_locals: Vec<_> = lookups
+        .iter()
+        .enumerate()
+        .map(|(lookup_index, lookup)| {
+            let index = opcodes.len() + lookup_index;
+            let lookup_str = lookup.to_string();
+            quote! {
+                let #lookup = counters.#lookup.into_trace();
+                let actual = #lookup
+                    .first()
+                    .map(|column| column.domain.log_size())
+                    .unwrap_or(0);
+                if actual != log_sizes[#index] {
+                    return Err(FixedTraceError::LookupLogSizeMismatch {
+                        component: #lookup_str,
+                        expected: log_sizes[#index],
+                        actual,
+                    });
+                }
+            }
+        })
+        .collect();
+    let fixed_lookup_fields = lookups.iter().map(|lookup| quote! { #lookup, });
     let gen_trace_function = quote! {
         pub fn gen_trace(
             tracer: air::trace::Tracer,
@@ -581,6 +622,22 @@ fn render_components(opcodes: Vec<ComponentEntry>, lookups: Vec<Ident>) -> Token
                 #(#gen_trace_fields)*
                 #(#lookup_gen_trace_fields)*
             }
+        }
+
+        /// Generates execution traces at one verifier-owned component layout.
+        pub fn gen_trace_at_log_sizes(
+            tracer: air::trace::Tracer,
+            log_sizes: [u32; COMPONENT_COUNT],
+        ) -> Result<Traces, FixedTraceError> {
+            let mut counters = crate::relations::Counters::new();
+            #(#fixed_trace_locals)*
+            #(#register_multiplicities_body)*
+            #(#fixed_lookup_locals)*
+
+            Ok(Traces {
+                #(#gen_trace_fields)*
+                #(#fixed_lookup_fields)*
+            })
         }
     };
 
@@ -878,6 +935,38 @@ fn render_components(opcodes: Vec<ComponentEntry>, lookups: Vec<Ident>) -> Token
         pub const COMPONENT_NAMES: [&str; COMPONENT_COUNT] = [
             #(stringify!(#component_names),)*
         ];
+
+        /// A segment cannot enter a fixed proof profile with different table geometry.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum FixedTraceError {
+            ComponentCapacityExceeded {
+                component: &'static str,
+                rows: usize,
+                log_size: u32,
+            },
+            LookupLogSizeMismatch {
+                component: &'static str,
+                expected: u32,
+                actual: u32,
+            },
+        }
+
+        impl core::fmt::Display for FixedTraceError {
+            fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                match self {
+                    Self::ComponentCapacityExceeded { component, rows, log_size } => write!(
+                        formatter,
+                        "component {component} has {rows} rows, exceeding fixed log size {log_size}",
+                    ),
+                    Self::LookupLogSizeMismatch { component, expected, actual } => write!(
+                        formatter,
+                        "lookup component {component} has log size {actual}, expected {expected}",
+                    ),
+                }
+            }
+        }
+
+        impl std::error::Error for FixedTraceError {}
 
         impl From<&Traces> for Claim {
             fn from(traces: &Traces) -> Self {

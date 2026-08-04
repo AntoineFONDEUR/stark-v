@@ -292,6 +292,75 @@ mod shared {
     }
 }
 
+mod embedded_relation_bundle {
+    stwo_constraint_framework::relation!(PassRelation, 1);
+    stwo_constraint_framework::relation!(RecordRelation, 1);
+
+    /// Relation instances owned by the host system embedding this AIR.
+    #[derive(Clone)]
+    pub struct Relations {
+        pub pass: PassRelation,
+        pub record: RecordRelation,
+    }
+
+    impl Relations {
+        pub fn dummy() -> Self {
+            Self {
+                pass: PassRelation::dummy(),
+                record: RecordRelation::dummy(),
+            }
+        }
+    }
+
+    stwo_macros::define_air_fns! {
+        max_degree: 3,
+        embedded: [],
+        embedded_component: true,
+        embedded_relations: crate::embedded_relation_bundle::Relations,
+        logup_batch: 2,
+
+        relation pass(1);
+        relation record(1);
+
+        fn guarded(value, active) {
+            constrain active * (1 - active);
+            constrain active * (1 - enabler);
+            emit(active) pass(value);
+            consume(active) record(value);
+            return value;
+        }
+    }
+}
+
+#[test]
+fn test_embedded_component_uses_custom_relation_bundle() {
+    use embedded_relation_bundle::component::air::Eval;
+    use stwo_constraint_framework::FrameworkEval;
+    use stwo_constraint_framework::expr::ExprEvaluator;
+
+    let evaluated = Eval {
+        log_size: 4,
+        relations: embedded_relation_bundle::Relations::dummy(),
+    }
+    .evaluate(ExprEvaluator::new());
+
+    assert_eq!(evaluated.logup.fracs.len(), 2);
+}
+
+#[test]
+fn test_embedded_component_batches_relation_pairs() {
+    let mut table = embedded_relation_bundle::GuardedTable::new();
+    embedded_relation_bundle::guarded_fill(&mut table, [felt(7), felt(1)], []);
+    let trace = table.into_witness();
+    let (interaction, _) = embedded_relation_bundle::component::witness::gen_interaction_trace(
+        &trace,
+        &embedded_relation_bundle::Relations::dummy(),
+    );
+
+    // One QM31 interaction column is represented by four base-field columns.
+    assert_eq!(interaction.len(), 4);
+}
+
 #[test]
 fn test_external_relation_balances_across_functions() {
     let mut tables = shared::Tables::default();

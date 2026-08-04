@@ -1,151 +1,87 @@
-//! QM31 inverse component: witness generation and AIR evaluation.
+//! Macro-defined QM31 inverse component and witness helpers.
 //!
-//! The constraints live in the `define_component_tables!` invocation in
-//! `lib.rs`: `a * inv = enabler` limb-by-limb, so padding rows hold and
-//! enabled rows force `a` to be invertible. Witness generation computes the
-//! inverse with stwo's field arithmetic, which the tests use as the oracle.
+//! The macro frame constrains `a * inv = enabler` in extension-field limbs, so
+//! enabled rows prove a nonzero inverse while zero padding remains valid.
+//! Circuit rows additionally bind the input and output through `op_def` and
+//! `wire`.
 
-use stwo::core::ColumnVec;
 use stwo::core::fields::FieldExpOps;
-use stwo::core::fields::m31::BaseField;
 use stwo::core::fields::qm31::QM31;
-use stwo::prover::backend::simd::SimdBackend;
-use stwo::prover::backend::simd::qm31::PackedQM31;
-use stwo::prover::poly::BitReversedOrder;
-use stwo::prover::poly::circle::CircleEvaluation;
-use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, RelationEntry,
-};
 
-use crate::Qm31InvTable;
-use crate::prover_columns::Qm31InvColumns;
-use crate::relations::{RecursionRelations, op_kind};
+use crate::relations::{RecursionRelations, SharedPrimitiveRelations};
 
-pub type Component = FrameworkComponent<Eval>;
+stwo_macros::define_air_fns! {
+    max_degree: 3,
+    embedded: [],
+    embedded_component: true,
+    embedded_relations: crate::relations::SharedPrimitiveRelations,
+    logup_batch: 2,
+    embedded_dynamic_component: true,
 
-#[derive(Clone)]
-pub struct Eval {
-    pub log_size: u32,
-    pub recursion_relations: RecursionRelations,
-}
+    relation op_def(5);
+    relation wire(6);
 
-impl FrameworkEval for Eval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
+    fn qm31_inv(
+        a_0, a_1, a_2, a_3,
+        inv_0, inv_1, inv_2, inv_3,
+        circuit_id, node_id, lhs_id, uses, in_circuit,
+    ) {
+        constrain in_circuit * (1 - in_circuit);
+        constrain in_circuit * (1 - enabler);
 
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
+        constrain a_0 * inv_0 - a_1 * inv_1
+            + 2 * (a_2 * inv_2 - a_3 * inv_3) - (a_2 * inv_3 + a_3 * inv_2)
+            - enabler;
+        constrain a_0 * inv_1 + a_1 * inv_0
+            + (a_2 * inv_2 - a_3 * inv_3) + 2 * (a_2 * inv_3 + a_3 * inv_2);
+        constrain a_0 * inv_2 - a_1 * inv_3 + a_2 * inv_0 - a_3 * inv_1;
+        constrain a_0 * inv_3 + a_1 * inv_2 + a_2 * inv_1 + a_3 * inv_0;
 
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = Qm31InvColumns::from_eval(&mut eval);
-        for constraint in cols.constraints() {
-            eval.add_constraint(constraint);
-        }
-        // Circuit wiring: rows with in_circuit set implement one Inverse
-        // node of a recorded composition circuit.
-        eval.add_to_relation(RelationEntry::new(
-            &self.recursion_relations.op_def,
-            -E::EF::from(cols.in_circuit.clone()),
-            &[
-                cols.circuit_id.clone(),
-                cols.node_id.clone(),
-                E::F::from(BaseField::from(op_kind::INVERSE)),
-                cols.lhs_id.clone(),
-                E::F::from(BaseField::from(0u32)),
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.recursion_relations.wire,
-            -E::EF::from(cols.in_circuit.clone()),
-            &[
-                cols.circuit_id.clone(),
-                cols.lhs_id.clone(),
-                cols.a_0.clone(),
-                cols.a_1.clone(),
-                cols.a_2.clone(),
-                cols.a_3.clone(),
-            ],
-        ));
-        eval.add_to_relation(RelationEntry::new(
-            &self.recursion_relations.wire,
-            E::EF::from(cols.uses.clone() * cols.in_circuit.clone()),
-            &[
-                cols.circuit_id.clone(),
-                cols.node_id.clone(),
-                cols.inv_0.clone(),
-                cols.inv_1.clone(),
-                cols.inv_2.clone(),
-                cols.inv_3.clone(),
-            ],
-        ));
-        eval.finalize_logup_in_pairs();
-        eval
+        consume(in_circuit) op_def(
+            circuit_id,
+            node_id,
+            constant(crate::relations::op_kind::INVERSE),
+            lhs_id,
+            0,
+        );
+        consume(in_circuit) wire(circuit_id, lhs_id, a_0, a_1, a_2, a_3);
+        emit(uses * in_circuit) wire(
+            circuit_id,
+            node_id,
+            inv_0,
+            inv_1,
+            inv_2,
+            inv_3,
+        );
+
+        return (inv_0, inv_1, inv_2, inv_3);
     }
 }
 
-/// Generate the interaction trace and the claimed sum of the wiring entries.
+pub use component::air::{Component, Eval};
+
+/// Generate the interaction trace from the macro-defined relation entries.
 pub fn gen_interaction_trace(
-    trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
+    trace: &[stwo::prover::poly::circle::CircleEvaluation<
+        stwo::prover::backend::simd::SimdBackend,
+        stwo::core::fields::m31::BaseField,
+        stwo::prover::poly::BitReversedOrder,
+    >],
     recursion_relations: &RecursionRelations,
 ) -> (
-    ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
+    stwo::core::ColumnVec<
+        stwo::prover::poly::circle::CircleEvaluation<
+            stwo::prover::backend::simd::SimdBackend,
+            stwo::core::fields::m31::BaseField,
+            stwo::prover::poly::BitReversedOrder,
+        >,
+    >,
     QM31,
 ) {
-    let cols = Qm31InvColumns::from_iter(trace.iter().map(|eval| &eval.values.data));
-    let simd_size = cols.enabler.len();
-    let log_size = trace[0].domain.log_size();
-    let mut logup_gen = LogupTraceGenerator::new(log_size);
-
-    let neg_in_circuit: Vec<PackedQM31> = (0..simd_size)
-        .map(|i| -PackedQM31::from(cols.in_circuit[i]))
-        .collect();
-    let pos_uses: Vec<PackedQM31> = (0..simd_size)
-        .map(|i| PackedQM31::from(cols.uses[i] * cols.in_circuit[i]))
-        .collect();
-    let inv_kind =
-        stwo::prover::backend::simd::m31::PackedM31::broadcast(BaseField::from(op_kind::INVERSE));
-    let kind: Vec<_> = (0..simd_size).map(|_| inv_kind).collect();
-    let zero = stwo::prover::backend::simd::m31::PackedM31::broadcast(BaseField::from(0u32));
-    let zero_col: Vec<_> = (0..simd_size).map(|_| zero).collect();
-
-    let def_denom = combine!(
-        recursion_relations.op_def,
-        [cols.circuit_id, cols.node_id, &kind, cols.lhs_id, &zero_col]
-    );
-    let lhs_denom = combine!(
-        recursion_relations.wire,
-        [
-            cols.circuit_id,
-            cols.lhs_id,
-            cols.a_0,
-            cols.a_1,
-            cols.a_2,
-            cols.a_3
-        ]
-    );
-    let out_denom = combine!(
-        recursion_relations.wire,
-        [
-            cols.circuit_id,
-            cols.node_id,
-            cols.inv_0,
-            cols.inv_1,
-            cols.inv_2,
-            cols.inv_3
-        ]
-    );
-
-    write_pair!(
-        &neg_in_circuit,
-        &def_denom,
-        &neg_in_circuit,
-        &lhs_denom,
-        logup_gen
-    );
-    write_col!(&pos_uses, &out_denom, logup_gen);
-    logup_gen.finalize_last()
+    component::witness::gen_interaction_trace(
+        trace,
+        &SharedPrimitiveRelations::for_circuit(recursion_relations),
+    )
 }
 
 /// Record `a^-1` in the trace table and return it.
@@ -170,7 +106,7 @@ mod tests {
     use rand::{Rng, SeedableRng};
     use stwo::core::pcs::TreeVec;
     use stwo::core::poly::circle::CanonicCoset;
-    use stwo_constraint_framework::assert_constraints_on_polys;
+    use stwo_constraint_framework::{FrameworkEval, assert_constraints_on_polys};
 
     fn random_nonzero_qm31(rng: &mut SmallRng) -> QM31 {
         loop {
@@ -198,7 +134,7 @@ mod tests {
         let trace_polys = traces.map_cols(|c| c.interpolate());
         let eval = Eval {
             log_size,
-            recursion_relations,
+            relations: SharedPrimitiveRelations::for_circuit(&recursion_relations),
         };
         assert_constraints_on_polys(
             &trace_polys,
@@ -254,7 +190,9 @@ mod tests {
         use stwo_constraint_framework::expr::ExprEvaluator;
         let eval = Eval {
             log_size: 4,
-            recursion_relations: crate::relations::RecursionRelations::dummy(),
+            relations: SharedPrimitiveRelations::for_circuit(
+                &crate::relations::RecursionRelations::dummy(),
+            ),
         };
         let expr_eval = eval.evaluate(ExprEvaluator::new());
         let degrees = expr_eval.constraint_degree_bounds();

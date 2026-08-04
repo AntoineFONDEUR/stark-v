@@ -35,6 +35,41 @@ pub struct RecursionRelations {
     pub wire: WireRelation,
 }
 
+/// Relation bundle consumed by the macro-generated shared recursion
+/// primitives. It contains the recursion-local circuit/path relations and the
+/// VM Poseidon2 IO relation used by Merkle hashing, all cloned from the one
+/// universal registry draw.
+#[derive(Clone)]
+pub struct SharedPrimitiveRelations {
+    pub merkle_node: MerkleNodeRelation,
+    pub op_def: OpDefRelation,
+    pub wire: WireRelation,
+    pub poseidon2_io: air::relations::relation_types::poseidon2_io,
+}
+
+impl SharedPrimitiveRelations {
+    /// Bundle for circuit arithmetic, where the Poseidon2 relation is unused.
+    pub fn for_circuit(recursion: &RecursionRelations) -> Self {
+        Self {
+            merkle_node: recursion.merkle_node.clone(),
+            op_def: recursion.op_def.clone(),
+            wire: recursion.wire.clone(),
+            poseidon2_io: air::relations::relation_types::poseidon2_io::dummy(),
+        }
+    }
+
+    /// Bundle for Merkle-path verification using the universal VM relation
+    /// draw and recursion-local path relation draw.
+    pub fn for_merkle(vm: &prover::relations::Relations, recursion: &RecursionRelations) -> Self {
+        Self {
+            merkle_node: recursion.merkle_node.clone(),
+            op_def: recursion.op_def.clone(),
+            wire: recursion.wire.clone(),
+            poseidon2_io: vm.poseidon2_io.clone(),
+        }
+    }
+}
+
 impl RecursionRelations {
     /// Deterministic relations for component-level tests.
     pub fn dummy() -> Self {

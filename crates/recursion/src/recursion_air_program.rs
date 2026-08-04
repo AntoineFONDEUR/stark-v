@@ -1025,29 +1025,37 @@ impl RosterCollector {
             let log_size = log_size();
             crate::qm31_mul::Eval {
                 log_size,
-                recursion_relations: relations.recursion.clone(),
+                relations: crate::relations::SharedPrimitiveRelations::for_circuit(
+                    &relations.recursion,
+                ),
             }
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[31], claimed_sum(), {
             let log_size = log_size();
             crate::qm31_inv::Eval {
                 log_size,
-                recursion_relations: relations.recursion.clone(),
+                relations: crate::relations::SharedPrimitiveRelations::for_circuit(
+                    &relations.recursion,
+                ),
             }
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[32], claimed_sum(), {
             let log_size = log_size();
             crate::linear_ops::Eval {
                 log_size,
-                recursion_relations: relations.recursion.clone(),
+                relations: crate::relations::SharedPrimitiveRelations::for_circuit(
+                    &relations.recursion,
+                ),
             }
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[33], claimed_sum(), {
             let log_size = log_size();
             crate::merkle_path::Eval {
                 log_size,
-                relations: relations.vm.clone(),
-                recursion_relations: relations.recursion.clone(),
+                relations: crate::relations::SharedPrimitiveRelations::for_merkle(
+                    &relations.vm,
+                    &relations.recursion,
+                ),
             }
         });
         self.push_poseidon2(allocator, UNIVERSAL_COMPONENT_NAMES[34], claimed_sum(), {

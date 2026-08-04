@@ -675,29 +675,37 @@ mod tests {
             &mut usage,
             qm31_mul::Eval {
                 log_size: LOG_SIZE,
-                recursion_relations: relations.recursion.clone(),
+                relations: crate::relations::SharedPrimitiveRelations::for_circuit(
+                    &relations.recursion,
+                ),
             },
         );
         usage_of(
             &mut usage,
             qm31_inv::Eval {
                 log_size: LOG_SIZE,
-                recursion_relations: relations.recursion.clone(),
+                relations: crate::relations::SharedPrimitiveRelations::for_circuit(
+                    &relations.recursion,
+                ),
             },
         );
         usage_of(
             &mut usage,
             linear_ops::Eval {
                 log_size: LOG_SIZE,
-                recursion_relations: relations.recursion.clone(),
+                relations: crate::relations::SharedPrimitiveRelations::for_circuit(
+                    &relations.recursion,
+                ),
             },
         );
         usage_of(
             &mut usage,
             merkle_path::Eval {
                 log_size: LOG_SIZE,
-                relations: relations.vm.clone(),
-                recursion_relations: relations.recursion.clone(),
+                relations: crate::relations::SharedPrimitiveRelations::for_merkle(
+                    &relations.vm,
+                    &relations.recursion,
+                ),
             },
         );
         usage_of(

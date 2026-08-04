@@ -31,7 +31,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::{ToTokens, format_ident, quote};
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
-use syn::{Expr, Ident, Token, braced, bracketed, parenthesized, parse_macro_input};
+use syn::{Expr, Ident, Path, Token, braced, bracketed, parenthesized, parse_macro_input};
 
 use crate::trace_tables::{
     LookupsDef, OpcodeDef, column_struct_name, const_eval, count_opcode_flags,
@@ -122,6 +122,16 @@ struct AirFnsInput {
     /// When set with `embedded`, also emit the narrow/wide/io LogUp component
     /// adapter wired to `crate::relations::Relations`.
     embedded_component: bool,
+    /// Relation bundle used by a generated embedded component. The default is
+    /// the zkVM prover bundle; recursion supplies a bundle containing the exact
+    /// shared relation instances used by its universal registry.
+    embedded_relations: Path,
+    /// Number of adjacent LogUp fractions combined in one interaction column
+    /// for generated embedded components.
+    logup_batch: usize,
+    /// Whether the embedded component also exposes named-relation evaluation
+    /// for compilation into another AIR.
+    embedded_dynamic_component: bool,
     /// Externally declared relations `relation name(arity);`, referenced by
     /// `emit`/`consume` in bodies. Each becomes a `relation!` type and an
     /// `AirFnRelations` field, so two function systems can share one
@@ -180,6 +190,55 @@ impl Parse for AirFnsInput {
             false
         };
 
+        let embedded_relations = if input
+            .cursor()
+            .ident()
+            .is_some_and(|(ident, _)| ident == "embedded_relations")
+        {
+            input.parse::<Ident>()?;
+            input.parse::<Token![:]>()?;
+            let path = input.parse::<Path>()?;
+            input.parse::<Token![,]>()?;
+            path
+        } else {
+            syn::parse_quote!(crate::relations::Relations)
+        };
+
+        let logup_batch = if input
+            .cursor()
+            .ident()
+            .is_some_and(|(ident, _)| ident == "logup_batch")
+        {
+            input.parse::<Ident>()?;
+            input.parse::<Token![:]>()?;
+            let lit = input.parse::<syn::LitInt>()?;
+            input.parse::<Token![,]>()?;
+            let batch = lit.base10_parse::<usize>()?;
+            if !matches!(batch, 1 | 2) {
+                return Err(syn::Error::new(
+                    lit.span(),
+                    "logup_batch must be 1 or 2 under the supported degree bound",
+                ));
+            }
+            batch
+        } else {
+            1
+        };
+
+        let embedded_dynamic_component = if input
+            .cursor()
+            .ident()
+            .is_some_and(|(ident, _)| ident == "embedded_dynamic_component")
+        {
+            input.parse::<Ident>()?;
+            input.parse::<Token![:]>()?;
+            let lit = input.parse::<syn::LitBool>()?;
+            input.parse::<Token![,]>()?;
+            lit.value
+        } else {
+            false
+        };
+
         // Externally declared relations: `relation name(arity);`.
         let mut relations = Vec::new();
         while input
@@ -204,6 +263,9 @@ impl Parse for AirFnsInput {
             max_degree,
             embedded,
             embedded_component,
+            embedded_relations,
+            logup_batch,
+            embedded_dynamic_component,
             relations,
             fns,
         })
@@ -1370,11 +1432,30 @@ fn lower_fn(
         fn_name: function.name.clone(),
     };
 
+    // Every table has one generated activity column. Making it a built-in
+    // frame value lets a function gate optional relation multiplicities and
+    // constrain auxiliary flags to real rows without duplicating that column
+    // in its parameter list.
+    let mut scope: HashMap<String, Value> = HashMap::new();
+    let enabler = format_ident!("enabler");
+    scope.insert(
+        enabler.to_string(),
+        Value::Scalar {
+            cell: enabler,
+            degree: 1,
+        },
+    );
+
     // Parameters are committed columns: scalars directly, arrays flattened
     // as `name_k`.
-    let mut scope: HashMap<String, Value> = HashMap::new();
     let mut arg_columns: Vec<Ident> = Vec::new();
     for param in &function.params {
+        if param.name == "enabler" {
+            return Err(syn::Error::new(
+                param.name.span(),
+                "`enabler` is a built-in row-activity value",
+            ));
+        }
         let value = match param.size {
             None => {
                 let cell = lowerer.register_column(&param.name);
@@ -1761,6 +1842,9 @@ pub fn define_air_fns(input: TokenStream) -> TokenStream {
         max_degree,
         embedded,
         embedded_component,
+        embedded_relations,
+        logup_batch,
+        embedded_dynamic_component,
         relations: external_relations,
         fns,
     } = parse_macro_input!(input as AirFnsInput);
@@ -1822,7 +1906,14 @@ pub fn define_air_fns(input: TokenStream) -> TokenStream {
         // `crate::relations::Relations` (an opcode emitting `program_access`,
         // `memory_access`, range checks, …). The declarations only fix arity
         // for the parser.
-        return generate_embedded(&mut lowered, &flags, embedded_component);
+        return generate_embedded(
+            &mut lowered,
+            &flags,
+            embedded_component,
+            &embedded_relations,
+            logup_batch,
+            embedded_dynamic_component,
+        );
     }
 
     // Backend: tables, generic columns, exported lookup macros.
@@ -1960,6 +2051,9 @@ fn generate_embedded(
     lowered: &mut [LoweredFn],
     flags: &[Ident],
     embedded_component: bool,
+    relations_path: &Path,
+    logup_batch: usize,
+    embedded_dynamic_component: bool,
 ) -> TokenStream {
     let [function] = lowered else {
         return syn::Error::new(
@@ -1988,11 +2082,16 @@ fn generate_embedded(
         if function.relation_entries.is_empty() {
             // No emit/consume statements: the Poseidon2 adapter, which emits
             // from the io activation tuple under its narrow/wide/io flags.
-            generate_embedded_poseidon2_component(function, flags)
+            generate_embedded_poseidon2_component(function, flags, relations_path)
         } else {
             // An opcode: emit its declared relations (emit/consume) against
             // the host `crate::relations::Relations`.
-            generate_embedded_opcode_component(function)
+            generate_embedded_opcode_component(
+                function,
+                relations_path,
+                logup_batch,
+                embedded_dynamic_component,
+            )
         }
     } else {
         quote! {}
@@ -2025,13 +2124,16 @@ fn is_preprocessed_relation(name: &Ident) -> bool {
     n.starts_with("range_check") || n == "bitwise"
 }
 
-/// The opcode component: emit the function's declared relations against the
-/// host `crate::relations::Relations`, generate the LogUp interaction trace,
-/// and register preprocessed multiplicities — the same contract `components!`
-/// generates for a schema opcode, but driven by the fn-DSL `emit`/`consume`
-/// statements. The function's own io activation tuple (entry 0) is unused:
-/// an opcode is a trace table the runner fills, not an activated function.
-fn generate_embedded_opcode_component(function: &LoweredFn) -> TokenStream2 {
+/// The embedded component maps the function's declared relation statements to
+/// a host relation bundle and generates matching AIR and witness LogUp paths.
+/// The function's own io activation tuple is unused because the host fills the
+/// table directly rather than activating it through a function relation.
+fn generate_embedded_opcode_component(
+    function: &LoweredFn,
+    relations_path: &Path,
+    logup_batch: usize,
+    embedded_dynamic_component: bool,
+) -> TokenStream2 {
     let columns_type = column_struct_name(&function.name);
     // SIMD length column: the first committed column (flag tables have no
     // `enabler` column to measure).
@@ -2062,6 +2164,142 @@ fn generate_embedded_opcode_component(function: &LoweredFn) -> TokenStream2 {
     let pp_entry_indices: Vec<usize> = preprocessed.iter().map(|(i, _)| *i).collect();
     let pp_relations: Vec<&Ident> = preprocessed.iter().map(|(_, r)| *r).collect();
     let n_preprocessed = preprocessed.len();
+    let finalize_logup = if logup_batch == 2 {
+        quote! { eval.finalize_logup_in_pairs(); }
+    } else {
+        quote! { eval.finalize_logup(); }
+    };
+    let interaction_columns: Vec<TokenStream2> = indices
+        .chunks(logup_batch)
+        .map(|batch| match batch {
+            [index] => quote! {
+                {
+                    let mut col = logup_gen.new_col();
+                    for (vec_row, (n, d)) in numerators[#index]
+                        .iter()
+                        .zip(denominators[#index].iter())
+                        .enumerate()
+                    {
+                        col.write_frac(vec_row, *n, *d);
+                    }
+                    col.finalize_col();
+                }
+            },
+            [first, second] => quote! {
+                {
+                    let mut col = logup_gen.new_col();
+                    for vec_row in 0..simd_size {
+                        let first_numerator = numerators[#first][vec_row];
+                        let first_denominator = denominators[#first][vec_row];
+                        let second_numerator = numerators[#second][vec_row];
+                        let second_denominator = denominators[#second][vec_row];
+                        col.write_frac(
+                            vec_row,
+                            first_numerator * second_denominator
+                                + second_numerator * first_denominator,
+                            first_denominator * second_denominator,
+                        );
+                    }
+                    col.finalize_col();
+                }
+            },
+            _ => unreachable!("logup batch is limited to one or two entries"),
+        })
+        .collect();
+    let register_multiplicities = if preprocessed.is_empty() {
+        quote! {
+            /// This component has no preprocessed lookup multiplicities.
+            pub fn register_multiplicities<T>(
+                _trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
+                _counters: &mut T,
+            ) {
+            }
+        }
+    } else {
+        quote! {
+            /// Register preprocessed multiplicities for range-check and bitwise lookups.
+            pub fn register_multiplicities(
+                trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
+                counters: &mut crate::relations::Counters,
+            ) {
+                if trace.is_empty() {
+                    return;
+                }
+                let _ = (&counters,);
+                let cols = #columns_type::from_iter(trace.iter().map(|eval| &eval.values.data));
+                let simd_size = cols.#len_col.len();
+                let mut multiplicities: Vec<Vec<stwo::prover::backend::simd::m31::PackedM31>> =
+                    vec![Vec::with_capacity(simd_size); #n_preprocessed];
+                let mut elements: Vec<Vec<Vec<stwo::prover::backend::simd::m31::PackedM31>>> =
+                    Vec::with_capacity(#n_preprocessed);
+                for _ in 0..#n_preprocessed {
+                    elements.push(Vec::new());
+                }
+                for i in 0..simd_size {
+                    let (_, entries) = cols.at(i).evaluation();
+                    let entries: Vec<_> = entries.into_iter().skip(1).collect();
+                    #(
+                        {
+                            let (multiplicity, values) = &entries[#pp_entry_indices];
+                            multiplicities[#pp_slots].push(*multiplicity);
+                            if elements[#pp_slots].is_empty() {
+                                for _ in 0..values.len() {
+                                    elements[#pp_slots].push(Vec::with_capacity(simd_size));
+                                }
+                            }
+                            for (column, value) in
+                                elements[#pp_slots].iter_mut().zip(values.iter())
+                            {
+                                column.push(*value);
+                            }
+                        }
+                    )*
+                }
+                #(
+                    counters.#pp_relations.register_many(
+                        &multiplicities[#pp_slots],
+                        &elements[#pp_slots]
+                            .iter()
+                            .map(|column| column.as_slice())
+                            .collect::<Vec<_>>(),
+                    );
+                )*
+            }
+        }
+    };
+    let dynamic_eval = if embedded_dynamic_component {
+        quote! {
+            impl air::relation_eval::DynamicRelationFrameworkEval for Eval {
+                fn evaluate_dynamic_relations<E: air::relation_eval::DynamicRelationEvalAtRow>(
+                    &self,
+                    mut eval: E,
+                ) -> E {
+                    let cols = #columns_type::from_eval(&mut eval);
+                    let (constraints, entries) = cols.evaluation();
+                    for constraint in constraints {
+                        eval.add_constraint(constraint);
+                    }
+                    let mut entries = entries.into_iter();
+                    let _ = entries.next();
+                    #(
+                        {
+                            let (multiplicity, values) =
+                                entries.next().expect("relation entry");
+                            eval.add_to_named_relation(
+                                stringify!(#relations),
+                                multiplicity.into(),
+                                &values,
+                            );
+                        }
+                    )*
+                    #finalize_logup
+                    eval
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
 
     quote! {
         /// Prover component wiring for the embedded opcode.
@@ -2069,7 +2307,7 @@ fn generate_embedded_opcode_component(function: &LoweredFn) -> TokenStream2 {
             pub mod air {
                 use stwo_constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval};
 
-                use crate::relations::Relations;
+                use #relations_path as Relations;
                 use super::super::prover_columns::#columns_type;
 
                 pub type Component = FrameworkComponent<Eval>;
@@ -2112,10 +2350,12 @@ fn generate_embedded_opcode_component(function: &LoweredFn) -> TokenStream2 {
                                 );
                             }
                         )*
-                        eval.finalize_logup();
+                        #finalize_logup
                         eval
                     }
                 }
+
+                #dynamic_eval
             }
 
             pub mod witness {
@@ -2129,11 +2369,11 @@ fn generate_embedded_opcode_component(function: &LoweredFn) -> TokenStream2 {
                 use stwo::prover::poly::circle::CircleEvaluation;
                 use stwo_constraint_framework::{LogupTraceGenerator, Relation};
 
-                use crate::relations::{Counters, Relations};
+                use #relations_path as Relations;
                 use super::super::prover_columns::#columns_type;
 
-                /// One singleton fraction column per emitted relation, in the
-                /// order the AIR adds them.
+                /// Interaction columns use the same relation order and batch
+                /// shape as the generated AIR.
                 pub fn gen_interaction_trace(
                     trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
                     relations: &Relations,
@@ -2167,78 +2407,22 @@ fn generate_embedded_opcode_component(function: &LoweredFn) -> TokenStream2 {
                             }
                         )*
                     }
-                    #(
-                        {
-                            let mut col = logup_gen.new_col();
-                            for (vec_row, (n, d)) in numerators[#indices]
-                                .iter()
-                                .zip(denominators[#indices].iter())
-                                .enumerate()
-                            {
-                                col.write_frac(vec_row, *n, *d);
-                            }
-                            col.finalize_col();
-                        }
-                    )*
+                    #(#interaction_columns)*
                     logup_gen.finalize_last()
                 }
 
-                /// Register preprocessed multiplicities for the opcode's
-                /// range-check / bitwise lookups.
-                pub fn register_multiplicities(
-                    trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
-                    counters: &mut Counters,
-                ) {
-                    if trace.is_empty() {
-                        return;
-                    }
-                    let _ = (&counters,);
-                    let cols = #columns_type::from_iter(trace.iter().map(|eval| &eval.values.data));
-                    let simd_size = cols.#len_col.len();
-                    let mut multiplicities: Vec<Vec<stwo::prover::backend::simd::m31::PackedM31>> =
-                        vec![Vec::with_capacity(simd_size); #n_preprocessed];
-                    let mut elements: Vec<Vec<Vec<stwo::prover::backend::simd::m31::PackedM31>>> =
-                        Vec::with_capacity(#n_preprocessed);
-                    for _ in 0..#n_preprocessed {
-                        elements.push(Vec::new());
-                    }
-                    for i in 0..simd_size {
-                        let (_, entries) = cols.at(i).evaluation();
-                        let entries: Vec<_> = entries.into_iter().skip(1).collect();
-                        #(
-                            {
-                                let (multiplicity, values) = &entries[#pp_entry_indices];
-                                multiplicities[#pp_slots].push(*multiplicity);
-                                if elements[#pp_slots].is_empty() {
-                                    for _ in 0..values.len() {
-                                        elements[#pp_slots].push(Vec::with_capacity(simd_size));
-                                    }
-                                }
-                                for (column, value) in
-                                    elements[#pp_slots].iter_mut().zip(values.iter())
-                                {
-                                    column.push(*value);
-                                }
-                            }
-                        )*
-                    }
-                    #(
-                        counters.#pp_relations.register_many(
-                            &multiplicities[#pp_slots],
-                            &elements[#pp_slots]
-                                .iter()
-                                .map(|column| column.as_slice())
-                                .collect::<Vec<_>>(),
-                        );
-                    )*
-                }
+                #register_multiplicities
             }
         }
     }
 }
 
 /// LogUp adapter for embedded Poseidon2: narrow, wide, and atomic io modes.
-fn generate_embedded_poseidon2_component(function: &LoweredFn, flags: &[Ident]) -> TokenStream2 {
+fn generate_embedded_poseidon2_component(
+    function: &LoweredFn,
+    flags: &[Ident],
+    relations_path: &Path,
+) -> TokenStream2 {
     let _ = flags;
     let columns_type = column_struct_name(&function.name);
     quote! {
@@ -2251,7 +2435,7 @@ fn generate_embedded_poseidon2_component(function: &LoweredFn, flags: &[Ident]) 
                 };
                 use stwo_constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval, RelationEntry};
 
-                use crate::relations::Relations;
+                use #relations_path as Relations;
                 use super::super::prover_columns::#columns_type;
 
                 pub type Component = FrameworkComponent<Eval>;
@@ -2380,7 +2564,8 @@ fn generate_embedded_poseidon2_component(function: &LoweredFn, flags: &[Ident]) 
                 use stwo::prover::poly::circle::CircleEvaluation;
                 use stwo_constraint_framework::{LogupTraceGenerator, Relation};
 
-                use crate::relations::{Counters, Relations};
+                use crate::relations::Counters;
+                use #relations_path as Relations;
                 use super::super::prover_columns::#columns_type;
 
                 pub fn gen_interaction_trace(
@@ -2496,6 +2681,7 @@ fn generate_embedded_fill(function: &LoweredFn, flags: &[Ident]) -> syn::Result<
             args: [stwo::core::fields::m31::BaseField; #n_args],
             flags: [u32; #n_flags],
         ) -> [stwo::core::fields::m31::BaseField; #n_rets] {
+            let enabler = stwo::core::fields::m31::BaseField::from_u32_unchecked(1);
             let [#(#arg_cells),*] = args;
             #(#steps)*
             table.push_row(&[#(#row_values),*]);
@@ -2547,6 +2733,7 @@ fn generate_call_fn(function: &LoweredFn) -> syn::Result<TokenStream2> {
             tables: &mut Tables,
             args: [stwo::core::fields::m31::BaseField; #n_args],
         ) -> [stwo::core::fields::m31::BaseField; #n_rets] {
+            let enabler = stwo::core::fields::m31::BaseField::from_u32_unchecked(1);
             let [#(#arg_cells),*] = args;
             #(#steps)*
             tables.#name.push_row(&[#(#row_values),*]);

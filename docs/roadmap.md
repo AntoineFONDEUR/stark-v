@@ -149,8 +149,15 @@ set.
   - Evidence: commit `59ef6b42`; the structural guard, complete recursion suite,
     full release workspace suite, structural searches, and repository hooks
     passed.
-- `[active] PRO-001` Freeze the first recursive protocol profile.
-- `[pending] REC-001` Adapt a real VM proof to the recursive leaf wire.
+- `[done] PRO-001` Freeze the first recursive protocol profile.
+  - The generated VM and universal rosters derive both fixed proof geometries,
+    verifier plans, preprocessing registries, exact wire types, and the protocol
+    identifier from one profile constructor.
+  - The profile fixes 193 FRI queries, 4 KiB public-input and public-output
+    capacities, and a 3,080,316-byte universal proof wire.
+  - Evidence: commit `b0a3f2ae`; focused profile, manifest mutation, macro,
+    recursion, full release workspace, and repository hook suites passed.
+- `[active] REC-001` Adapt a real VM proof to the recursive leaf wire.
 - `[pending] REC-002` Build the universal trace assembler.
 - `[pending] REC-003` Close the segment-leaf branch end to end.
 - `[pending] REC-004` Close the canonical empty-leaf branch.
@@ -298,7 +305,7 @@ committed, and pushed.
 The design and soundness invariants are in `docs/recursion.md`. Tasks below own
 the implementation order and status.
 
-### `[active] PRO-001` Freeze the protocol profile
+### `[done] PRO-001` Freeze the protocol profile
 
 Dependencies: `AIR-006`.
 
@@ -316,7 +323,7 @@ Done when native and AIR manifest encodings have the same digest, every field
 mutation changes the identity or fails validation, and the profile is tested,
 committed, and pushed.
 
-### `[pending] REC-001` Real VM-proof adapter
+### `[active] REC-001` Real VM-proof adapter
 
 Dependencies: `PRO-001`.
 
@@ -701,6 +708,23 @@ commands run, observed test counts or measurements, and the pushed commit.
 - `cargo test --release --workspace`: passed in 204.43 seconds.
 - `prek run --all-files`: passed.
 - Commit `59ef6b42` pushed to `origin/chore/scratchpad-cleanups`.
+
+### `PRO-001` — 2026-08-04
+
+- `cargo test --release -p recursion profile::tests`: 7 profile construction,
+  conformance-vector, preprocessing-registry, DSL-hash, capacity-binding, and
+  wire-size tests passed.
+- `cargo test --release -p recursion protocol::tests::every_manifest_field_changes_the_canonical_encoding`:
+  all 40 independently generated field cases passed.
+- `cargo test --release -p stwo-macros`: 25 integration tests passed; 11
+  documentation tests remained intentionally ignored.
+- `cargo test --release -p recursion`: 596 unit and 5 structural integration
+  tests passed.
+- `cargo test --release --workspace`: passed in 200.72 seconds.
+- `prek run --all-files`: passed.
+- Protocol identifier limbs:
+  `[1652171419, 1590417197, 197779048, 927218326, 675052838, 980679464, 1483989404, 1842475866]`.
+- Commit `b0a3f2ae` pushed to `origin/chore/scratchpad-cleanups`.
 
 ## Project finish line
 

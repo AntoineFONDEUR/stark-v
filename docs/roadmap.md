@@ -136,8 +136,20 @@ set.
   - Evidence: commit `6bfdb9d7`; focused query, root, opening, FRI-width, route,
     and final-value tests, the macro suite, the full recursion suite, structural
     inventories, and repository hooks passed.
-- `[active] AIR-006` Enforce zero handwritten recursion AIRs.
-- `[pending] PRO-001` Freeze the first recursive protocol profile.
+- `[done] AIR-006` Enforce zero handwritten recursion AIRs.
+  - A checked-in structural guard pins all 36 universal components and all 27
+    inner VM components to 32 AIR owner files.
+  - Every owner directly invokes `define_air!` or `define_air_fns!`; the guard
+    rejects handwritten evaluators, standalone component-table declarations,
+    wrapper macros, unexpected item macros, roster drift, and unapproved VM
+    component routing.
+  - Current-state AIR, recursion, and felt-compiler documentation reflects the
+    completed migration while planned syscall and precompile documents remain
+    explicitly future goals.
+  - Evidence: commit `59ef6b42`; the structural guard, complete recursion suite,
+    full release workspace suite, structural searches, and repository hooks
+    passed.
+- `[active] PRO-001` Freeze the first recursive protocol profile.
 - `[pending] REC-001` Adapt a real VM proof to the recursive leaf wire.
 - `[pending] REC-002` Build the universal trace assembler.
 - `[pending] REC-003` Close the segment-leaf branch end to end.
@@ -159,9 +171,7 @@ set.
 The live universal roster contains 36 components. Every recursion-owned
 component now uses `define_air!` or `define_air_fns!`; `poseidon2` and
 `range_check_8_8` use the same accepted DSL in their owning crates. `AIR-006`
-must verify the complete reachable dependency graph and make this invariant
-structurally enforced. No `PRO-*` or `REC-*` task may start until `AIR-006` is
-done.
+pins the complete reachable AIR graph and structurally enforces this invariant.
 
 ### `[done] AIR-001` Shared primitives
 
@@ -265,7 +275,7 @@ Required work:
 Done when all ten components are macro-generated, the manual inventory is zero,
 and the milestone is tested, committed, and pushed.
 
-### `[active] AIR-006` Zero-manual-AIR enforcement
+### `[done] AIR-006` Zero-manual-AIR enforcement
 
 Dependencies: `AIR-005`.
 
@@ -288,7 +298,7 @@ committed, and pushed.
 The design and soundness invariants are in `docs/recursion.md`. Tasks below own
 the implementation order and status.
 
-### `[pending] PRO-001` Freeze the protocol profile
+### `[active] PRO-001` Freeze the protocol profile
 
 Dependencies: `AIR-006`.
 
@@ -676,6 +686,21 @@ commands run, observed test counts or measurements, and the pushed commit.
   zero matches.
 - `prek run --all-files`: passed.
 - Commit `6bfdb9d7` pushed to `origin/chore/scratchpad-cleanups`.
+
+### `AIR-006` — 2026-08-04
+
+- `cargo test --release -p recursion --test air_dsl_guard`: 5 passed, covering
+  both exact rosters, complete owner-policy coverage, direct-DSL structure, and
+  the sole approved VM component route.
+- `sg -p 'impl FrameworkEval for $TYPE { $$$BODY }' -l rust --json=compact crates/recursion/src crates/air/src/schema.rs crates/air/src/poseidon2.rs`:
+  zero matches.
+- `rg -n 'define_component_tables!|define_component_tables' crates/recursion/src crates/air/src/schema.rs crates/air/src/poseidon2.rs`:
+  zero matches.
+- `cargo test --release -p recursion`: 589 unit and 5 structural integration
+  tests passed in 43.27 seconds.
+- `cargo test --release --workspace`: passed in 204.43 seconds.
+- `prek run --all-files`: passed.
+- Commit `59ef6b42` pushed to `origin/chore/scratchpad-cleanups`.
 
 ## Project finish line
 

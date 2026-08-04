@@ -92,8 +92,16 @@ set.
   - Handwritten recursion evaluators decreased from 34 to 30.
   - Evidence: commit `ae5f8cc8`; focused negative tests, the macro suite, the
     recursion library suite, and repository hooks passed.
-- `[active] AIR-002` Migrate trusted recursion control components.
-- `[pending] AIR-003` Migrate recursion transcript components.
+- `[done] AIR-002` Migrate trusted recursion control components.
+  - `control`, `vm_public_logup_control`, and `vm_air_composition_control`
+    derive their preprocessed IDs, evaluators, relation entries, and interaction
+    witnesses from `define_air_fns!`.
+  - Trusted schedule columns remain verifier preprocessing; proof-kind selectors
+    remain verifier-owned constants rather than witness columns.
+  - Handwritten recursion evaluators decreased from 30 to 27.
+  - Evidence: commit `ad656d26`; focused control tests, the macro suite, the
+    recursion library suite, and repository hooks passed.
+- `[active] AIR-003` Migrate recursion transcript components.
 - `[pending] AIR-004` Migrate statement and VM-public-input adapters.
 - `[pending] AIR-005` Migrate recursion PCS and FRI components.
 - `[pending] AIR-006` Enforce zero handwritten recursion AIRs.
@@ -147,7 +155,7 @@ Done when:
 - the structural manual-evaluator inventory decreases from 34 to 30;
 - repository hooks pass and the milestone is committed and pushed.
 
-### `[active] AIR-002` Trusted controls
+### `[done] AIR-002` Trusted controls
 
 Dependencies: `AIR-001`.
 
@@ -165,7 +173,7 @@ Done when all three components are macro-generated, skipped/reordered control
 steps fail focused tests, the manual inventory is 27, and the milestone is
 tested, committed, and pushed.
 
-### `[pending] AIR-003` Transcript family
+### `[active] AIR-003` Transcript family
 
 Dependencies: `AIR-002`.
 
@@ -571,6 +579,22 @@ commands run, observed test counts or measurements, and the pushed commit.
   30 matches.
 - `prek run --all-files`: passed.
 - Commit `ae5f8cc8` pushed to `origin/chore/scratchpad-cleanups`.
+
+### `AIR-002` — 2026-08-04
+
+- `cargo test --release -p recursion control_air::tests`: 26 matching control
+  tests passed.
+- `cargo test --release -p recursion vm_public_logup_control_air::tests`: 5
+  passed.
+- `cargo test --release -p recursion vm_air_composition_control_air::tests`: 7
+  passed.
+- `cargo test --release -p stwo-macros --test air_fns`: 22 passed.
+- `cargo test --release -p recursion --lib`: 585 passed, including missing and
+  reordered control-step rejection.
+- `sg -p 'impl FrameworkEval for $TYPE { $$$BODY }' -l rust --json=compact crates/recursion/src`:
+  27 matches.
+- `prek run --all-files`: passed.
+- Commit `ad656d26` pushed to `origin/chore/scratchpad-cleanups`.
 
 ## Project finish line
 

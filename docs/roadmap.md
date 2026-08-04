@@ -83,8 +83,16 @@ set.
   - Evidence: commit `54d55fc8`; focused recursion and continuation tests, the
     full release workspace suite, and repository hooks passed.
 
-- `[active] AIR-001` Migrate shared recursion primitives to the macro DSL.
-- `[pending] AIR-002` Migrate trusted recursion control components.
+- `[done] AIR-001` Migrate shared recursion primitives to the macro DSL.
+  - `qm31_mul`, `qm31_inv`, `linear_ops`, and `merkle_path` own their tables,
+    constraints, relations, evaluators, and interaction traces through
+    `define_air_fns!`.
+  - The macro supports host-selected relation bundles, row-activity gating,
+    pair-batched LogUp columns, and optional dynamic component evaluation.
+  - Handwritten recursion evaluators decreased from 34 to 30.
+  - Evidence: commit `ae5f8cc8`; focused negative tests, the macro suite, the
+    recursion library suite, and repository hooks passed.
+- `[active] AIR-002` Migrate trusted recursion control components.
 - `[pending] AIR-003` Migrate recursion transcript components.
 - `[pending] AIR-004` Migrate statement and VM-public-input adapters.
 - `[pending] AIR-005` Migrate recursion PCS and FRI components.
@@ -113,7 +121,7 @@ The live universal roster contains 36 components. `poseidon2` already uses
 34 source evaluators are migration debt. No `PRO-*` or `REC-*` task may start
 until `AIR-006` is done.
 
-### `[active] AIR-001` Shared primitives
+### `[done] AIR-001` Shared primitives
 
 Dependencies: `BASE-001`.
 
@@ -139,7 +147,7 @@ Done when:
 - the structural manual-evaluator inventory decreases from 34 to 30;
 - repository hooks pass and the milestone is committed and pushed.
 
-### `[pending] AIR-002` Trusted controls
+### `[active] AIR-002` Trusted controls
 
 Dependencies: `AIR-001`.
 
@@ -549,6 +557,20 @@ commands run, observed test counts or measurements, and the pushed commit.
 - `cargo test --release --workspace`: passed in 102.78 seconds.
 - `prek run --all-files`: passed.
 - Commit `54d55fc8` pushed to `origin/chore/scratchpad-cleanups`.
+
+### `AIR-001` — 2026-08-04
+
+- `cargo test --release -p recursion qm31_inv`: 3 passed.
+- `cargo test --release -p recursion test_linear_ops_constraints_reject_wrong_addition_result`:
+  1 passed.
+- `cargo test --release -p recursion test_merkle_path_constraints_reject_child_from_wrong_branch`:
+  1 passed.
+- `cargo test --release -p stwo-macros --test air_fns`: 21 passed.
+- `cargo test --release -p recursion --lib`: 585 passed.
+- `sg -p 'impl FrameworkEval for $TYPE { $$$BODY }' -l rust --json=compact crates/recursion/src`:
+  30 matches.
+- `prek run --all-files`: passed.
+- Commit `ae5f8cc8` pushed to `origin/chore/scratchpad-cleanups`.
 
 ## Project finish line
 

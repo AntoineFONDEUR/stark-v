@@ -16,15 +16,11 @@ use stwo::core::fields::qm31::QM31;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::simd::column::BaseColumn;
-use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
-use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, RelationEntry,
-};
 
-use super::control_air::{ControlRelations, SEGMENT_VERIFIER_ID};
+use super::control_air::ControlRelations;
 use super::kernel::{VerifierControlPlan, VerifierSchema, VerifierStep};
 use super::vm_air_composition_circuit::VmAirCompositionProfile;
 use super::wire::ProofKind;
@@ -40,16 +36,6 @@ const ARG_1_COLUMN: usize = 4;
 const ARG_2_COLUMN: usize = 5;
 const ARG_3_COLUMN: usize = 6;
 const PREPROCESSED_COLUMN_COUNT: usize = 7;
-
-const PREPROCESSED_COLUMN_IDS: [&str; PREPROCESSED_COLUMN_COUNT] = [
-    "recursion_vm_air_composition_control_row_mask",
-    "recursion_vm_air_composition_control_sequence",
-    "recursion_vm_air_composition_control_tag",
-    "recursion_vm_air_composition_control_arg_0",
-    "recursion_vm_air_composition_control_arg_1",
-    "recursion_vm_air_composition_control_arg_2",
-    "recursion_vm_air_composition_control_arg_3",
-];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PreprocessedRow {
@@ -116,10 +102,7 @@ impl VmAirCompositionControlPreprocessed {
     }
 
     pub fn column_ids() -> Vec<PreProcessedColumnId> {
-        PREPROCESSED_COLUMN_IDS
-            .iter()
-            .map(|id| PreProcessedColumnId { id: (*id).into() })
-            .collect()
+        preprocessed_column_ids()
     }
 
     pub fn gen_columns(
@@ -249,49 +232,59 @@ fn encoded_row(
     })
 }
 
-pub type Component = FrameworkComponent<Eval>;
+stwo_macros::define_air_fns! {
+    max_degree: 3,
+    embedded: [],
+    embedded_component: true,
+    embedded_relations: crate::control_air::ControlRelations,
+    embedded_preprocessed: {
+        row_mask: "recursion_vm_air_composition_control_row_mask",
+        sequence: "recursion_vm_air_composition_control_sequence",
+        tag: "recursion_vm_air_composition_control_tag",
+        arg_0: "recursion_vm_air_composition_control_arg_0",
+        arg_1: "recursion_vm_air_composition_control_arg_1",
+        arg_2: "recursion_vm_air_composition_control_arg_2",
+        arg_3: "recursion_vm_air_composition_control_arg_3",
+    },
+    embedded_params: [segment_active],
 
-#[derive(Clone)]
-pub struct Eval {
-    pub log_size: u32,
-    pub proof_kind: ProofKind,
-    pub control_relations: ControlRelations,
+    relation step(7);
+
+    fn vm_air_composition_control(
+        row_mask,
+        sequence,
+        tag,
+        arg_0,
+        arg_1,
+        arg_2,
+        arg_3,
+        segment_active,
+    ) {
+        consume(row_mask * segment_active) step(
+            constant(crate::control_air::SEGMENT_VERIFIER_ID),
+            sequence,
+            tag,
+            arg_0,
+            arg_1,
+            arg_2,
+            arg_3,
+        );
+        return sequence;
+    }
 }
 
-impl FrameworkEval for Eval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
+pub use component::air::{Component, Eval};
 
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
-
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let ids = VmAirCompositionControlPreprocessed::column_ids();
-        let row_mask = eval.get_preprocessed_column(ids[ROW_MASK_COLUMN].clone());
-        let sequence = eval.get_preprocessed_column(ids[SEQUENCE_COLUMN].clone());
-        let tag = eval.get_preprocessed_column(ids[TAG_COLUMN].clone());
-        let arg_0 = eval.get_preprocessed_column(ids[ARG_0_COLUMN].clone());
-        let arg_1 = eval.get_preprocessed_column(ids[ARG_1_COLUMN].clone());
-        let arg_2 = eval.get_preprocessed_column(ids[ARG_2_COLUMN].clone());
-        let arg_3 = eval.get_preprocessed_column(ids[ARG_3_COLUMN].clone());
-        let segment = BaseField::from(u32::from(self.proof_kind == ProofKind::SegmentLeaf));
-        eval.add_to_relation(RelationEntry::new(
-            &self.control_relations.step,
-            -E::EF::from(row_mask * segment),
-            &[
-                E::F::from(BaseField::from(SEGMENT_VERIFIER_ID)),
-                sequence,
-                tag,
-                arg_0,
-                arg_1,
-                arg_2,
-                arg_3,
-            ],
-        ));
-        eval.finalize_logup();
-        eval
+/// Construct the generated consumer with the verifier-owned segment selector.
+pub fn eval_for_proof_kind(
+    log_size: u32,
+    proof_kind: ProofKind,
+    control_relations: ControlRelations,
+) -> Eval {
+    Eval {
+        log_size,
+        segment_active: BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        relations: control_relations,
     }
 }
 
@@ -304,35 +297,11 @@ pub fn gen_interaction_trace(
     ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
     QM31,
 ) {
-    let columns = preprocessed
-        .iter()
-        .map(|column| &column.values.data)
-        .collect::<Vec<_>>();
-    let segment = BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf));
-    let numerator = (0..columns[ROW_MASK_COLUMN].len())
-        .map(|row| -PackedQM31::from(columns[ROW_MASK_COLUMN][row] * segment))
-        .collect::<Vec<_>>();
-    let verifier_id = vec![
-        stwo::prover::backend::simd::m31::PackedM31::broadcast(BaseField::from(
-            SEGMENT_VERIFIER_ID,
-        ));
-        columns[ROW_MASK_COLUMN].len()
-    ];
-    let denominator = combine!(
-        control_relations.step,
-        [
-            verifier_id,
-            columns[SEQUENCE_COLUMN],
-            columns[TAG_COLUMN],
-            columns[ARG_0_COLUMN],
-            columns[ARG_1_COLUMN],
-            columns[ARG_2_COLUMN],
-            columns[ARG_3_COLUMN]
-        ]
-    );
-    let mut logup_gen = LogupTraceGenerator::new(preprocessed[0].domain.log_size());
-    write_col!(&numerator, &denominator, logup_gen);
-    logup_gen.finalize_last()
+    component::witness::gen_interaction_trace(
+        preprocessed,
+        BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        control_relations,
+    )
 }
 
 /// Invalid VM AIR-composition control slice.
@@ -370,9 +339,10 @@ mod tests {
     use stwo::core::fields::FieldExpOps;
     use stwo::core::fields::m31::M31;
     use stwo::core::pcs::TreeVec;
-    use stwo_constraint_framework::{Relation, assert_constraints_on_polys};
+    use stwo_constraint_framework::{FrameworkEval, Relation, assert_constraints_on_polys};
 
     use super::*;
+    use crate::control_air::SEGMENT_VERIFIER_ID;
     use crate::kernel::VerifierProgramSpec;
     use crate::protocol::{FixedProofShape, OptionalM31Word, PcsParameters};
     use crate::vm_air_composition_circuit::build_vm_air_composition_reference;
@@ -446,11 +416,7 @@ mod tests {
             gen_interaction_trace(&preprocessed, kind, &control_relations);
         let traces = TreeVec::new(vec![preprocessed, vec![], interaction]);
         let trace_polys = traces.map_cols(|column| column.interpolate());
-        let eval = Eval {
-            log_size: preprocessing.log_size(),
-            proof_kind: kind,
-            control_relations,
-        };
+        let eval = eval_for_proof_kind(preprocessing.log_size(), kind, control_relations);
         assert_constraints_on_polys(
             &trace_polys,
             CanonicCoset::new(preprocessing.log_size()),

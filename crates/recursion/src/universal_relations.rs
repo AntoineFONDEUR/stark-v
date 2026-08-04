@@ -383,11 +383,11 @@ mod tests {
         let mut usage = HashMap::new();
         usage_of(
             &mut usage,
-            super::super::control_air::Eval {
-                log_size: LOG_SIZE,
-                proof_kind: KIND,
-                relations: relations.control.clone(),
-            },
+            super::super::control_air::eval_for_proof_kind(
+                LOG_SIZE,
+                KIND,
+                relations.control.clone(),
+            ),
         );
         usage_of(
             &mut usage,
@@ -540,11 +540,11 @@ mod tests {
         );
         usage_of(
             &mut usage,
-            super::super::vm_public_logup_control_air::Eval {
-                log_size: LOG_SIZE,
-                proof_kind: KIND,
-                control_relations: relations.control.clone(),
-            },
+            super::super::vm_public_logup_control_air::eval_for_proof_kind(
+                LOG_SIZE,
+                KIND,
+                relations.control.clone(),
+            ),
         );
         usage_of(
             &mut usage,
@@ -559,11 +559,11 @@ mod tests {
         );
         usage_of(
             &mut usage,
-            super::super::vm_air_composition_control_air::Eval {
-                log_size: LOG_SIZE,
-                proof_kind: KIND,
-                control_relations: relations.control.clone(),
-            },
+            super::super::vm_air_composition_control_air::eval_for_proof_kind(
+                LOG_SIZE,
+                KIND,
+                relations.control.clone(),
+            ),
         );
         usage_of(
             &mut usage,

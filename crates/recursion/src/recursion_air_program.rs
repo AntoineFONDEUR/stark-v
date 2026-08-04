@@ -733,11 +733,7 @@ impl RosterCollector {
         };
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[0], claimed_sum(), {
             let log_size = log_size();
-            super::control_air::Eval {
-                log_size,
-                proof_kind: kind,
-                relations: relations.control.clone(),
-            }
+            super::control_air::eval_for_proof_kind(log_size, kind, relations.control.clone())
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[1], claimed_sum(), {
             let log_size = log_size();
@@ -890,11 +886,11 @@ impl RosterCollector {
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[17], claimed_sum(), {
             let log_size = log_size();
-            super::vm_public_logup_control_air::Eval {
+            super::vm_public_logup_control_air::eval_for_proof_kind(
                 log_size,
-                proof_kind: kind,
-                control_relations: relations.control.clone(),
-            }
+                kind,
+                relations.control.clone(),
+            )
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[18], claimed_sum(), {
             let log_size = log_size();
@@ -909,11 +905,11 @@ impl RosterCollector {
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[19], claimed_sum(), {
             let log_size = log_size();
-            super::vm_air_composition_control_air::Eval {
+            super::vm_air_composition_control_air::eval_for_proof_kind(
                 log_size,
-                proof_kind: kind,
-                control_relations: relations.control.clone(),
-            }
+                kind,
+                relations.control.clone(),
+            )
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[20], claimed_sum(), {
             let log_size = log_size();

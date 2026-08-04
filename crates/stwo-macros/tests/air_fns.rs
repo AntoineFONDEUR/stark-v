@@ -332,6 +332,43 @@ mod embedded_relation_bundle {
     }
 }
 
+mod preprocessed_schedule {
+    stwo_constraint_framework::relation!(PassRelation, 1);
+
+    /// Relation instances used by the generated schedule component.
+    #[derive(Clone)]
+    pub struct Relations {
+        pub pass: PassRelation,
+    }
+
+    impl Relations {
+        pub fn dummy() -> Self {
+            Self {
+                pass: PassRelation::dummy(),
+            }
+        }
+    }
+
+    stwo_macros::define_air_fns! {
+        max_degree: 3,
+        embedded: [],
+        embedded_component: true,
+        embedded_relations: crate::preprocessed_schedule::Relations,
+        embedded_preprocessed: {
+            row_mask: "test_schedule_row_mask",
+            value: "test_schedule_value",
+        },
+        embedded_params: [active],
+
+        relation pass(1);
+
+        fn schedule(row_mask, value, active) {
+            emit(row_mask * active) pass(value);
+            return value;
+        }
+    }
+}
+
 #[test]
 fn test_embedded_component_uses_custom_relation_bundle() {
     use embedded_relation_bundle::component::air::Eval;
@@ -359,6 +396,52 @@ fn test_embedded_component_batches_relation_pairs() {
 
     // One QM31 interaction column is represented by four base-field columns.
     assert_eq!(interaction.len(), 4);
+}
+
+#[test]
+fn test_preprocessed_component_shares_air_and_interaction_frame() {
+    use simd::AlignedVec;
+    use stwo::core::pcs::TreeVec;
+    use stwo::core::poly::circle::CanonicCoset;
+    use stwo::prover::backend::simd::SimdBackend;
+    use stwo::prover::backend::simd::column::BaseColumn;
+    use stwo::prover::poly::BitReversedOrder;
+    use stwo::prover::poly::circle::CircleEvaluation;
+    use stwo_constraint_framework::{FrameworkEval, assert_constraints_on_polys};
+
+    let log_size = 4;
+    let domain = CanonicCoset::new(log_size).circle_domain();
+    let make_column = |value| {
+        let mut data = AlignedVec::with_capacity(1 << log_size);
+        data.resize(1 << log_size, value);
+        CircleEvaluation::<SimdBackend, BaseField, BitReversedOrder>::new(
+            domain,
+            BaseColumn::from(data),
+        )
+    };
+    let preprocessed = vec![make_column(1), make_column(7)];
+    let relations = preprocessed_schedule::Relations::dummy();
+    let (interaction, claimed_sum) =
+        preprocessed_schedule::component::witness::gen_interaction_trace(
+            &preprocessed,
+            felt(1),
+            &relations,
+        );
+    let traces = TreeVec::new(vec![preprocessed, vec![], interaction]);
+    let trace_polys = traces.map_cols(|column| column.interpolate());
+    let eval = preprocessed_schedule::component::air::Eval {
+        log_size,
+        active: felt(1),
+        relations,
+    };
+    assert_constraints_on_polys(
+        &trace_polys,
+        CanonicCoset::new(log_size),
+        |row| {
+            eval.evaluate(row);
+        },
+        claimed_sum,
+    );
 }
 
 #[test]

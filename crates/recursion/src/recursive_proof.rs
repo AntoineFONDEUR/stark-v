@@ -625,6 +625,7 @@ mod tests {
         left: Box<RootProofWire>,
         right: Box<RootProofWire>,
         parent_statement: SpanStatement,
+        pair_rejections: BinaryPairRejections,
     }
 
     fn binary_child_fixture() -> &'static BinaryChildFixture {
@@ -646,11 +647,14 @@ mod tests {
                 &right_statement,
                 "right-child.bin",
             );
+            let pair_rejections =
+                evaluate_binary_pair_rejections(&profile, &preprocessing, &left, &right);
             BinaryChildFixture {
                 profile,
                 left,
                 right,
                 parent_statement,
+                pair_rejections,
             }
         })
     }
@@ -662,6 +666,35 @@ mod tests {
         Opening,
         ClaimedSum,
         FriValue,
+    }
+
+    #[derive(Clone, Copy)]
+    enum BinaryPairAttack {
+        Swapped,
+        Duplicated,
+        Gapped,
+        Overlapping,
+        Mismatched,
+    }
+
+    struct BinaryPairRejections {
+        swapped: bool,
+        duplicated: bool,
+        gapped: bool,
+        overlapping: bool,
+        mismatched: bool,
+    }
+
+    impl BinaryPairRejections {
+        const fn rejected(&self, attack: BinaryPairAttack) -> bool {
+            match attack {
+                BinaryPairAttack::Swapped => self.swapped,
+                BinaryPairAttack::Duplicated => self.duplicated,
+                BinaryPairAttack::Gapped => self.gapped,
+                BinaryPairAttack::Overlapping => self.overlapping,
+                BinaryPairAttack::Mismatched => self.mismatched,
+            }
+        }
     }
 
     fn mutated_left_child(
@@ -710,6 +743,54 @@ mod tests {
             )
             .expect("mutation preserves the fixed wire shape"),
         )
+    }
+
+    fn child_with_statement(child: &RootProofWire, statement: SpanStatement) -> Box<RootProofWire> {
+        Box::new(
+            RootProofWire::new(
+                child.version(),
+                child.kind(),
+                statement,
+                child.stark().clone(),
+            )
+            .expect("statement substitution preserves the fixed wire shape"),
+        )
+    }
+
+    fn evaluate_binary_pair_rejections(
+        profile: &FrozenProtocolProfile,
+        preprocessing: &RecursionPreprocessing,
+        left: &RootProofWire,
+        right: &RootProofWire,
+    ) -> BinaryPairRejections {
+        // Pair rejection shares the fixture's trusted preprocessing so these
+        // structural cases do not rebuild the full verifier circuit profile.
+        let gap_left_statement = SpanStatement::empty_leaf(*left.statement().job(), 5)
+            .expect("slot five is valid suffix padding");
+        let gap_left = child_with_statement(left, gap_left_statement);
+        let overlap_right = child_with_statement(right, *left.statement());
+        let mismatched_right = child_with_statement(right, empty_statement(profile, 20));
+
+        let rejects_fold = |result: Result<RecursionProof, RecursionProofError>| {
+            matches!(result, Err(RecursionProofError::StatementFold(_)))
+        };
+        BinaryPairRejections {
+            swapped: rejects_fold(prove_binary_node(profile, preprocessing, right, left)),
+            duplicated: rejects_fold(prove_binary_node(profile, preprocessing, left, left)),
+            gapped: rejects_fold(prove_binary_node(profile, preprocessing, &gap_left, right)),
+            overlapping: rejects_fold(prove_binary_node(
+                profile,
+                preprocessing,
+                left,
+                &overlap_right,
+            )),
+            mismatched: rejects_fold(prove_binary_node(
+                profile,
+                preprocessing,
+                left,
+                &mismatched_right,
+            )),
+        }
     }
 
     fn proved_child_wire(
@@ -1051,5 +1132,15 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[rstest]
+    #[case::swapped(BinaryPairAttack::Swapped)]
+    #[case::duplicated(BinaryPairAttack::Duplicated)]
+    #[case::gapped(BinaryPairAttack::Gapped)]
+    #[case::overlapping(BinaryPairAttack::Overlapping)]
+    #[case::mismatched(BinaryPairAttack::Mismatched)]
+    fn binary_node_rejects_an_invalid_child_pair(#[case] attack: BinaryPairAttack) {
+        assert!(binary_child_fixture().pair_rejections.rejected(attack));
     }
 }

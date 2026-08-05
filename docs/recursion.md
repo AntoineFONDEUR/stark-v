@@ -71,7 +71,8 @@ The implemented foundation includes:
 Segment, empty, and binary witnesses produce recursion proofs that bind the
 expected protocol, statement, component claims, interaction claims, and STWO
 proof. A real recursion proof can be encoded and verified as either binary
-child. Adversarial binary-fold coverage, tree construction, and the public root
+child. Swapped, duplicated, gapped, overlapping, and job-mismatched child pairs
+are rejected at the unique fold boundary. Tree construction and the public root
 API remain unfinished.
 
 The live universal roster has 36 components. Every recursion-local component is

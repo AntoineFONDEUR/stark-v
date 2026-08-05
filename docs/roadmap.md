@@ -186,8 +186,18 @@ set.
     direct component checks, focused malformed-FRI tests, the ordinary prover
     integration, the full recursion and workspace release suites, clippy, DSL
     guards, and repository hooks passed.
-- `[active] REC-003` Close the segment-leaf branch end to end.
-- `[pending] REC-004` Close the canonical empty-leaf branch.
+- `[done] REC-003` Close the segment-leaf branch end to end.
+  - Real VM proofs now replay through every verifier circuit, reject nonzero
+    circuit outputs, and require exact global relation closure.
+  - Verifier-owned terminal control terms, active-lane wire multiplicities, and
+    both PCS and FRI query-bit consumers close the complete relation roster.
+  - Thirteen independent mutations cover the statement, public claim, every
+    proof region, and both proof-of-work values; removing terminal control terms
+    also makes an otherwise valid witness fail closure.
+  - Evidence: commit `058023c6`; focused circuit-closure and mutation tests, the
+    630-test recursion suite, all 5 DSL guards, the full release workspace
+    suite, release clippy for the recursion crate, and repository hooks passed.
+- `[active] REC-004` Close the canonical empty-leaf branch.
 - `[pending] REC-005` Implement the outer recursion prover and verifier.
 - `[pending] REC-006` Verify a real recursion proof as a child.
 - `[pending] REC-007` Prove the two-child binary branch.
@@ -386,7 +396,7 @@ Done when assembling the same verifier input twice produces identical traces,
 claims, log sizes, and preprocessing identifiers and every component accepts the
 assembled witness.
 
-### `[active] REC-003` Segment-leaf closure
+### `[done] REC-003` Segment-leaf closure
 
 Dependencies: `REC-002`.
 
@@ -402,7 +412,7 @@ Required work:
 Done when a valid VM proof satisfies the entire universal AIR and an independent
 mutation in every proof region or omitted control phase fails.
 
-### `[pending] REC-004` Canonical empty leaf
+### `[active] REC-004` Canonical empty leaf
 
 Dependencies: `REC-003`.
 

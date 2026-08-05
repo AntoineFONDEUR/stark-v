@@ -109,10 +109,11 @@ outputs and collapse into multiplicity — no call-site nonce needed.
 The codebase already runs on this pattern without naming it: the opcode tables
 are "functions" consuming `program_access` and `memory_access` tuples;
 `poseidon2_io(in16, out16)` is precisely an activation tuple; the recursion
-circuit's `op_def`/`wire` relations are call frames for QM31 arithmetic. The
-language makes the pattern first-class: `let c = cube(a)` in source compiles to
-a column `c`, an emission into `cube`'s relation, and a row in `cube`'s table —
-wiring, table layout, and witness fill all from one line.
+circuit's `wire` relation connects QM31 values across verifier-scheduled
+arithmetic rows. The language makes the pattern first-class: `let c = cube(a)`
+in source compiles to a column `c`, an emission into `cube`'s relation, and a
+row in `cube`'s table — wiring, table layout, and witness fill all from one
+line.
 
 ## Relation to the current DSL
 

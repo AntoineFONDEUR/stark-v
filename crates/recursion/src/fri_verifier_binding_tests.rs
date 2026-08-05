@@ -371,12 +371,27 @@ fn fri_route_bridge_closes_between_control_and_input_airs() {
         segment_witness.circuit,
     )
     .expect("valid segment FRI circuit lowers");
-    let (_, mul_sum) =
-        qm31_mul::gen_interaction_trace(&traces.qm31_mul.into_witness(), &circuit_relations);
-    let (_, inverse_sum) =
-        qm31_inv::gen_interaction_trace(&traces.qm31_inv.into_witness(), &circuit_relations);
-    let (_, linear_sum) =
-        linear_ops::gen_interaction_trace(&traces.linear_ops.into_witness(), &circuit_relations);
+    let traces = traces
+        .into_air_traces()
+        .expect("lowered FRI verifier schedules fit their traces");
+    let (_, mul_sum) = qm31_mul::gen_interaction_trace(
+        &traces.qm31_mul,
+        &traces.qm31_mul_preprocessed,
+        ProofKind::SegmentLeaf,
+        &circuit_relations,
+    );
+    let (_, inverse_sum) = qm31_inv::gen_interaction_trace(
+        &traces.qm31_inv,
+        &traces.qm31_inv_preprocessed,
+        ProofKind::SegmentLeaf,
+        &circuit_relations,
+    );
+    let (_, linear_sum) = linear_ops::gen_interaction_trace(
+        &traces.linear_ops,
+        &traces.linear_ops_preprocessed,
+        ProofKind::SegmentLeaf,
+        &circuit_relations,
+    );
     let public_sum = public_fri_verifier_terms(
         segment_reference.circuit_id,
         segment_reference.circuit,

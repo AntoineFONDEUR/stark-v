@@ -1,9 +1,9 @@
 //! Lowering and public anchors for fixed FRI verifier circuits.
 //!
 //! Shared arithmetic tables own every operation reachable from the designated
-//! zero constraints. The input AIR supplies tracked nodes, while verifier
-//! terms fix constants, operation identities, and every zero output. A witness
-//! can therefore change values but cannot replace the native FRI fold graph.
+//! zero constraints and preprocessing fixes their graph. The input AIR
+//! supplies tracked nodes, while verifier anchors fix constants and every zero
+//! output.
 
 use core::fmt;
 
@@ -18,7 +18,7 @@ use super::fri_verifier_circuit::FriVerifierCircuit;
 use crate::circuit::CircuitTraces;
 use crate::circuit::{limbs, lower_arena_operations, use_counts_for_outputs};
 use crate::recorder::Op;
-use crate::relations::{RecursionRelations, op_kind};
+use crate::relations::RecursionRelations;
 
 /// Lowers one structurally checked FRI circuit into shared arithmetic traces.
 pub fn lower_fri_verifier_circuit(
@@ -37,7 +37,7 @@ pub fn lower_fri_verifier_circuit(
     Ok(())
 }
 
-/// Verifier contribution for constants, operation structure, and zero outputs.
+/// Verifier contribution for constants and zero outputs.
 pub fn public_fri_verifier_terms(
     circuit_id: u32,
     reference: &FriVerifierCircuit,
@@ -60,17 +60,7 @@ pub fn public_fri_verifier_terms(
                         * SecureField::from(M31::from(uses[node_index]));
                 }
             }
-            operation => {
-                let (kind, lhs, rhs) = operation_tuple(operation)?;
-                let denominator: SecureField = relations.op_def.combine(&[
-                    M31::from(circuit_id),
-                    M31::from(node_id),
-                    M31::from(kind),
-                    M31::from(lhs),
-                    M31::from(rhs),
-                ]);
-                total += denominator.inverse();
-            }
+            Op::Add(_, _) | Op::Sub(_, _) | Op::Mul(_, _) | Op::Neg(_) | Op::Inverse(_) => {}
         }
     }
     for output in reference.circuit().outputs() {
@@ -130,18 +120,6 @@ fn checked_node_id(node_id: usize) -> Result<u32, FriVerifierLoweringError> {
     u32::try_from(node_id).map_err(|_| FriVerifierLoweringError::NodeIdOutOfRange { node_id })
 }
 
-fn operation_tuple(operation: Op) -> Result<(u32, u32, u32), FriVerifierLoweringError> {
-    let convert = |node_id| checked_node_id(node_id);
-    match operation {
-        Op::Add(lhs, rhs) => Ok((op_kind::ADD, convert(lhs)?, convert(rhs)?)),
-        Op::Sub(lhs, rhs) => Ok((op_kind::SUB, convert(lhs)?, convert(rhs)?)),
-        Op::Mul(lhs, rhs) => Ok((op_kind::MUL, convert(lhs)?, convert(rhs)?)),
-        Op::Neg(lhs) => Ok((op_kind::NEG, convert(lhs)?, 0)),
-        Op::Inverse(lhs) => Ok((op_kind::INVERSE, convert(lhs)?, 0)),
-        Op::Input | Op::Const => Err(FriVerifierLoweringError::NonArithmeticOperation),
-    }
-}
-
 fn wire_term(
     circuit_id: u32,
     node_id: u32,
@@ -170,7 +148,6 @@ pub enum FriVerifierLoweringError {
     NodeCountMismatch { expected: usize, actual: usize },
     NodeStructureMismatch { node_id: usize },
     NodeIdOutOfRange { node_id: usize },
-    NonArithmeticOperation,
     NonzeroConstraintOutput,
     ReferenceOutputIsNonzero,
 }
@@ -457,12 +434,25 @@ mod tests {
             &witnesses.segment,
         )
         .expect("valid segment FRI circuit lowers");
-        let (_, mul_sum) =
-            qm31_mul::gen_interaction_trace(&traces.qm31_mul.into_witness(), &circuit_relations);
-        let (_, inverse_sum) =
-            qm31_inv::gen_interaction_trace(&traces.qm31_inv.into_witness(), &circuit_relations);
+        let traces = traces
+            .into_air_traces()
+            .expect("lowered FRI verifier schedules fit their traces");
+        let (_, mul_sum) = qm31_mul::gen_interaction_trace(
+            &traces.qm31_mul,
+            &traces.qm31_mul_preprocessed,
+            ProofKind::SegmentLeaf,
+            &circuit_relations,
+        );
+        let (_, inverse_sum) = qm31_inv::gen_interaction_trace(
+            &traces.qm31_inv,
+            &traces.qm31_inv_preprocessed,
+            ProofKind::SegmentLeaf,
+            &circuit_relations,
+        );
         let (_, linear_sum) = linear_ops::gen_interaction_trace(
-            &traces.linear_ops.into_witness(),
+            &traces.linear_ops,
+            &traces.linear_ops_preprocessed,
+            ProofKind::SegmentLeaf,
             &circuit_relations,
         );
         let public_sum =

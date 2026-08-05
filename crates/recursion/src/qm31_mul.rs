@@ -3,12 +3,76 @@
 //! One `define_air_fns!` frame owns the table layout, extension-field limb
 //! constraints, circuit-wire relations, concrete row fill, AIR evaluator, and
 //! interaction trace. Standalone arithmetic rows leave `in_circuit` clear;
-//! circuit-lowering rows bind their operands and result through `op_def` and
-//! `wire`.
+//! circuit-lowering rows bind their operands and result through a fixed
+//! preprocessing schedule and `wire`.
 
+use simd::AlignedVec;
+use stwo::core::ColumnVec;
+use stwo::core::fields::m31::BaseField;
 use stwo::core::fields::qm31::QM31;
+use stwo::core::poly::circle::CanonicCoset;
+use stwo::prover::backend::simd::SimdBackend;
+use stwo::prover::backend::simd::column::BaseColumn;
+use stwo::prover::poly::BitReversedOrder;
+use stwo::prover::poly::circle::CircleEvaluation;
 
+use crate::circuit::Qm31MulScheduleRow;
 use crate::relations::{RecursionRelations, SharedPrimitiveRelations};
+use crate::wire::ProofKind;
+
+/// Fixed multiplication graph committed by the universal preprocessing tree.
+pub struct Qm31MulPreprocessed {
+    log_size: u32,
+    rows: [Vec<Qm31MulScheduleRow>; 3],
+}
+
+impl Qm31MulPreprocessed {
+    pub fn new(log_size: u32, rows: Vec<Qm31MulScheduleRow>) -> Result<Self, &'static str> {
+        Self::new_for_modes(log_size, [rows.clone(), rows.clone(), rows])
+    }
+
+    pub fn new_for_modes(
+        log_size: u32,
+        rows: [Vec<Qm31MulScheduleRow>; 3],
+    ) -> Result<Self, &'static str> {
+        if rows
+            .iter()
+            .any(|mode_rows| mode_rows.len() > (1_usize << log_size))
+        {
+            return Err("multiplication schedule exceeds its component capacity");
+        }
+        Ok(Self { log_size, rows })
+    }
+
+    pub fn gen_columns(
+        &self,
+    ) -> ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>> {
+        let size = 1_usize << self.log_size;
+        let mut columns = (0..18)
+            .map(|_| {
+                let mut column = AlignedVec::with_capacity(size);
+                column.resize(size, 0);
+                column
+            })
+            .collect::<Vec<_>>();
+        for (mode, rows) in self.rows.iter().enumerate() {
+            let offset = mode * 6;
+            for (index, row) in rows.iter().copied().enumerate() {
+                columns[offset][index] = 1;
+                columns[offset + 1][index] = row.circuit_id;
+                columns[offset + 2][index] = row.node_id;
+                columns[offset + 3][index] = row.lhs_id;
+                columns[offset + 4][index] = row.rhs_id;
+                columns[offset + 5][index] = row.uses;
+            }
+        }
+        let domain = CanonicCoset::new(self.log_size).circle_domain();
+        columns
+            .into_iter()
+            .map(|column| CircleEvaluation::new(domain, BaseColumn::from(column)))
+            .collect()
+    }
+}
 
 stwo_macros::define_air_fns! {
     max_degree: 3,
@@ -17,8 +81,28 @@ stwo_macros::define_air_fns! {
     embedded_relations: crate::relations::SharedPrimitiveRelations,
     logup_batch: 2,
     embedded_dynamic_component: true,
+    embedded_preprocessed: {
+        segment_mask: "recursion_qm31_mul_segment_mask",
+        segment_circuit_id: "recursion_qm31_mul_segment_circuit_id",
+        segment_node_id: "recursion_qm31_mul_segment_node_id",
+        segment_lhs_id: "recursion_qm31_mul_segment_lhs_id",
+        segment_rhs_id: "recursion_qm31_mul_segment_rhs_id",
+        segment_uses: "recursion_qm31_mul_segment_uses",
+        binary_mask: "recursion_qm31_mul_binary_mask",
+        binary_circuit_id: "recursion_qm31_mul_binary_circuit_id",
+        binary_node_id: "recursion_qm31_mul_binary_node_id",
+        binary_lhs_id: "recursion_qm31_mul_binary_lhs_id",
+        binary_rhs_id: "recursion_qm31_mul_binary_rhs_id",
+        binary_uses: "recursion_qm31_mul_binary_uses",
+        empty_mask: "recursion_qm31_mul_empty_mask",
+        empty_circuit_id: "recursion_qm31_mul_empty_circuit_id",
+        empty_node_id: "recursion_qm31_mul_empty_node_id",
+        empty_lhs_id: "recursion_qm31_mul_empty_lhs_id",
+        empty_rhs_id: "recursion_qm31_mul_empty_rhs_id",
+        empty_uses: "recursion_qm31_mul_empty_uses",
+    },
+    embedded_params: [segment_active, binary_active, empty_active],
 
-    relation op_def(5);
     relation wire(6);
 
     fn qm31_mul(
@@ -26,9 +110,35 @@ stwo_macros::define_air_fns! {
         b_0, b_1, b_2, b_3,
         c_0, c_1, c_2, c_3,
         circuit_id, node_id, lhs_id, rhs_id, uses, in_circuit,
+        segment_mask, segment_circuit_id, segment_node_id,
+        segment_lhs_id, segment_rhs_id, segment_uses,
+        binary_mask, binary_circuit_id, binary_node_id,
+        binary_lhs_id, binary_rhs_id, binary_uses,
+        empty_mask, empty_circuit_id, empty_node_id,
+        empty_lhs_id, empty_rhs_id, empty_uses,
+        segment_active, binary_active, empty_active,
     ) {
+        let schedule_mask = segment_active * segment_mask
+            + binary_active * binary_mask + empty_active * empty_mask;
+        let schedule_circuit_id = segment_active * segment_circuit_id
+            + binary_active * binary_circuit_id + empty_active * empty_circuit_id;
+        let schedule_node_id = segment_active * segment_node_id
+            + binary_active * binary_node_id + empty_active * empty_node_id;
+        let schedule_lhs_id = segment_active * segment_lhs_id
+            + binary_active * binary_lhs_id + empty_active * empty_lhs_id;
+        let schedule_rhs_id = segment_active * segment_rhs_id
+            + binary_active * binary_rhs_id + empty_active * empty_rhs_id;
+        let schedule_uses = segment_active * segment_uses
+            + binary_active * binary_uses + empty_active * empty_uses;
+
         constrain in_circuit * (1 - in_circuit);
         constrain in_circuit * (1 - enabler);
+        constrain in_circuit - schedule_mask;
+        constrain in_circuit * (circuit_id - schedule_circuit_id);
+        constrain in_circuit * (node_id - schedule_node_id);
+        constrain in_circuit * (lhs_id - schedule_lhs_id);
+        constrain in_circuit * (rhs_id - schedule_rhs_id);
+        constrain in_circuit * (uses - schedule_uses);
 
         constrain a_0 * b_0 - a_1 * b_1
             + 2 * (a_2 * b_2 - a_3 * b_3) - (a_2 * b_3 + a_3 * b_2)
@@ -39,13 +149,6 @@ stwo_macros::define_air_fns! {
         constrain a_0 * b_2 - a_1 * b_3 + a_2 * b_0 - a_3 * b_1 - c_2;
         constrain a_0 * b_3 + a_1 * b_2 + a_2 * b_1 + a_3 * b_0 - c_3;
 
-        consume(in_circuit) op_def(
-            circuit_id,
-            node_id,
-            constant(crate::relations::op_kind::MUL),
-            lhs_id,
-            rhs_id,
-        );
         consume(in_circuit) wire(circuit_id, lhs_id, a_0, a_1, a_2, a_3);
         consume(in_circuit) wire(circuit_id, rhs_id, b_0, b_1, b_2, b_3);
         emit(uses * in_circuit) wire(circuit_id, node_id, c_0, c_1, c_2, c_3);
@@ -56,6 +159,21 @@ stwo_macros::define_air_fns! {
 
 pub use component::air::{Component, Eval};
 
+/// Construct the generated evaluator for one universal proof kind.
+pub fn eval_for_proof_kind(
+    log_size: u32,
+    proof_kind: ProofKind,
+    recursion_relations: &RecursionRelations,
+) -> Eval {
+    Eval {
+        log_size,
+        segment_active: BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        binary_active: BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        empty_active: BaseField::from(u32::from(proof_kind == ProofKind::EmptyLeaf)),
+        relations: SharedPrimitiveRelations::for_circuit(recursion_relations),
+    }
+}
+
 /// Generate the interaction trace from the macro-defined relation entries.
 pub fn gen_interaction_trace(
     trace: &[stwo::prover::poly::circle::CircleEvaluation<
@@ -63,6 +181,12 @@ pub fn gen_interaction_trace(
         stwo::core::fields::m31::BaseField,
         stwo::prover::poly::BitReversedOrder,
     >],
+    preprocessed: &[stwo::prover::poly::circle::CircleEvaluation<
+        stwo::prover::backend::simd::SimdBackend,
+        stwo::core::fields::m31::BaseField,
+        stwo::prover::poly::BitReversedOrder,
+    >],
+    proof_kind: ProofKind,
     recursion_relations: &RecursionRelations,
 ) -> (
     stwo::core::ColumnVec<
@@ -76,6 +200,10 @@ pub fn gen_interaction_trace(
 ) {
     component::witness::gen_interaction_trace(
         trace,
+        preprocessed,
+        BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
+        BaseField::from(u32::from(proof_kind == ProofKind::EmptyLeaf)),
         &SharedPrimitiveRelations::for_circuit(recursion_relations),
     )
 }
@@ -118,13 +246,18 @@ mod tests {
             .first()
             .map(|t| t.domain.log_size())
             .expect("empty trace");
-        let (interaction, claimed_sum) = gen_interaction_trace(&trace, &recursion_relations);
-        let traces = TreeVec::new(vec![vec![], trace, interaction]);
+        let preprocessed = Qm31MulPreprocessed::new(log_size, vec![])
+            .expect("empty standalone schedule fits")
+            .gen_columns();
+        let (interaction, claimed_sum) = gen_interaction_trace(
+            &trace,
+            &preprocessed,
+            ProofKind::SegmentLeaf,
+            &recursion_relations,
+        );
+        let traces = TreeVec::new(vec![preprocessed, trace, interaction]);
         let trace_polys = traces.map_cols(|c| c.interpolate());
-        let eval = Eval {
-            log_size,
-            relations: SharedPrimitiveRelations::for_circuit(&recursion_relations),
-        };
+        let eval = eval_for_proof_kind(log_size, ProofKind::SegmentLeaf, &recursion_relations);
         assert_constraints_on_polys(
             &trace_polys,
             CanonicCoset::new(log_size),
@@ -185,16 +318,12 @@ mod tests {
     #[test]
     fn test_qm31_mul_constraint_degrees_within_bound() {
         use stwo_constraint_framework::expr::ExprEvaluator;
-        let eval = Eval {
-            log_size: 4,
-            relations: SharedPrimitiveRelations::for_circuit(
-                &crate::relations::RecursionRelations::dummy(),
-            ),
-        };
+        let relations = crate::relations::RecursionRelations::dummy();
+        let eval = eval_for_proof_kind(4, ProofKind::SegmentLeaf, &relations);
         let expr_eval = eval.evaluate(ExprEvaluator::new());
         let degrees = expr_eval.constraint_degree_bounds();
-        // 1 enabler + 2 wiring flags + 4 limb constraints + 2 logup batches
-        assert_eq!(degrees.len(), 9);
+        // Enabling, six fixed-schedule bindings, four limb constraints, and LogUp.
+        assert_eq!(degrees.len(), 15);
         // Limb constraints stay degree 2; logup batches reach degree 3.
         assert!(degrees.iter().all(|&d| d <= 3));
     }

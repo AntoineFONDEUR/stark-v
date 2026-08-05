@@ -1,10 +1,9 @@
 //! Lowering and public anchors for the VM AIR-composition circuit.
 //!
 //! Shared multiplication, inverse, and linear-operation tables own arithmetic
-//! rows. Verifier terms fix constants, operation definitions, and the zero
-//! composition-equality output, while the dedicated input AIR owns every input
-//! node. Structural comparison with the fixed reference prevents a witness
-//! circuit from replacing or omitting verifier arithmetic.
+//! rows and bind their fixed graph through preprocessing. Verifier anchors fix
+//! constants and the zero composition-equality output, while the dedicated
+//! input AIR owns every input node.
 
 use core::fmt;
 
@@ -18,7 +17,7 @@ use stwo_constraint_framework::Relation;
 use crate::circuit::CircuitTraces;
 use crate::circuit::{limbs, lower_arena_operations, use_counts_for_outputs};
 use crate::recorder::Op;
-use crate::relations::{RecursionRelations, op_kind};
+use crate::relations::RecursionRelations;
 
 use super::vm_air_composition_circuit::VmAirCompositionCircuit;
 
@@ -39,7 +38,7 @@ pub fn lower_vm_air_composition_circuit(
     Ok(())
 }
 
-/// Verifier contribution for constants, operation structure, and zero output.
+/// Verifier contribution for constants and the zero output.
 pub fn public_vm_air_composition_terms(
     circuit_id: u32,
     reference: &VmAirCompositionCircuit,
@@ -62,17 +61,7 @@ pub fn public_vm_air_composition_terms(
                         * SecureField::from(M31::from(uses[node_index]));
                 }
             }
-            op => {
-                let (kind, lhs, rhs) = operation_tuple(op)?;
-                let denominator: SecureField = relations.op_def.combine(&[
-                    M31::from(circuit_id),
-                    M31::from(node_id),
-                    M31::from(kind),
-                    M31::from(lhs),
-                    M31::from(rhs),
-                ]);
-                total += denominator.inverse();
-            }
+            Op::Add(_, _) | Op::Sub(_, _) | Op::Mul(_, _) | Op::Neg(_) | Op::Inverse(_) => {}
         }
     }
     for output in reference.circuit().outputs() {
@@ -132,18 +121,6 @@ fn checked_node_id(node_id: usize) -> Result<u32, VmAirCompositionLoweringError>
     u32::try_from(node_id).map_err(|_| VmAirCompositionLoweringError::NodeIdOutOfRange { node_id })
 }
 
-fn operation_tuple(op: Op) -> Result<(u32, u32, u32), VmAirCompositionLoweringError> {
-    let convert = |node_id| checked_node_id(node_id);
-    match op {
-        Op::Add(lhs, rhs) => Ok((op_kind::ADD, convert(lhs)?, convert(rhs)?)),
-        Op::Sub(lhs, rhs) => Ok((op_kind::SUB, convert(lhs)?, convert(rhs)?)),
-        Op::Mul(lhs, rhs) => Ok((op_kind::MUL, convert(lhs)?, convert(rhs)?)),
-        Op::Neg(lhs) => Ok((op_kind::NEG, convert(lhs)?, 0)),
-        Op::Inverse(lhs) => Ok((op_kind::INVERSE, convert(lhs)?, 0)),
-        Op::Input | Op::Const => Err(VmAirCompositionLoweringError::NonArithmeticOperation),
-    }
-}
-
 fn wire_term(
     circuit_id: u32,
     node_id: u32,
@@ -172,7 +149,6 @@ pub enum VmAirCompositionLoweringError {
     NodeCountMismatch { expected: usize, actual: usize },
     NodeStructureMismatch { node_id: usize },
     NodeIdOutOfRange { node_id: usize },
-    NonArithmeticOperation,
     NonzeroCompositionEquality,
     ReferenceOutputIsNonzero,
 }
@@ -204,6 +180,7 @@ mod tests {
     use crate::relation_challenge_air::{
         AIR_EVALUATION_CHALLENGE_SCOPE, RelationChallengeRelations,
     };
+    use crate::statement_input_air::StatementInputRelations;
     use crate::transcript_payload_air::{VerifierInputKind, VerifierInputRelations};
     use crate::verifier_randomness_air::{VerifierRandomnessKind, VerifierRandomnessRelations};
     use crate::vm_air_composition_circuit::{
@@ -320,6 +297,7 @@ mod tests {
         let challenge_relations = RelationChallengeRelations::draw(&mut channel);
         let verifier_input_relations = VerifierInputRelations::draw(&mut channel);
         let randomness_relations = VerifierRandomnessRelations::draw(&mut channel);
+        let statement_relations = StatementInputRelations::draw(&mut channel);
         let input_preprocessing = VmAirCompositionInputPreprocessed::new(&reference, CIRCUIT_ID)
             .expect("reference input ownership is canonical");
         let mut input_table = VmAirCompositionInputTable::new();
@@ -338,6 +316,7 @@ mod tests {
             &challenge_relations,
             &verifier_input_relations,
             &randomness_relations,
+            &statement_relations,
             &circuit_relations,
         );
 
@@ -350,12 +329,25 @@ mod tests {
         let mut traces = CircuitTraces::default();
         lower_vm_air_composition_circuit(&mut traces, CIRCUIT_ID, &reference, &witness)
             .expect("valid composition circuit lowers");
-        let (_, mul_sum) =
-            qm31_mul::gen_interaction_trace(&traces.qm31_mul.into_witness(), &circuit_relations);
-        let (_, inv_sum) =
-            qm31_inv::gen_interaction_trace(&traces.qm31_inv.into_witness(), &circuit_relations);
+        let traces = traces
+            .into_air_traces()
+            .expect("lowered composition schedules fit their traces");
+        let (_, mul_sum) = qm31_mul::gen_interaction_trace(
+            &traces.qm31_mul,
+            &traces.qm31_mul_preprocessed,
+            ProofKind::SegmentLeaf,
+            &circuit_relations,
+        );
+        let (_, inv_sum) = qm31_inv::gen_interaction_trace(
+            &traces.qm31_inv,
+            &traces.qm31_inv_preprocessed,
+            ProofKind::SegmentLeaf,
+            &circuit_relations,
+        );
         let (_, linear_sum) = linear_ops::gen_interaction_trace(
-            &traces.linear_ops.into_witness(),
+            &traces.linear_ops,
+            &traces.linear_ops_preprocessed,
+            ProofKind::SegmentLeaf,
             &circuit_relations,
         );
         let public_sum =

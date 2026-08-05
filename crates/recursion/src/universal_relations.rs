@@ -39,7 +39,7 @@ use super::vm_public_io_hash_air::VmPublicIoHashRelations;
 use crate::relations::RecursionRelations;
 
 /// Total relation challenges drawn for one recursion verification.
-pub const UNIVERSAL_RELATION_COUNT: usize = 48;
+pub const UNIVERSAL_RELATION_COUNT: usize = 47;
 
 /// Every relation bundle drawn by the universal AIR, in canonical draw order.
 #[derive(Clone)]
@@ -142,15 +142,11 @@ pub fn universal_relation_descriptors() -> [RelationDescriptor; UNIVERSAL_RELATI
 }
 
 /// The recursion-local half of the registry, in struct draw order.
-const fn local_relation_descriptors() -> [RelationDescriptor; 36] {
+const fn local_relation_descriptors() -> [RelationDescriptor; 35] {
     [
         RelationDescriptor {
             name: "MerkleNodeRelation",
             size: 11,
-        },
-        RelationDescriptor {
-            name: "OpDefRelation",
-            size: 5,
         },
         RelationDescriptor {
             name: "WireRelation",
@@ -324,7 +320,7 @@ mod tests {
     ];
 
     #[test]
-    fn registry_has_forty_eight_unique_relations() {
+    fn registry_has_forty_seven_unique_relations() {
         let descriptors = universal_relation_descriptors();
         let names: HashSet<_> = descriptors.iter().map(|entry| entry.name).collect();
         assert_eq!(descriptors.len(), UNIVERSAL_RELATION_COUNT);
@@ -552,6 +548,7 @@ mod tests {
                 &relations.relation_challenge,
                 &relations.verifier_input,
                 &relations.verifier_randomness,
+                &relations.statement_input,
                 &relations.recursion,
             ),
         );
@@ -671,30 +668,15 @@ mod tests {
         );
         usage_of(
             &mut usage,
-            qm31_mul::Eval {
-                log_size: LOG_SIZE,
-                relations: crate::relations::SharedPrimitiveRelations::for_circuit(
-                    &relations.recursion,
-                ),
-            },
+            qm31_mul::eval_for_proof_kind(LOG_SIZE, KIND, &relations.recursion),
         );
         usage_of(
             &mut usage,
-            qm31_inv::Eval {
-                log_size: LOG_SIZE,
-                relations: crate::relations::SharedPrimitiveRelations::for_circuit(
-                    &relations.recursion,
-                ),
-            },
+            qm31_inv::eval_for_proof_kind(LOG_SIZE, KIND, &relations.recursion),
         );
         usage_of(
             &mut usage,
-            linear_ops::Eval {
-                log_size: LOG_SIZE,
-                relations: crate::relations::SharedPrimitiveRelations::for_circuit(
-                    &relations.recursion,
-                ),
-            },
+            linear_ops::eval_for_proof_kind(LOG_SIZE, KIND, &relations.recursion),
         );
         usage_of(
             &mut usage,
@@ -779,7 +761,6 @@ mod tests {
         let relations = UniversalRelations::dummy();
         let instances = [
             instance_descriptor(&relations.recursion.merkle_node),
-            instance_descriptor(&relations.recursion.op_def),
             instance_descriptor(&relations.recursion.wire),
             instance_descriptor(&relations.control.step),
             instance_descriptor(&relations.transcript.state),

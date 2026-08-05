@@ -1,11 +1,11 @@
-//! Control-step consumer for VM AIR composition verification.
+//! Control-step consumer for universal AIR composition verification.
 //!
 //! Verifier preprocessing extracts the contiguous AIR-evaluation slice and its
-//! immediately following composition assertion from the trusted VM plan. The
-//! fixed circuit profile supplies both trusted counts, so proof values cannot
-//! shorten the AIR program or change the sampled-value boundary. Segment mode
-//! consumes these tuples; binary and empty modes leave the VM-only component
-//! inactive.
+//! immediately following composition assertion from the trusted VM and
+//! recursion plans. Fixed circuit profiles supply both trusted counts, so proof
+//! values cannot shorten either AIR program or change a sampled-value boundary.
+//! Segment mode activates the VM lane, binary mode activates both recursion
+//! lanes, and empty mode activates none.
 
 use core::fmt;
 
@@ -29,45 +29,76 @@ const MIN_LOG_SIZE: u32 = 4;
 const MAX_LOG_SIZE: u32 = 30;
 
 const ROW_MASK_COLUMN: usize = 0;
-const SEQUENCE_COLUMN: usize = 1;
-const TAG_COLUMN: usize = 2;
-const ARG_0_COLUMN: usize = 3;
-const ARG_1_COLUMN: usize = 4;
-const ARG_2_COLUMN: usize = 5;
-const ARG_3_COLUMN: usize = 6;
-const PREPROCESSED_COLUMN_COUNT: usize = 7;
+const SEGMENT_MASK_COLUMN: usize = 1;
+const VERIFIER_ID_COLUMN: usize = 2;
+const SEQUENCE_COLUMN: usize = 3;
+const TAG_COLUMN: usize = 4;
+const ARG_0_COLUMN: usize = 5;
+const ARG_1_COLUMN: usize = 6;
+const ARG_2_COLUMN: usize = 7;
+const ARG_3_COLUMN: usize = 8;
+const PREPROCESSED_COLUMN_COUNT: usize = 9;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PreprocessedRow {
+    segment_mask: u32,
+    verifier_id: u32,
     sequence: u32,
     tag: u32,
     args: [u32; 4],
 }
 
-/// Trusted VM AIR-composition control rows for one fixed circuit profile.
+/// Trusted universal AIR-composition control rows for fixed circuit profiles.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VmAirCompositionControlPreprocessed {
     log_size: u32,
     rows: Vec<PreprocessedRow>,
-    air_instruction_count: u32,
-    sampled_value_count: u32,
+    vm_air_instruction_count: u32,
+    vm_sampled_value_count: u32,
+    recursion_air_instruction_count: u32,
+    recursion_sampled_value_count: u32,
 }
 
 impl VmAirCompositionControlPreprocessed {
     pub fn new(
-        plan: &VerifierControlPlan,
-        profile: VmAirCompositionProfile,
+        vm_plan: &VerifierControlPlan,
+        vm_profile: VmAirCompositionProfile,
+        recursion_plan: &VerifierControlPlan,
+        recursion_air_instruction_count: u32,
+        recursion_sampled_value_count: u32,
     ) -> Result<Self, VmAirCompositionControlError> {
-        if plan.schema() != VerifierSchema::Vm {
+        if vm_plan.schema() != VerifierSchema::Vm {
             return Err(VmAirCompositionControlError::SchemaMismatch {
-                actual: plan.schema(),
+                lane: "segment",
+                expected: VerifierSchema::Vm,
+                actual: vm_plan.schema(),
             });
         }
-        let rows = validated_rows(
-            plan.steps(),
-            profile.air_instruction_count(),
-            profile.sampled_value_count(),
+        if recursion_plan.schema() != VerifierSchema::Recursion {
+            return Err(VmAirCompositionControlError::SchemaMismatch {
+                lane: "binary",
+                expected: VerifierSchema::Recursion,
+                actual: recursion_plan.schema(),
+            });
+        }
+        let mut rows = validated_rows(
+            vm_plan.steps(),
+            vm_profile.air_instruction_count(),
+            vm_profile.sampled_value_count(),
+            super::control_air::SEGMENT_VERIFIER_ID,
         )?;
+        rows.extend(validated_rows(
+            recursion_plan.steps(),
+            recursion_air_instruction_count,
+            recursion_sampled_value_count,
+            super::control_air::LEFT_RECURSION_VERIFIER_ID,
+        )?);
+        rows.extend(validated_rows(
+            recursion_plan.steps(),
+            recursion_air_instruction_count,
+            recursion_sampled_value_count,
+            super::control_air::RIGHT_RECURSION_VERIFIER_ID,
+        )?);
         let padded_rows = rows
             .len()
             .checked_next_power_of_two()
@@ -80,8 +111,10 @@ impl VmAirCompositionControlPreprocessed {
         Ok(Self {
             log_size,
             rows,
-            air_instruction_count: profile.air_instruction_count(),
-            sampled_value_count: profile.sampled_value_count(),
+            vm_air_instruction_count: vm_profile.air_instruction_count(),
+            vm_sampled_value_count: vm_profile.sampled_value_count(),
+            recursion_air_instruction_count,
+            recursion_sampled_value_count,
         })
     }
 
@@ -89,12 +122,20 @@ impl VmAirCompositionControlPreprocessed {
         self.log_size
     }
 
-    pub const fn air_instruction_count(&self) -> u32 {
-        self.air_instruction_count
+    pub const fn vm_air_instruction_count(&self) -> u32 {
+        self.vm_air_instruction_count
     }
 
-    pub const fn sampled_value_count(&self) -> u32 {
-        self.sampled_value_count
+    pub const fn vm_sampled_value_count(&self) -> u32 {
+        self.vm_sampled_value_count
+    }
+
+    pub const fn recursion_air_instruction_count(&self) -> u32 {
+        self.recursion_air_instruction_count
+    }
+
+    pub const fn recursion_sampled_value_count(&self) -> u32 {
+        self.recursion_sampled_value_count
     }
 
     pub fn row_count(&self) -> usize {
@@ -118,6 +159,8 @@ impl VmAirCompositionControlPreprocessed {
             .collect::<Vec<_>>();
         for (index, row) in self.rows.iter().copied().enumerate() {
             columns[ROW_MASK_COLUMN][index] = 1;
+            columns[SEGMENT_MASK_COLUMN][index] = row.segment_mask;
+            columns[VERIFIER_ID_COLUMN][index] = row.verifier_id;
             columns[SEQUENCE_COLUMN][index] = row.sequence;
             columns[TAG_COLUMN][index] = row.tag;
             columns[ARG_0_COLUMN][index] = row.args[0];
@@ -137,6 +180,7 @@ fn validated_rows(
     steps: &[VerifierStep],
     air_instruction_count: u32,
     sampled_value_count: u32,
+    verifier_id: u32,
 ) -> Result<Vec<PreprocessedRow>, VmAirCompositionControlError> {
     let mut rows = Vec::new();
     let mut expected_instruction = 0_u32;
@@ -166,7 +210,7 @@ fn validated_rows(
                         });
                     }
                 }
-                rows.push(encoded_row(sequence, step)?);
+                rows.push(encoded_row(sequence, step, verifier_id)?);
                 previous_instruction_sequence = Some(sequence);
                 expected_instruction = expected_instruction
                     .checked_add(1)
@@ -200,7 +244,7 @@ fn validated_rows(
                         );
                     }
                 }
-                rows.push(encoded_row(sequence, step)?);
+                rows.push(encoded_row(sequence, step, verifier_id)?);
                 assertion_sequence = Some(sequence);
             }
             _ => {}
@@ -221,11 +265,14 @@ fn validated_rows(
 fn encoded_row(
     sequence: usize,
     step: VerifierStep,
+    verifier_id: u32,
 ) -> Result<PreprocessedRow, VmAirCompositionControlError> {
     let sequence = u32::try_from(sequence)
         .map_err(|_| VmAirCompositionControlError::SequenceOutOfRange { sequence })?;
     let encoded = step.encode();
     Ok(PreprocessedRow {
+        segment_mask: u32::from(verifier_id == super::control_air::SEGMENT_VERIFIER_ID),
+        verifier_id,
         sequence,
         tag: encoded.tag(),
         args: encoded.args(),
@@ -239,6 +286,8 @@ stwo_macros::define_air_fns! {
     embedded_relations: crate::control_air::ControlRelations,
     embedded_preprocessed: {
         row_mask: "recursion_vm_air_composition_control_row_mask",
+        segment_mask: "recursion_vm_air_composition_control_segment_mask",
+        verifier_id: "recursion_vm_air_composition_control_verifier_id",
         sequence: "recursion_vm_air_composition_control_sequence",
         tag: "recursion_vm_air_composition_control_tag",
         arg_0: "recursion_vm_air_composition_control_arg_0",
@@ -246,12 +295,14 @@ stwo_macros::define_air_fns! {
         arg_2: "recursion_vm_air_composition_control_arg_2",
         arg_3: "recursion_vm_air_composition_control_arg_3",
     },
-    embedded_params: [segment_active],
+    embedded_params: [segment_active, binary_active],
 
     relation step(7);
 
     fn vm_air_composition_control(
         row_mask,
+        segment_mask,
+        verifier_id,
         sequence,
         tag,
         arg_0,
@@ -259,9 +310,13 @@ stwo_macros::define_air_fns! {
         arg_2,
         arg_3,
         segment_active,
+        binary_active,
     ) {
-        consume(row_mask * segment_active) step(
-            constant(crate::control_air::SEGMENT_VERIFIER_ID),
+        let binary_mask = 1 - segment_mask;
+        let active = row_mask
+            * (segment_mask * segment_active + binary_mask * binary_active);
+        consume(active) step(
+            verifier_id,
             sequence,
             tag,
             arg_0,
@@ -275,7 +330,7 @@ stwo_macros::define_air_fns! {
 
 pub use component::air::{Component, Eval};
 
-/// Construct the generated consumer with the verifier-owned segment selector.
+/// Construct the generated consumer with verifier-owned proof-kind selectors.
 pub fn eval_for_proof_kind(
     log_size: u32,
     proof_kind: ProofKind,
@@ -284,11 +339,12 @@ pub fn eval_for_proof_kind(
     Eval {
         log_size,
         segment_active: BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        binary_active: BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
         relations: control_relations,
     }
 }
 
-/// Generates the negative control-step fractions for segment mode.
+/// Generates the negative control-step fractions for the active verifier lanes.
 pub fn gen_interaction_trace(
     preprocessed: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
     proof_kind: ProofKind,
@@ -300,6 +356,7 @@ pub fn gen_interaction_trace(
     component::witness::gen_interaction_trace(
         preprocessed,
         BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
+        BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
         control_relations,
     )
 }
@@ -307,19 +364,44 @@ pub fn gen_interaction_trace(
 /// Invalid VM AIR-composition control slice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VmAirCompositionControlError {
-    SchemaMismatch { actual: VerifierSchema },
+    SchemaMismatch {
+        lane: &'static str,
+        expected: VerifierSchema,
+        actual: VerifierSchema,
+    },
     RowCountOverflow,
-    LogSizeOutOfRange { log_size: u32 },
-    SequenceOutOfRange { sequence: usize },
-    NonCanonicalInstructionIndex { expected: u32, actual: u32 },
-    NonContiguousInstruction { previous: usize, actual: usize },
+    LogSizeOutOfRange {
+        log_size: u32,
+    },
+    SequenceOutOfRange {
+        sequence: usize,
+    },
+    NonCanonicalInstructionIndex {
+        expected: u32,
+        actual: u32,
+    },
+    NonContiguousInstruction {
+        previous: usize,
+        actual: usize,
+    },
     InstructionCountOverflow,
-    InstructionCountMismatch { expected: u32, actual: u32 },
-    InstructionAfterCompositionAssertion { instruction: u32 },
+    InstructionCountMismatch {
+        expected: u32,
+        actual: u32,
+    },
+    InstructionAfterCompositionAssertion {
+        instruction: u32,
+    },
     DuplicateCompositionAssertion,
-    CompositionAssertionNotAdjacent { previous: usize, actual: usize },
+    CompositionAssertionNotAdjacent {
+        previous: usize,
+        actual: usize,
+    },
     CompositionAssertionMissing,
-    SampledValueCountMismatch { expected: u32, actual: u32 },
+    SampledValueCountMismatch {
+        expected: u32,
+        actual: u32,
+    },
 }
 
 impl fmt::Display for VmAirCompositionControlError {
@@ -369,7 +451,7 @@ mod tests {
             .profile()
     }
 
-    fn plan(profile: VmAirCompositionProfile) -> VerifierControlPlan {
+    fn plan(schema: VerifierSchema, profile: VmAirCompositionProfile) -> VerifierControlPlan {
         let pcs = PcsParameters {
             interaction_pow_bits: word(8),
             pow_bits: word(10),
@@ -392,20 +474,26 @@ mod tests {
             fri_layer_tree_heights: [word(6), word(4), word(2), word(2)],
         };
         let spec = VerifierProgramSpec::new(
-            VerifierSchema::Vm,
+            schema,
             profile.relation_challenge_count(),
             5,
             profile.air_instruction_count(),
             3,
         )
-        .expect("fixture VM program has every phase");
+        .expect("fixture verifier program has every phase");
         VerifierControlPlan::new(spec, pcs, &shape).expect("fixture shape matches its PCS profile")
     }
 
     fn preprocessing() -> VmAirCompositionControlPreprocessed {
         let profile = profile();
-        VmAirCompositionControlPreprocessed::new(&plan(profile), profile)
-            .expect("fixture composition control slice is exact")
+        VmAirCompositionControlPreprocessed::new(
+            &plan(VerifierSchema::Vm, profile),
+            profile,
+            &plan(VerifierSchema::Recursion, profile),
+            profile.air_instruction_count(),
+            profile.sampled_value_count(),
+        )
+        .expect("fixture composition control slices are exact")
     }
 
     fn assert_constraints(kind: ProofKind) {
@@ -427,40 +515,48 @@ mod tests {
         );
     }
 
-    fn bridge_sum() -> QM31 {
+    fn bridge_sum(kind: ProofKind) -> QM31 {
         let preprocessing = preprocessing();
         let mut channel = Poseidon2M31Channel::default();
         let relations = ControlRelations::draw(&mut channel);
-        let (_, consumer_sum) = gen_interaction_trace(
-            &preprocessing.gen_columns(),
-            ProofKind::SegmentLeaf,
-            &relations,
-        );
-        preprocessing.rows.iter().fold(consumer_sum, |sum, row| {
-            let denominator: QM31 = relations.step.combine(&[
-                M31::from(SEGMENT_VERIFIER_ID),
-                M31::from(row.sequence),
-                M31::from(row.tag),
-                M31::from(row.args[0]),
-                M31::from(row.args[1]),
-                M31::from(row.args[2]),
-                M31::from(row.args[3]),
-            ]);
-            sum + denominator.inverse()
-        })
+        let (_, consumer_sum) =
+            gen_interaction_trace(&preprocessing.gen_columns(), kind, &relations);
+        preprocessing
+            .rows
+            .iter()
+            .filter(|row| match kind {
+                ProofKind::SegmentLeaf => row.verifier_id == SEGMENT_VERIFIER_ID,
+                ProofKind::BinaryNode => row.verifier_id != SEGMENT_VERIFIER_ID,
+                ProofKind::EmptyLeaf => false,
+            })
+            .fold(consumer_sum, |sum, row| {
+                let denominator: QM31 = relations.step.combine(&[
+                    M31::from(row.verifier_id),
+                    M31::from(row.sequence),
+                    M31::from(row.tag),
+                    M31::from(row.args[0]),
+                    M31::from(row.args[1]),
+                    M31::from(row.args[2]),
+                    M31::from(row.args[3]),
+                ]);
+                sum + denominator.inverse()
+            })
     }
 
     #[rstest]
     #[case::segment(ProofKind::SegmentLeaf)]
     #[case::binary(ProofKind::BinaryNode)]
     #[case::empty(ProofKind::EmptyLeaf)]
-    fn every_universal_mode_satisfies_vm_air_control_constraints(#[case] kind: ProofKind) {
+    fn every_universal_mode_satisfies_air_control_constraints(#[case] kind: ProofKind) {
         assert_constraints(kind);
     }
 
-    #[test]
-    fn vm_air_control_steps_close_exactly() {
-        assert!(bridge_sum().is_zero());
+    #[rstest]
+    #[case::segment(ProofKind::SegmentLeaf)]
+    #[case::binary(ProofKind::BinaryNode)]
+    #[case::empty(ProofKind::EmptyLeaf)]
+    fn air_control_steps_close_exactly(#[case] kind: ProofKind) {
+        assert!(bridge_sum(kind).is_zero());
     }
 
     #[test]
@@ -476,6 +572,7 @@ mod tests {
                 ],
                 1,
                 profile.sampled_value_count(),
+                0,
             ),
             Err(VmAirCompositionControlError::SampledValueCountMismatch {
                 expected: profile.sampled_value_count(),
@@ -498,6 +595,7 @@ mod tests {
                 ],
                 2,
                 3,
+                0,
             ),
             Err(VmAirCompositionControlError::NonContiguousInstruction {
                 previous: 0,
@@ -513,6 +611,7 @@ mod tests {
                 &[VerifierStep::EvaluateAirInstruction { instruction: 0 }],
                 1,
                 3,
+                0,
             ),
             Err(VmAirCompositionControlError::CompositionAssertionMissing)
         );

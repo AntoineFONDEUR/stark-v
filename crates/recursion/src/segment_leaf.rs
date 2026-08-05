@@ -1273,20 +1273,14 @@ pub(crate) mod tests {
             witness.claimed_sums(),
         );
         let first_fingerprint = universal_witness_fingerprint(&witness);
-        let terminal_control_terms = crate::control_air::public_terminal_control_terms(
-            fixture.profile.vm_plan(),
-            crate::control_air::SEGMENT_VERIFIER_ID,
-            &relations.control,
-        );
-        let terminal_control_phase_is_required =
-            !(witness.global_relation_sum() - terminal_control_terms).is_zero();
+        let terminal_control_phase_is_internal = witness.global_relation_sum().is_zero();
         let first_shape = (
             witness.proof_kind(),
             witness.traces().len(),
             witness.claimed_sums().len(),
             witness.preprocessing_ids().len(),
             accepted_components,
-            terminal_control_phase_is_required,
+            terminal_control_phase_is_internal,
         );
         drop(witness);
         let second = crate::universal_witness::assemble_segment_leaf(

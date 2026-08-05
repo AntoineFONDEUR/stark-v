@@ -154,7 +154,7 @@ set.
     verifier plans, preprocessing registries, exact wire types, and the protocol
     identifier from one profile constructor.
   - The profile fixes 193 FRI queries, 4 KiB public-input and public-output
-    capacities, and a 3,386,900-byte universal proof wire.
+    capacities, and a 3,459,396-byte universal proof wire.
   - Evidence: commit `b0a3f2ae`; focused profile, manifest mutation, macro,
     recursion, full release workspace, and repository hook suites passed.
 - `[done] REC-001` Adapt a real VM proof to the recursive leaf wire.
@@ -179,9 +179,9 @@ set.
   - STWO-omitted FRI query values are reconstructed from the DEEP answer and
     prior folds before both Merkle and folding checks; PCS periodicity uses the
     committed-domain log sizes.
-  - The corrected active profile has 22 recursion FRI layers, a 3,386,900-byte
-    fixed proof wire, and protocol identifier limbs
-    `[1605643340, 1955314271, 2072188796, 1133138353, 150703753, 2017819881, 1063238005, 332318256]`.
+  - The active profile has 22 recursion FRI layers, a 3,459,396-byte fixed proof
+    wire, and protocol identifier limbs
+    `[996130352, 439599105, 1840972074, 322360417, 2002034527, 739270897, 775019197, 1167228932]`.
   - Evidence: commit `827ec9a9`; deterministic real-proof assembly, all 36
     direct component checks, focused malformed-FRI tests, the ordinary prover
     integration, the full recursion and workspace release suites, clippy, DSL
@@ -891,9 +891,8 @@ commands run, observed test counts or measurements, and the pushed commit.
   mutations were rejected in 396.06 seconds; measured wall time was 397.06
   seconds.
 - `cargo test --release -p recursion profile::tests -- --nocapture`: all 7
-  active profile and conformance tests passed. The frozen universal geometry is
-  2,104 table columns, 2,248 sampled values, 1,287 AIR instructions, 493
-  preprocessing columns, and a 3,386,900-byte fixed proof wire.
+  active profile and conformance tests passed, pinning the then-current
+  universal geometry and fixed proof-wire size.
 - `cargo test --release -p recursion --test air_dsl_guard -- --nocapture`: all 5
   structural DSL guards passed; no recursion-reachable owner contains a
   handwritten evaluator, standalone table macro, wrapper macro, or unapproved

@@ -1097,6 +1097,7 @@ impl RosterCollector {
                 &relations.relation_challenge,
                 &relations.verifier_input,
                 &relations.verifier_randomness,
+                &relations.statement_input,
                 &relations.recursion,
             )
         });
@@ -1216,30 +1217,15 @@ impl RosterCollector {
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[30], claimed_sum(), {
             let log_size = log_size();
-            crate::qm31_mul::Eval {
-                log_size,
-                relations: crate::relations::SharedPrimitiveRelations::for_circuit(
-                    &relations.recursion,
-                ),
-            }
+            crate::qm31_mul::eval_for_proof_kind(log_size, kind, &relations.recursion)
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[31], claimed_sum(), {
             let log_size = log_size();
-            crate::qm31_inv::Eval {
-                log_size,
-                relations: crate::relations::SharedPrimitiveRelations::for_circuit(
-                    &relations.recursion,
-                ),
-            }
+            crate::qm31_inv::eval_for_proof_kind(log_size, kind, &relations.recursion)
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[32], claimed_sum(), {
             let log_size = log_size();
-            crate::linear_ops::Eval {
-                log_size,
-                relations: crate::relations::SharedPrimitiveRelations::for_circuit(
-                    &relations.recursion,
-                ),
-            }
+            crate::linear_ops::eval_for_proof_kind(log_size, kind, &relations.recursion)
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[33], claimed_sum(), {
             let log_size = log_size();

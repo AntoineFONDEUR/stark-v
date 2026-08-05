@@ -7,7 +7,7 @@
 
 use core::fmt;
 
-use air::digest::M31Word;
+use air::digest::{Digest8, M31Word};
 use air::preprocessed::PreprocessedTable;
 use air::trace::Poseidon2Table;
 use num_traits::{One, Zero};
@@ -51,10 +51,17 @@ use crate::pcs_deep_circuit::{
 };
 use crate::pcs_deep_input_air::{PcsDeepCircuitLane, PcsDeepInputPreprocessed};
 use crate::pow::PowKind;
-use crate::profile::{FrozenProtocolProfile, recursion_component_log_sizes};
+use crate::profile::{
+    FrozenProtocolProfile, RECURSION_MAX_MERKLE_DEPTH, RootProofWire,
+    recursion_component_log_sizes, recursion_preprocessed_column_ids,
+};
 use crate::protocol::CanonicalWords;
 use crate::query_position_air::{
     QueryPositionKind, QueryPositionPreprocessed, UniversalRawQueryWitness,
+};
+use crate::recursion_air_composition_circuit::{
+    RecursionAirCompositionCircuit, RecursionAirCompositionWitness,
+    build_recursion_air_composition_circuit, build_recursion_air_composition_reference,
 };
 use crate::recursion_air_program::{
     UNIVERSAL_COMPONENT_COUNT, UniversalComponentLogSizes, universal_preprocessed_column_ids,
@@ -62,7 +69,9 @@ use crate::recursion_air_program::{
 use crate::relation_challenge_air::RelationChallengePreprocessed;
 use crate::segment_leaf::VmSegmentLeafWire;
 use crate::statement::{SPAN_STATEMENT_CANONICAL_WORDS, SpanStatement};
-use crate::statement_input_air::{StatementInputPreprocessed, StatementInputWitness};
+use crate::statement_input_air::{
+    LEFT_STATEMENT_SCOPE, RIGHT_STATEMENT_SCOPE, StatementInputPreprocessed, StatementInputWitness,
+};
 use crate::statement_semantics_circuit::{
     StatementSemanticsCircuit, StatementSemanticsCircuitWitness, StatementWords,
     build_statement_semantics_circuit,
@@ -80,14 +89,17 @@ use crate::transcript_program::{
 };
 use crate::transcript_state_air::TranscriptStatePreprocessed;
 use crate::transcript_word_air::TranscriptWordPreprocessed;
-use crate::universal_relations::UniversalRelations;
+use crate::universal_relations::{UNIVERSAL_RELATION_COUNT, UniversalRelations};
 use crate::verifier_randomness_air::VerifierRandomnessPreprocessed;
 use crate::vm_air_composition_circuit::{
     VmAirCompositionCircuit, VmAirCompositionWitness, build_vm_air_composition_circuit,
     build_vm_air_composition_reference,
 };
 use crate::vm_air_composition_control_air::VmAirCompositionControlPreprocessed;
-use crate::vm_air_composition_input_air::VmAirCompositionInputPreprocessed;
+use crate::vm_air_composition_input_air::{
+    CircuitAnchorLane, CircuitAnchorMode, RecursionCompositionInputLane,
+    VmAirCompositionInputPreprocessed,
+};
 use crate::vm_public_claim::{
     public_input_digest_from_claim, public_output_digest_from_claim,
     vm_public_claim_digest_from_words,
@@ -106,7 +118,7 @@ use crate::vm_public_logup_circuit::{
 };
 use crate::vm_public_logup_control_air::VmPublicLogupControlPreprocessed;
 use crate::vm_public_logup_input_air::VmPublicLogupInputPreprocessed;
-use crate::wire::ProofKind;
+use crate::wire::{MerklePathWire, ProofKind};
 use crate::{linear_ops, merkle_path, qm31_inv, qm31_mul};
 
 /// One SIMD base-field trace tree used by the universal prover.
@@ -449,6 +461,373 @@ pub(crate) fn prepare_segment_leaf(
     )
 }
 
+/// Assembles one binary parent from two fixed-size universal child proofs.
+pub fn assemble_binary_node(
+    profile: &FrozenProtocolProfile,
+    left: &RootProofWire,
+    right: &RootProofWire,
+    relations: &UniversalRelations,
+) -> Result<UniversalWitness, UniversalWitnessError> {
+    let preprocessing = UniversalPreprocessing::new(profile)?;
+    let main = prepare_binary_node(profile, left, right, &preprocessing)?;
+    finish_prepared_witness(&preprocessing, main, relations)
+}
+
+/// Builds the binary branch before the outer Fiat-Shamir relation draw.
+pub(crate) fn prepare_binary_node(
+    profile: &FrozenProtocolProfile,
+    left: &RootProofWire,
+    right: &RootProofWire,
+    preprocessing: &UniversalPreprocessing,
+) -> Result<UniversalMainWitness, UniversalWitnessError> {
+    let component_log_sizes = recursion_component_log_sizes();
+    if profile.recursion_program().component_log_sizes() != &component_log_sizes {
+        return Err(stage(
+            "universal component capacities",
+            "profile and assembler log sizes differ",
+        ));
+    }
+    preprocessing.validate_capacities(&component_log_sizes)?;
+    let version = profile.manifest().manifest().version;
+    if left.version() != version || right.version() != version {
+        return Err(stage(
+            "binary child version",
+            "both children must use the active protocol version",
+        ));
+    }
+    let statement = SpanStatement::fold(left.statement(), right.statement())
+        .map_err(|error| stage("binary statement fold", error))?;
+    let left_words = canonical_statement_words(left.statement(), "left child statement")?;
+    let right_words = canonical_statement_words(right.statement(), "right child statement")?;
+    let parent_words = canonical_statement_words(&statement, "binary parent statement")?;
+    let zero_statement = [M31Word::ZERO; SPAN_STATEMENT_CANONICAL_WORDS];
+    let statement_circuit = build_statement_semantics_circuit(StatementSemanticsCircuitWitness {
+        segment_selector: false,
+        binary_selector: true,
+        empty_selector: false,
+        segment: &zero_statement,
+        left: &left_words,
+        right: &right_words,
+        parent: &parent_words,
+    });
+    ensure_zero_outputs(
+        "binary statement circuit",
+        statement_circuit.nonzero_output_count(),
+    )?;
+    let zero_claim = vec![M31Word::ZERO; profile.public_claim_shape().claim_word_count()];
+    let zero_claimed_sums = vec![SecureField::zero(); COMPONENT_COUNT];
+    let vm_public_logup_circuit = build_vm_public_logup_circuit(
+        profile.public_claim_shape(),
+        u32::try_from(COMPONENT_COUNT).map_err(|error| stage("VM component count", error))?,
+        VmPublicLogupWitness {
+            segment_selector: false,
+            claim_words: &zero_claim,
+            relation_challenges: VmPublicLogupChallengeWords::new(
+                [M31Word::ZERO; 8],
+                [M31Word::ZERO; 8],
+                [M31Word::ZERO; 8],
+            ),
+            claimed_sums: &zero_claimed_sums,
+        },
+    )
+    .map_err(|error| stage("inactive VM public-LogUp circuit", error))?;
+    let left_child = prepare_recursion_child(
+        profile,
+        preprocessing,
+        left,
+        LEFT_RECURSION_VERIFIER_ID,
+        LEFT_RECURSION_COMPOSITION_CIRCUIT_ID,
+        LEFT_STATEMENT_SCOPE,
+        "left recursion child",
+    )?;
+    let right_child = prepare_recursion_child(
+        profile,
+        preprocessing,
+        right,
+        RIGHT_RECURSION_VERIFIER_ID,
+        RIGHT_RECURSION_COMPOSITION_CIRCUIT_ID,
+        RIGHT_STATEMENT_SCOPE,
+        "right recursion child",
+    )?;
+    assemble_universal_components(
+        profile,
+        preprocessing,
+        component_log_sizes,
+        UniversalAssemblyBranch::Binary {
+            statement: Box::new(statement),
+            left,
+            right,
+            statement_circuit: Box::new(statement_circuit),
+            vm_public_logup_circuit: Box::new(vm_public_logup_circuit),
+            left_child: Box::new(left_child),
+            right_child: Box::new(right_child),
+        },
+    )
+}
+
+struct PreparedRecursionChild {
+    verifier_id: u32,
+    circuit_id: u32,
+    statement_scope: u32,
+    transcript: VerifierTranscriptExecution<RecordingTranscriptBackend>,
+    raw_queries: Vec<M31Word>,
+    fri_opening: FriMerkleOpeningSet,
+    composition_circuit: RecursionAirCompositionCircuit,
+    pcs_circuit: PcsDeepCircuit,
+    fri_circuit: FriVerifierCircuit,
+}
+
+impl PreparedRecursionChild {
+    fn composition_lane(&self) -> RecursionCompositionInputLane<'_> {
+        RecursionCompositionInputLane {
+            verifier_id: self.verifier_id,
+            circuit_id: self.circuit_id,
+            statement_scope: self.statement_scope,
+            circuit: &self.composition_circuit,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_recursion_child(
+    profile: &FrozenProtocolProfile,
+    preprocessing: &UniversalPreprocessing,
+    child: &RootProofWire,
+    verifier_id: u32,
+    circuit_id: u32,
+    statement_scope: u32,
+    stage_name: &'static str,
+) -> Result<PreparedRecursionChild, UniversalWitnessError> {
+    if child.statement().job().complete().protocol() != profile.manifest().protocol_id() {
+        return Err(stage(stage_name, "child statement protocol mismatch"));
+    }
+    child
+        .stark()
+        .validate_against_shape(&profile.manifest().manifest().recursion_proof_shape)
+        .map_err(|error| stage(stage_name, error))?;
+    let transcript = execute_fixed_transcript(
+        RecordingTranscriptBackend::default(),
+        profile.recursion_plan(),
+        profile.manifest().protocol_id(),
+        child.statement(),
+        VerifierPublicClaim::Recursion,
+        child.stark(),
+    )
+    .map_err(|error| stage(stage_name, error))?;
+    let relation_challenges = relation_challenge_words(&transcript, UNIVERSAL_RELATION_COUNT)?;
+    let composition_randomness = secure_draw_words(
+        &transcript,
+        VerifierStep::DrawCompositionRandomness,
+        "recursion composition randomness",
+    )?;
+    let oods_seed = secure_draw_words(
+        &transcript,
+        VerifierStep::DrawOodsPoint,
+        "recursion OODS point",
+    )?;
+    let deep_randomness = secure_draw_words(
+        &transcript,
+        VerifierStep::DrawDeepRandomness,
+        "recursion DEEP randomness",
+    )?;
+    let fri_alphas = fri_alpha_values(&transcript, preprocessing.fri_profiles[1].layer_count())?;
+    let raw_queries = raw_query_words(
+        &transcript,
+        preprocessing.query_position.recursion_query_count(),
+    )?;
+    let statement_words = canonical_statement_words(child.statement(), stage_name)?;
+    let sampled_values = child
+        .stark()
+        .sampled_values
+        .iter()
+        .copied()
+        .map(SecureField::from)
+        .collect::<Vec<_>>();
+    let claimed_sums = child
+        .stark()
+        .claimed_sums
+        .iter()
+        .copied()
+        .map(SecureField::from)
+        .collect::<Vec<_>>();
+    let composition_circuit = build_recursion_air_composition_circuit(
+        recursion_component_log_sizes(),
+        &recursion_preprocessed_column_ids(),
+        RecursionAirCompositionWitness {
+            parent_binary_selector: true,
+            child_kind: child.kind(),
+            statement_words: &statement_words,
+            sampled_values: &sampled_values,
+            claimed_sums: &claimed_sums,
+            relation_challenges: &relation_challenges,
+            composition_randomness,
+            oods_point: oods_seed,
+        },
+    )
+    .map_err(|error| stage(stage_name, error))?;
+    ensure_zero_outputs(
+        "recursion AIR-composition circuit",
+        composition_circuit.nonzero_output_count(),
+    )?;
+
+    let queried_values = child
+        .stark()
+        .queried_values
+        .iter()
+        .copied()
+        .map(|word| BaseField::from(word.as_u32()))
+        .collect::<Vec<_>>();
+    let mut fri_opening =
+        FriMerkleOpeningSet::from_wire(&raw_queries, &child.stark().fri_layers[..]);
+    let fri_routes = fri_routes(
+        &preprocessing.query_position,
+        verifier_id,
+        &raw_queries,
+        preprocessing.fri_profiles[1].layer_count(),
+    )?;
+    let deep_answers = native_deep_answers(
+        &preprocessing.pcs_profiles[1],
+        &sampled_values,
+        &queried_values,
+        oods_seed,
+        deep_randomness,
+        &raw_queries,
+    )?;
+    let mut authenticated_values = fri_opening
+        .layers
+        .iter()
+        .map(|layer| {
+            layer
+                .queries
+                .iter()
+                .flat_map(|query| query.values.iter().copied())
+                .map(SecureField::from)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    restore_authenticated_query_values(
+        &preprocessing.fri_profiles[1],
+        &deep_answers,
+        &mut authenticated_values,
+        &fri_alphas,
+        &raw_queries,
+    )
+    .map_err(|error| stage(stage_name, error))?;
+    for (layer, values) in fri_opening.layers.iter_mut().zip(&authenticated_values) {
+        for (slot, value) in layer
+            .queries
+            .iter_mut()
+            .flat_map(|query| query.values.iter_mut())
+            .zip(values)
+        {
+            *slot = (*value).into();
+        }
+    }
+    let pcs_circuit = build_pcs_deep_circuit(
+        &preprocessing.pcs_profiles[1],
+        PcsDeepWitness {
+            active: true,
+            sampled_values: &sampled_values,
+            queried_values: &queried_values,
+            oods_seed,
+            deep_randomness,
+            raw_queries: &raw_queries,
+            answers: &deep_answers,
+        },
+    )
+    .map_err(|error| stage(stage_name, error))?;
+    ensure_zero_outputs(
+        "recursion PCS DEEP circuit",
+        pcs_circuit.nonzero_output_count(),
+    )?;
+    let last_layer_positions =
+        last_layer_positions(&preprocessing.query_position, verifier_id, &raw_queries)?;
+    let last_layer_coefficients = child
+        .stark()
+        .last_layer_coefficients
+        .iter()
+        .copied()
+        .map(SecureField::from)
+        .collect::<Vec<_>>();
+    let fri_circuit = build_fri_verifier_circuit(
+        &preprocessing.fri_profiles[1],
+        FriVerifierWitness {
+            active: true,
+            deep_answers: &deep_answers,
+            authenticated_values: &authenticated_values,
+            fri_alphas: &fri_alphas,
+            raw_queries: &raw_queries,
+            fri_positions: &fri_routes.positions,
+            fri_offsets: &fri_routes.offsets,
+            last_layer_positions: &last_layer_positions,
+            last_layer_coefficients: &last_layer_coefficients,
+        },
+    )
+    .map_err(|error| stage(stage_name, error))?;
+    ensure_zero_outputs(
+        "recursion FRI verifier circuit",
+        fri_circuit.nonzero_output_count(),
+    )?;
+    Ok(PreparedRecursionChild {
+        verifier_id,
+        circuit_id,
+        statement_scope,
+        transcript,
+        raw_queries,
+        fri_opening,
+        composition_circuit,
+        pcs_circuit,
+        fri_circuit,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn validate_recursion_child_for_test(
+    profile: &FrozenProtocolProfile,
+    preprocessing: &UniversalPreprocessing,
+    child: &RootProofWire,
+) -> Result<(), UniversalWitnessError> {
+    // Mutation tests exercise the complete child-verifier circuit stack without
+    // materializing an unrelated parent trace after a child has already failed.
+    prepare_recursion_child(
+        profile,
+        preprocessing,
+        child,
+        LEFT_RECURSION_VERIFIER_ID,
+        LEFT_RECURSION_COMPOSITION_CIRCUIT_ID,
+        LEFT_STATEMENT_SCOPE,
+        "recursion child mutation",
+    )
+    .map(drop)
+}
+
+fn canonical_statement_words(
+    statement: &SpanStatement,
+    stage_name: &'static str,
+) -> Result<StatementWords, UniversalWitnessError> {
+    statement
+        .canonical_words()
+        .try_into()
+        .map_err(|words: Vec<M31Word>| {
+            stage(
+                stage_name,
+                format_args!(
+                    "got {} words, expected {SPAN_STATEMENT_CANONICAL_WORDS}",
+                    words.len()
+                ),
+            )
+        })
+}
+
+fn widen_merkle_path<const SOURCE_DEPTH: usize>(
+    path: &MerklePathWire<SOURCE_DEPTH>,
+) -> Result<MerklePathWire<RECURSION_MAX_MERKLE_DEPTH>, UniversalWitnessError> {
+    let mut siblings = [Digest8::ZERO; RECURSION_MAX_MERKLE_DEPTH];
+    siblings[..SOURCE_DEPTH].copy_from_slice(path.siblings());
+    MerklePathWire::new(path.active_depth(), siblings)
+        .map_err(|error| stage("trace-path width normalization", error))
+}
+
 /// Assembles the unique proof-free witness for one canonical padding slot.
 pub fn assemble_empty_leaf(
     profile: &FrozenProtocolProfile,
@@ -553,6 +932,15 @@ enum UniversalAssemblyBranch<'a> {
         pcs_circuit: Box<PcsDeepCircuit>,
         fri_circuit: Box<FriVerifierCircuit>,
     },
+    Binary {
+        statement: Box<SpanStatement>,
+        left: &'a RootProofWire,
+        right: &'a RootProofWire,
+        statement_circuit: Box<StatementSemanticsCircuit>,
+        vm_public_logup_circuit: Box<VmPublicLogupCircuit>,
+        left_child: Box<PreparedRecursionChild>,
+        right_child: Box<PreparedRecursionChild>,
+    },
     Empty {
         statement: &'a SpanStatement,
         statement_circuit: Box<StatementSemanticsCircuit>,
@@ -564,6 +952,7 @@ impl UniversalAssemblyBranch<'_> {
     const fn proof_kind(&self) -> ProofKind {
         match self {
             Self::Segment { .. } => ProofKind::SegmentLeaf,
+            Self::Binary { .. } => ProofKind::BinaryNode,
             Self::Empty { .. } => ProofKind::EmptyLeaf,
         }
     }
@@ -571,6 +960,7 @@ impl UniversalAssemblyBranch<'_> {
     const fn statement(&self) -> &SpanStatement {
         match self {
             Self::Segment { leaf, .. } => leaf.statement(),
+            Self::Binary { statement, .. } => statement,
             Self::Empty { statement, .. } => statement,
         }
     }
@@ -578,6 +968,9 @@ impl UniversalAssemblyBranch<'_> {
     fn statement_circuit(&self) -> &StatementSemanticsCircuit {
         match self {
             Self::Segment {
+                statement_circuit, ..
+            }
+            | Self::Binary {
                 statement_circuit, ..
             }
             | Self::Empty {
@@ -875,6 +1268,91 @@ fn push_pow_checks(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn lower_all_fixed_circuits(
+    traces: &mut CircuitTraces,
+    proof_kind: ProofKind,
+    statement: &StatementSemanticsCircuit,
+    vm_claim: &VmPublicClaimSemanticsCircuit,
+    vm_public_logup: &VmPublicLogupCircuit,
+    vm_composition: &VmAirCompositionCircuit,
+    recursion_composition: [RecursionCompositionInputLane<'_>; 2],
+    pcs: [PcsDeepCircuitLane<'_>; 3],
+    fri: [FriVerifierCircuitLane<'_>; 3],
+    stage_name: &'static str,
+) -> Result<(), UniversalWitnessError> {
+    crate::statement_semantics_lowering::lower_statement_semantics_circuit(
+        traces,
+        STATEMENT_CIRCUIT_ID,
+        statement,
+        statement,
+    )
+    .map_err(|error| stage(stage_name, error))?;
+    if proof_kind == ProofKind::SegmentLeaf {
+        crate::vm_public_claim_semantics_lowering::lower_vm_public_claim_semantics_circuit(
+            traces,
+            VM_CLAIM_CIRCUIT_ID,
+            vm_claim,
+            vm_claim,
+        )
+        .map_err(|error| stage(stage_name, error))?;
+        crate::vm_public_logup_lowering::lower_vm_public_logup_circuit(
+            traces,
+            VM_PUBLIC_LOGUP_CIRCUIT_ID,
+            vm_public_logup,
+            vm_public_logup,
+        )
+        .map_err(|error| stage(stage_name, error))?;
+        crate::vm_air_composition_lowering::lower_vm_air_composition_circuit(
+            traces,
+            VM_COMPOSITION_CIRCUIT_ID,
+            vm_composition,
+            vm_composition,
+        )
+        .map_err(|error| stage(stage_name, error))?;
+    }
+    if proof_kind == ProofKind::BinaryNode {
+        for lane in recursion_composition {
+            crate::recursion_air_composition_lowering::lower_recursion_air_composition_circuit(
+                traces,
+                lane.circuit_id,
+                lane.circuit,
+                lane.circuit,
+            )
+            .map_err(|error| stage(stage_name, error))?;
+        }
+    }
+    let active_pcs = match proof_kind {
+        ProofKind::SegmentLeaf => &pcs[..1],
+        ProofKind::BinaryNode => &pcs[1..],
+        ProofKind::EmptyLeaf => &pcs[..0],
+    };
+    for lane in active_pcs {
+        crate::pcs_deep_lowering::lower_pcs_deep_circuit(
+            traces,
+            lane.circuit_id,
+            lane.circuit,
+            lane.circuit,
+        )
+        .map_err(|error| stage(stage_name, error))?;
+    }
+    let active_fri = match proof_kind {
+        ProofKind::SegmentLeaf => &fri[..1],
+        ProofKind::BinaryNode => &fri[1..],
+        ProofKind::EmptyLeaf => &fri[..0],
+    };
+    for lane in active_fri {
+        crate::fri_verifier_lowering::lower_fri_verifier_circuit(
+            traces,
+            lane.circuit_id,
+            lane.circuit,
+            lane.circuit,
+        )
+        .map_err(|error| stage(stage_name, error))?;
+    }
+    Ok(())
+}
+
 fn table_trace(
     trace: Option<UniversalTrace>,
     name: &'static str,
@@ -985,68 +1463,23 @@ pub(crate) fn universal_public_relation_sum(
     proof_kind: ProofKind,
     relations: &UniversalRelations,
 ) -> Result<SecureField, UniversalWitnessError> {
-    let mut sum =
+    let sum =
         crate::statement_input_air::public_statement_terms(statement, &relations.statement_input)
             .map_err(|error| stage("public statement terms", error))?;
-    sum += crate::statement_semantics_lowering::public_statement_semantics_terms(
-        STATEMENT_CIRCUIT_ID,
-        &preprocessing.statement_reference,
-        &relations.recursion,
-    )
-    .map_err(|error| stage("public statement-circuit terms", error))?;
-    if proof_kind == ProofKind::SegmentLeaf {
-        sum += crate::control_air::public_terminal_control_terms(
-            preprocessing.transcript_calls.vm_plan(),
-            SEGMENT_VERIFIER_ID,
-            &relations.control,
-        );
-        sum += crate::vm_public_claim_semantics_lowering::public_vm_public_claim_semantics_terms(
-            VM_CLAIM_CIRCUIT_ID,
-            &preprocessing.vm_claim_reference,
-            &relations.recursion,
-        )
-        .map_err(|error| stage("public VM claim-circuit terms", error))?;
-        sum += crate::vm_public_logup_lowering::public_vm_public_logup_terms(
-            VM_PUBLIC_LOGUP_CIRCUIT_ID,
-            &preprocessing.vm_public_logup_reference,
-            &relations.recursion,
-        )
-        .map_err(|error| stage("public VM LogUp-circuit terms", error))?;
-        sum += crate::vm_air_composition_lowering::public_vm_air_composition_terms(
-            VM_COMPOSITION_CIRCUIT_ID,
-            &preprocessing.vm_composition_reference,
-            &relations.recursion,
-        )
-        .map_err(|error| stage("public VM composition-circuit terms", error))?;
-        sum += crate::pcs_deep_lowering::public_pcs_deep_terms(
-            PCS_CIRCUIT_IDS[0],
-            &preprocessing.pcs_references.segment,
-            &relations.recursion,
-        )
-        .map_err(|error| stage("public PCS circuit terms", error))?;
-        sum += crate::fri_verifier_lowering::public_fri_verifier_terms(
-            FRI_CIRCUIT_IDS[0],
-            &preprocessing.fri_references.segment,
-            &relations.recursion,
-        )
-        .map_err(|error| stage("public FRI circuit terms", error))?;
-    }
+    let _ = (preprocessing, proof_kind);
     Ok(sum)
 }
 
-fn finalize_universal_witness(
-    main: UniversalMainWitness,
+fn generate_universal_interactions(
+    main: &UniversalMainWitness,
     relations: &UniversalRelations,
-    public_relation_sum: SecureField,
-) -> Result<UniversalWitness, UniversalWitnessError> {
-    let UniversalMainWitness {
-        proof_kind,
-        statement: _,
-        preprocessed_components,
-        original_components,
-        component_log_sizes,
-        expected_column_log_sizes,
-    } = main;
+) -> (
+    [UniversalTrace; UNIVERSAL_COMPONENT_COUNT],
+    [SecureField; UNIVERSAL_COMPONENT_COUNT],
+) {
+    let proof_kind = main.proof_kind;
+    let preprocessed_components = &main.preprocessed_components;
+    let original_components = &main.original_components;
     let mut interaction_components: [UniversalTrace; UNIVERSAL_COMPONENT_COUNT] =
         core::array::from_fn(|_| Vec::new());
     let mut claimed_sums = [SecureField::zero(); UNIVERSAL_COMPONENT_COUNT];
@@ -1195,6 +1628,7 @@ fn finalize_universal_witness(
             &relations.relation_challenge,
             &relations.verifier_input,
             &relations.verifier_randomness,
+            &relations.statement_input,
             &relations.recursion,
         );
     (interaction_components[19], claimed_sums[19]) =
@@ -1297,12 +1731,24 @@ fn finalize_universal_witness(
             &relations.fri_verifier_route,
             &relations.recursion,
         );
-    (interaction_components[30], claimed_sums[30]) =
-        qm31_mul::gen_interaction_trace(&original_components[30], &relations.recursion);
-    (interaction_components[31], claimed_sums[31]) =
-        qm31_inv::gen_interaction_trace(&original_components[31], &relations.recursion);
-    (interaction_components[32], claimed_sums[32]) =
-        linear_ops::gen_interaction_trace(&original_components[32], &relations.recursion);
+    (interaction_components[30], claimed_sums[30]) = qm31_mul::gen_interaction_trace(
+        &original_components[30],
+        &preprocessed_components[30],
+        proof_kind,
+        &relations.recursion,
+    );
+    (interaction_components[31], claimed_sums[31]) = qm31_inv::gen_interaction_trace(
+        &original_components[31],
+        &preprocessed_components[31],
+        proof_kind,
+        &relations.recursion,
+    );
+    (interaction_components[32], claimed_sums[32]) = linear_ops::gen_interaction_trace(
+        &original_components[32],
+        &preprocessed_components[32],
+        proof_kind,
+        &relations.recursion,
+    );
     (interaction_components[33], claimed_sums[33]) = merkle_path::gen_interaction_trace(
         &original_components[33],
         &relations.vm,
@@ -1318,6 +1764,34 @@ fn finalize_universal_witness(
             &original_components[35],
             &relations.vm,
         );
+
+    (interaction_components, claimed_sums)
+}
+
+fn finalize_universal_witness(
+    main: UniversalMainWitness,
+    relations: &UniversalRelations,
+    public_relation_sum: SecureField,
+) -> Result<UniversalWitness, UniversalWitnessError> {
+    let (interaction_components, claimed_sums) = generate_universal_interactions(&main, relations);
+    let global_relation_sum =
+        claimed_sums.iter().copied().sum::<SecureField>() + public_relation_sum;
+    if !global_relation_sum.is_zero() {
+        return Err(stage(
+            "universal relation closure",
+            format_args!(
+                "global LogUp sum is nonzero: {global_relation_sum:?}; public={public_relation_sum:?}; components={claimed_sums:?}"
+            ),
+        ));
+    }
+    let UniversalMainWitness {
+        proof_kind,
+        statement: _,
+        preprocessed_components,
+        original_components,
+        component_log_sizes,
+        expected_column_log_sizes,
+    } = main;
 
     for (component, trace) in interaction_components.iter().enumerate() {
         ensure_trace_log_size(
@@ -1360,13 +1834,6 @@ fn finalize_universal_witness(
         component_log_sizes,
         preprocessing_ids,
     };
-    let global_relation_sum = witness.global_relation_sum();
-    if !global_relation_sum.is_zero() {
-        return Err(stage(
-            "universal relation closure",
-            format_args!("global LogUp sum is nonzero: {global_relation_sum:?}"),
-        ));
-    }
     Ok(witness)
 }
 
@@ -1383,22 +1850,50 @@ fn assemble_universal_components(
         UniversalAssemblyBranch::Segment { transcript, .. } => {
             UniversalTranscriptWitness::Segment(transcript)
         }
+        UniversalAssemblyBranch::Binary {
+            left_child,
+            right_child,
+            ..
+        } => UniversalTranscriptWitness::Binary {
+            left: &left_child.transcript,
+            right: &right_child.transcript,
+        },
         UniversalAssemblyBranch::Empty { .. } => UniversalTranscriptWitness::Empty,
     };
-    let transcript_trace = match &branch {
-        UniversalAssemblyBranch::Segment { transcript, .. } => Some(transcript.backend().trace()),
-        UniversalAssemblyBranch::Empty { .. } => None,
+    let transcript_lanes = match &branch {
+        UniversalAssemblyBranch::Segment { transcript, .. } => vec![(
+            SEGMENT_VERIFIER_ID,
+            profile.vm_plan(),
+            transcript.backend().trace(),
+        )],
+        UniversalAssemblyBranch::Binary {
+            left_child,
+            right_child,
+            ..
+        } => vec![
+            (
+                LEFT_RECURSION_VERIFIER_ID,
+                profile.recursion_plan(),
+                left_child.transcript.backend().trace(),
+            ),
+            (
+                RIGHT_RECURSION_VERIFIER_ID,
+                profile.recursion_plan(),
+                right_child.transcript.backend().trace(),
+            ),
+        ],
+        UniversalAssemblyBranch::Empty { .. } => Vec::new(),
     };
     let mut poseidon2 = Poseidon2Table::new();
     let mut original_components: [UniversalTrace; UNIVERSAL_COMPONENT_COUNT] =
         core::array::from_fn(|_| Vec::new());
 
     let mut transcript_table = crate::transcript_air::TranscriptHashCallTable::new();
-    if let Some(transcript_trace) = transcript_trace {
+    for (verifier_id, _, transcript_trace) in &transcript_lanes {
         crate::transcript_air::push_transcript_calls(
             &mut transcript_table,
             &mut poseidon2,
-            SEGMENT_VERIFIER_ID,
+            *verifier_id,
             transcript_trace,
         )
         .map_err(|error| stage("transcript hash calls", error))?;
@@ -1435,20 +1930,10 @@ fn assemble_universal_components(
 
     let mut pow_table = crate::pow::PowCheckTable::new();
     let mut pow_frame_table = crate::pow::PowFrameTable::new();
-    if let Some(transcript_trace) = transcript_trace {
-        push_pow_checks(
-            &mut pow_table,
-            SEGMENT_VERIFIER_ID,
-            profile.vm_plan(),
-            transcript_trace,
-        )?;
-        crate::pow::push_pow_frames(
-            &mut pow_frame_table,
-            SEGMENT_VERIFIER_ID,
-            profile.vm_plan(),
-            transcript_trace,
-        )
-        .map_err(|error| stage("PoW frames", error))?;
+    for (verifier_id, plan, transcript_trace) in &transcript_lanes {
+        push_pow_checks(&mut pow_table, *verifier_id, plan, transcript_trace)?;
+        crate::pow::push_pow_frames(&mut pow_frame_table, *verifier_id, plan, transcript_trace)
+            .map_err(|error| stage("PoW frames", error))?;
     }
 
     let mut challenge_table = crate::relation_challenge_air::RelationChallengeTable::new();
@@ -1474,6 +1959,10 @@ fn assemble_universal_components(
             UniversalAssemblyBranch::Segment { leaf, .. } => {
                 StatementInputWitness::Segment(leaf.statement())
             }
+            UniversalAssemblyBranch::Binary { left, right, .. } => StatementInputWitness::Binary {
+                left: left.statement(),
+                right: right.statement(),
+            },
             UniversalAssemblyBranch::Empty { .. } => StatementInputWitness::Empty,
         },
     )
@@ -1491,7 +1980,9 @@ fn assemble_universal_components(
     let zero_claim = vec![M31Word::ZERO; profile.public_claim_shape().claim_word_count()];
     let claim_words: &[M31Word] = match &branch {
         UniversalAssemblyBranch::Segment { leaf, .. } => &leaf.public_claim_words()[..],
-        UniversalAssemblyBranch::Empty { .. } => &zero_claim,
+        UniversalAssemblyBranch::Binary { .. } | UniversalAssemblyBranch::Empty { .. } => {
+            &zero_claim
+        }
     };
     let mut claim_table = crate::vm_public_claim_input_air::VmPublicClaimInputTable::new();
     crate::vm_public_claim_input_air::push_vm_public_claim_word_inputs(
@@ -1529,7 +2020,9 @@ fn assemble_universal_components(
             UniversalAssemblyBranch::Segment {
                 vm_claim_circuit, ..
             } => vm_claim_circuit,
-            UniversalAssemblyBranch::Empty { .. } => &preprocessing.vm_claim_reference,
+            UniversalAssemblyBranch::Binary { .. } | UniversalAssemblyBranch::Empty { .. } => {
+                &preprocessing.vm_claim_reference
+            }
         },
         proof_kind,
     )
@@ -1544,6 +2037,10 @@ fn assemble_universal_components(
                 vm_public_logup_circuit,
                 ..
             } => vm_public_logup_circuit,
+            UniversalAssemblyBranch::Binary {
+                vm_public_logup_circuit,
+                ..
+            } => vm_public_logup_circuit,
             UniversalAssemblyBranch::Empty {
                 vm_public_logup_circuit,
                 ..
@@ -1554,7 +2051,21 @@ fn assemble_universal_components(
     .map_err(|error| stage("VM public-LogUp inputs", error))?;
     let mut composition_table =
         crate::vm_air_composition_input_air::VmAirCompositionInputTable::new();
-    crate::vm_air_composition_input_air::push_vm_air_composition_inputs(
+    let recursion_references = preprocessing.recursion_composition_references.lanes();
+    let recursion_witnesses = match &branch {
+        UniversalAssemblyBranch::Binary {
+            left_child,
+            right_child,
+            ..
+        } => [
+            left_child.composition_lane(),
+            right_child.composition_lane(),
+        ],
+        UniversalAssemblyBranch::Segment { .. } | UniversalAssemblyBranch::Empty { .. } => {
+            recursion_references
+        }
+    };
+    crate::vm_air_composition_input_air::push_air_composition_inputs(
         &mut composition_table,
         &preprocessing.vm_composition_input,
         &preprocessing.vm_composition_reference,
@@ -1563,8 +2074,12 @@ fn assemble_universal_components(
                 vm_composition_circuit,
                 ..
             } => vm_composition_circuit,
-            UniversalAssemblyBranch::Empty { .. } => &preprocessing.vm_composition_reference,
+            UniversalAssemblyBranch::Binary { .. } | UniversalAssemblyBranch::Empty { .. } => {
+                &preprocessing.vm_composition_reference
+            }
         },
+        &recursion_references,
+        &recursion_witnesses,
         proof_kind,
     )
     .map_err(|error| stage("VM AIR-composition inputs", error))?;
@@ -1579,18 +2094,47 @@ fn assemble_universal_components(
             UniversalAssemblyBranch::Segment { raw_queries, .. } => {
                 UniversalRawQueryWitness::Segment(raw_queries)
             }
+            UniversalAssemblyBranch::Binary {
+                left_child,
+                right_child,
+                ..
+            } => UniversalRawQueryWitness::Binary {
+                left: &left_child.raw_queries,
+                right: &right_child.raw_queries,
+            },
             UniversalAssemblyBranch::Empty { .. } => UniversalRawQueryWitness::Empty,
         },
     )
     .map_err(|error| stage("query positions", error))?;
 
-    let fri_commitments = match &branch {
-        UniversalAssemblyBranch::Segment { fri_opening, .. } => fri_opening
-            .layers
-            .iter()
-            .map(|layer| layer.commitment)
-            .collect::<Vec<_>>(),
-        UniversalAssemblyBranch::Empty { .. } => Vec::new(),
+    let (left_fri_commitments, right_fri_commitments) = match &branch {
+        UniversalAssemblyBranch::Segment { fri_opening, .. } => (
+            fri_opening
+                .layers
+                .iter()
+                .map(|layer| layer.commitment)
+                .collect::<Vec<_>>(),
+            Vec::new(),
+        ),
+        UniversalAssemblyBranch::Binary {
+            left_child,
+            right_child,
+            ..
+        } => (
+            left_child
+                .fri_opening
+                .layers
+                .iter()
+                .map(|layer| layer.commitment)
+                .collect(),
+            right_child
+                .fri_opening
+                .layers
+                .iter()
+                .map(|layer| layer.commitment)
+                .collect(),
+        ),
+        UniversalAssemblyBranch::Empty { .. } => (Vec::new(), Vec::new()),
     };
     let mut merkle_root_table = crate::merkle_root_air::MerkleRootTable::new();
     crate::merkle_root_air::push_merkle_roots(
@@ -1601,9 +2145,21 @@ fn assemble_universal_components(
                 crate::merkle_root_air::UniversalMerkleRootWitness::Segment(
                     crate::merkle_root_air::MerkleRootSet {
                         trace: &leaf.proof().commitments,
-                        fri: &fri_commitments,
+                        fri: &left_fri_commitments,
                     },
                 )
+            }
+            UniversalAssemblyBranch::Binary { left, right, .. } => {
+                crate::merkle_root_air::UniversalMerkleRootWitness::Binary {
+                    left: crate::merkle_root_air::MerkleRootSet {
+                        trace: &left.stark().commitments,
+                        fri: &left_fri_commitments,
+                    },
+                    right: crate::merkle_root_air::MerkleRootSet {
+                        trace: &right.stark().commitments,
+                        fri: &right_fri_commitments,
+                    },
+                }
             }
             UniversalAssemblyBranch::Empty { .. } => {
                 crate::merkle_root_air::UniversalMerkleRootWitness::Empty
@@ -1625,10 +2181,37 @@ fn assemble_universal_components(
                 queried_values: &leaf.proof().queried_values[..],
                 raw_queries,
             }),
+            UniversalAssemblyBranch::Binary {
+                left,
+                right,
+                left_child,
+                right_child,
+                ..
+            } => UniversalTraceOpeningWitness::Binary {
+                left: TraceOpeningSet {
+                    queried_values: &left.stark().queried_values[..],
+                    raw_queries: &left_child.raw_queries,
+                },
+                right: TraceOpeningSet {
+                    queried_values: &right.stark().queried_values[..],
+                    raw_queries: &right_child.raw_queries,
+                },
+            },
             UniversalAssemblyBranch::Empty { .. } => UniversalTraceOpeningWitness::Empty,
         },
     )
     .map_err(|error| stage("trace Merkle leaves", error))?;
+    let segment_trace_paths = match &branch {
+        UniversalAssemblyBranch::Segment { leaf, .. } => leaf
+            .proof()
+            .trace_paths
+            .iter()
+            .map(widen_merkle_path)
+            .collect::<Result<Vec<_>, _>>()?,
+        UniversalAssemblyBranch::Binary { .. } | UniversalAssemblyBranch::Empty { .. } => {
+            Vec::new()
+        }
+    };
     let mut merkle_path_table = merkle_path::MerklePathTable::new();
     crate::trace_merkle_air::push_trace_merkle_paths(
         &mut merkle_path_table,
@@ -1638,8 +2221,20 @@ fn assemble_universal_components(
             UniversalAssemblyBranch::Segment { leaf, .. } => {
                 UniversalTracePathWitness::Segment(TracePathSet {
                     roots: &leaf.proof().commitments,
-                    paths: &leaf.proof().trace_paths[..],
+                    paths: &segment_trace_paths,
                 })
+            }
+            UniversalAssemblyBranch::Binary { left, right, .. } => {
+                UniversalTracePathWitness::Binary {
+                    left: TracePathSet {
+                        roots: &left.stark().commitments,
+                        paths: &left.stark().trace_paths[..],
+                    },
+                    right: TracePathSet {
+                        roots: &right.stark().commitments,
+                        paths: &right.stark().trace_paths[..],
+                    },
+                }
             }
             UniversalAssemblyBranch::Empty { .. } => UniversalTracePathWitness::Empty,
         },
@@ -1656,6 +2251,23 @@ fn assemble_universal_components(
             },
             pcs_references[1],
             pcs_references[2],
+        ],
+        UniversalAssemblyBranch::Binary {
+            left_child,
+            right_child,
+            ..
+        } => [
+            pcs_references[0],
+            PcsDeepCircuitLane {
+                verifier_id: LEFT_RECURSION_VERIFIER_ID,
+                circuit_id: PCS_CIRCUIT_IDS[1],
+                circuit: &left_child.pcs_circuit,
+            },
+            PcsDeepCircuitLane {
+                verifier_id: RIGHT_RECURSION_VERIFIER_ID,
+                circuit_id: PCS_CIRCUIT_IDS[2],
+                circuit: &right_child.pcs_circuit,
+            },
         ],
         UniversalAssemblyBranch::Empty { .. } => pcs_references,
     };
@@ -1684,6 +2296,14 @@ fn assemble_universal_components(
             UniversalAssemblyBranch::Segment { fri_opening, .. } => {
                 UniversalFriMerkleWitness::Segment(fri_opening)
             }
+            UniversalAssemblyBranch::Binary {
+                left_child,
+                right_child,
+                ..
+            } => UniversalFriMerkleWitness::Binary {
+                left: &left_child.fri_opening,
+                right: &right_child.fri_opening,
+            },
             UniversalAssemblyBranch::Empty { .. } => UniversalFriMerkleWitness::Empty,
         },
     )
@@ -1692,23 +2312,33 @@ fn assemble_universal_components(
     let inactive_vm_queries = vec![M31Word::ZERO; preprocessing.query_position.vm_query_count()];
     let inactive_recursion_queries =
         vec![M31Word::ZERO; preprocessing.query_position.recursion_query_count()];
-    let query_lanes = [
-        FriVerifierQueryLane {
-            verifier_id: SEGMENT_VERIFIER_ID,
-            raw_queries: match &branch {
-                UniversalAssemblyBranch::Segment { raw_queries, .. } => raw_queries,
-                UniversalAssemblyBranch::Empty { .. } => &inactive_vm_queries,
+    let query_lanes =
+        [
+            FriVerifierQueryLane {
+                verifier_id: SEGMENT_VERIFIER_ID,
+                raw_queries: match &branch {
+                    UniversalAssemblyBranch::Segment { raw_queries, .. } => raw_queries,
+                    UniversalAssemblyBranch::Binary { .. }
+                    | UniversalAssemblyBranch::Empty { .. } => &inactive_vm_queries,
+                },
             },
-        },
-        FriVerifierQueryLane {
-            verifier_id: LEFT_RECURSION_VERIFIER_ID,
-            raw_queries: &inactive_recursion_queries,
-        },
-        FriVerifierQueryLane {
-            verifier_id: RIGHT_RECURSION_VERIFIER_ID,
-            raw_queries: &inactive_recursion_queries,
-        },
-    ];
+            FriVerifierQueryLane {
+                verifier_id: LEFT_RECURSION_VERIFIER_ID,
+                raw_queries: match &branch {
+                    UniversalAssemblyBranch::Binary { left_child, .. } => &left_child.raw_queries,
+                    UniversalAssemblyBranch::Segment { .. }
+                    | UniversalAssemblyBranch::Empty { .. } => &inactive_recursion_queries,
+                },
+            },
+            FriVerifierQueryLane {
+                verifier_id: RIGHT_RECURSION_VERIFIER_ID,
+                raw_queries: match &branch {
+                    UniversalAssemblyBranch::Binary { right_child, .. } => &right_child.raw_queries,
+                    UniversalAssemblyBranch::Segment { .. }
+                    | UniversalAssemblyBranch::Empty { .. } => &inactive_recursion_queries,
+                },
+            },
+        ];
     let mut fri_control_table = crate::fri_verifier_control_air::FriVerifierControlTable::new();
     crate::fri_verifier_control_air::push_fri_verifier_control(
         &mut fri_control_table,
@@ -1728,6 +2358,23 @@ fn assemble_universal_components(
             },
             fri_references[1],
             fri_references[2],
+        ],
+        UniversalAssemblyBranch::Binary {
+            left_child,
+            right_child,
+            ..
+        } => [
+            fri_references[0],
+            FriVerifierCircuitLane {
+                verifier_id: LEFT_RECURSION_VERIFIER_ID,
+                circuit_id: FRI_CIRCUIT_IDS[1],
+                circuit: &left_child.fri_circuit,
+            },
+            FriVerifierCircuitLane {
+                verifier_id: RIGHT_RECURSION_VERIFIER_ID,
+                circuit_id: FRI_CIRCUIT_IDS[2],
+                circuit: &right_child.fri_circuit,
+            },
         ],
         UniversalAssemblyBranch::Empty { .. } => fri_references,
     };
@@ -1753,8 +2400,6 @@ fn assemble_universal_components(
         vm_claim_circuit,
         vm_public_logup_circuit,
         vm_composition_circuit,
-        pcs_circuit,
-        fri_circuit,
         ..
     } = &branch
     {
@@ -1779,18 +2424,60 @@ fn assemble_universal_components(
             vm_composition_circuit,
         )
         .map_err(|error| stage("VM AIR-composition circuit lowering", error))?;
+    }
+    if let UniversalAssemblyBranch::Binary {
+        left_child,
+        right_child,
+        ..
+    } = &branch
+    {
+        for (reference, witness) in preprocessing
+            .recursion_composition_references
+            .lanes()
+            .into_iter()
+            .zip([
+                left_child.composition_lane(),
+                right_child.composition_lane(),
+            ])
+        {
+            crate::recursion_air_composition_lowering::lower_recursion_air_composition_circuit(
+                &mut circuit_traces,
+                reference.circuit_id,
+                reference.circuit,
+                witness.circuit,
+            )
+            .map_err(|error| stage("recursion AIR-composition circuit lowering", error))?;
+        }
+    }
+    let active_pcs = match proof_kind {
+        ProofKind::SegmentLeaf => 0..1,
+        ProofKind::BinaryNode => 1..3,
+        ProofKind::EmptyLeaf => 0..0,
+    };
+    for lane in active_pcs {
+        let reference = pcs_references[lane];
+        let witness = pcs_witnesses[lane];
         crate::pcs_deep_lowering::lower_pcs_deep_circuit(
             &mut circuit_traces,
-            PCS_CIRCUIT_IDS[0],
-            &preprocessing.pcs_references.segment,
-            pcs_circuit,
+            reference.circuit_id,
+            reference.circuit,
+            witness.circuit,
         )
         .map_err(|error| stage("PCS DEEP circuit lowering", error))?;
+    }
+    let active_fri = match proof_kind {
+        ProofKind::SegmentLeaf => 0..1,
+        ProofKind::BinaryNode => 1..3,
+        ProofKind::EmptyLeaf => 0..0,
+    };
+    for lane in active_fri {
+        let reference = fri_references[lane];
+        let witness = fri_witnesses[lane];
         crate::fri_verifier_lowering::lower_fri_verifier_circuit(
             &mut circuit_traces,
-            FRI_CIRCUIT_IDS[0],
-            &preprocessing.fri_references.segment,
-            fri_circuit,
+            reference.circuit_id,
+            reference.circuit,
+            witness.circuit,
         )
         .map_err(|error| stage("FRI verifier circuit lowering", error))?;
     }
@@ -1966,6 +2653,8 @@ const STATEMENT_CIRCUIT_ID: u32 = 1;
 const VM_CLAIM_CIRCUIT_ID: u32 = 2;
 const VM_PUBLIC_LOGUP_CIRCUIT_ID: u32 = 3;
 const VM_COMPOSITION_CIRCUIT_ID: u32 = 4;
+const LEFT_RECURSION_COMPOSITION_CIRCUIT_ID: u32 = 5;
+const RIGHT_RECURSION_COMPOSITION_CIRCUIT_ID: u32 = 6;
 const PCS_CIRCUIT_IDS: [u32; 3] = [10, 11, 12];
 const FRI_CIRCUIT_IDS: [u32; 3] = [20, 21, 22];
 
@@ -1973,6 +2662,30 @@ struct PcsCircuitSet {
     segment: PcsDeepCircuit,
     left: PcsDeepCircuit,
     right: PcsDeepCircuit,
+}
+
+struct RecursionCompositionCircuitSet {
+    left: RecursionAirCompositionCircuit,
+    right: RecursionAirCompositionCircuit,
+}
+
+impl RecursionCompositionCircuitSet {
+    fn lanes(&self) -> [RecursionCompositionInputLane<'_>; 2] {
+        [
+            RecursionCompositionInputLane {
+                verifier_id: LEFT_RECURSION_VERIFIER_ID,
+                circuit_id: LEFT_RECURSION_COMPOSITION_CIRCUIT_ID,
+                statement_scope: LEFT_STATEMENT_SCOPE,
+                circuit: &self.left,
+            },
+            RecursionCompositionInputLane {
+                verifier_id: RIGHT_RECURSION_VERIFIER_ID,
+                circuit_id: RIGHT_RECURSION_COMPOSITION_CIRCUIT_ID,
+                statement_scope: RIGHT_STATEMENT_SCOPE,
+                circuit: &self.right,
+            },
+        ]
+    }
 }
 
 impl PcsCircuitSet {
@@ -2046,6 +2759,7 @@ pub(crate) struct UniversalPreprocessing {
     vm_public_logup_input: VmPublicLogupInputPreprocessed,
     vm_public_logup_control: VmPublicLogupControlPreprocessed,
     vm_composition_reference: VmAirCompositionCircuit,
+    recursion_composition_references: RecursionCompositionCircuitSet,
     vm_composition_input: VmAirCompositionInputPreprocessed,
     vm_composition_control: VmAirCompositionControlPreprocessed,
     query_position: QueryPositionPreprocessed,
@@ -2059,6 +2773,9 @@ pub(crate) struct UniversalPreprocessing {
     fri_references: FriCircuitSet,
     fri_control: FriVerifierControlPreprocessed,
     fri_input: FriVerifierInputPreprocessed,
+    qm31_mul_schedule: crate::qm31_mul::Qm31MulPreprocessed,
+    qm31_inv_schedule: crate::qm31_inv::Qm31InvPreprocessed,
+    linear_ops_schedule: crate::linear_ops::LinearOpsPreprocessed,
 }
 
 impl UniversalPreprocessing {
@@ -2137,20 +2854,40 @@ impl UniversalPreprocessing {
         let vm_public_logup_control = VmPublicLogupControlPreprocessed::new(
             vm_plan,
             vm_public_logup_reference.public_term_count(),
+            recursion_plan,
+            0,
         )
-        .map_err(|error| stage("VM public-LogUp control preprocessing", error))?;
+        .map_err(|error| stage("universal public-LogUp control preprocessing", error))?;
 
         let vm_composition_reference =
             build_vm_air_composition_reference(crate::profile::vm_component_log_sizes())
                 .map_err(|error| stage("VM composition reference", error))?;
-        let vm_composition_input = VmAirCompositionInputPreprocessed::new(
-            &vm_composition_reference,
-            VM_COMPOSITION_CIRCUIT_ID,
+        let recursion_composition_references = RecursionCompositionCircuitSet {
+            left: build_recursion_air_composition_reference(
+                recursion_component_log_sizes(),
+                &recursion_preprocessed_column_ids(),
+            )
+            .map_err(|error| stage("left recursion composition reference", error))?,
+            right: build_recursion_air_composition_reference(
+                recursion_component_log_sizes(),
+                &recursion_preprocessed_column_ids(),
+            )
+            .map_err(|error| stage("right recursion composition reference", error))?,
+        };
+        let recursion_air_instruction_count =
+            u32::try_from(profile.recursion_program().air_instruction_count())
+                .map_err(|error| stage("recursion AIR instruction count", error))?;
+        let vm_composition_control = VmAirCompositionControlPreprocessed::new(
+            vm_plan,
+            vm_composition_reference.profile(),
+            recursion_plan,
+            recursion_air_instruction_count,
+            raw_manifest
+                .recursion_proof_shape
+                .sampled_value_count
+                .as_u32(),
         )
-        .map_err(|error| stage("VM composition input preprocessing", error))?;
-        let vm_composition_control =
-            VmAirCompositionControlPreprocessed::new(vm_plan, vm_composition_reference.profile())
-                .map_err(|error| stage("VM composition control preprocessing", error))?;
+        .map_err(|error| stage("universal composition control preprocessing", error))?;
 
         let query_position = QueryPositionPreprocessed::new(
             manifest.vm_pcs(),
@@ -2234,6 +2971,121 @@ impl UniversalPreprocessing {
         let fri_input = FriVerifierInputPreprocessed::new(fri_references.lanes())
             .map_err(|error| stage("FRI input preprocessing", error))?;
 
+        let vm_composition_input =
+            VmAirCompositionInputPreprocessed::new_with_anchors_and_recursion_inputs(
+                &vm_composition_reference,
+                VM_COMPOSITION_CIRCUIT_ID,
+                &recursion_composition_references.lanes(),
+                &[
+                    CircuitAnchorLane {
+                        circuit_id: STATEMENT_CIRCUIT_ID,
+                        circuit: statement_reference.circuit(),
+                        active_in: CircuitAnchorMode::ALL,
+                    },
+                    CircuitAnchorLane {
+                        circuit_id: VM_CLAIM_CIRCUIT_ID,
+                        circuit: vm_claim_reference.circuit(),
+                        active_in: CircuitAnchorMode::SEGMENT,
+                    },
+                    CircuitAnchorLane {
+                        circuit_id: VM_PUBLIC_LOGUP_CIRCUIT_ID,
+                        circuit: vm_public_logup_reference.circuit(),
+                        active_in: CircuitAnchorMode::SEGMENT,
+                    },
+                    CircuitAnchorLane {
+                        circuit_id: LEFT_RECURSION_COMPOSITION_CIRCUIT_ID,
+                        circuit: recursion_composition_references.left.circuit(),
+                        active_in: CircuitAnchorMode::BINARY,
+                    },
+                    CircuitAnchorLane {
+                        circuit_id: RIGHT_RECURSION_COMPOSITION_CIRCUIT_ID,
+                        circuit: recursion_composition_references.right.circuit(),
+                        active_in: CircuitAnchorMode::BINARY,
+                    },
+                    CircuitAnchorLane {
+                        circuit_id: PCS_CIRCUIT_IDS[0],
+                        circuit: pcs_references.segment.circuit(),
+                        active_in: CircuitAnchorMode::SEGMENT,
+                    },
+                    CircuitAnchorLane {
+                        circuit_id: PCS_CIRCUIT_IDS[1],
+                        circuit: pcs_references.left.circuit(),
+                        active_in: CircuitAnchorMode::BINARY,
+                    },
+                    CircuitAnchorLane {
+                        circuit_id: PCS_CIRCUIT_IDS[2],
+                        circuit: pcs_references.right.circuit(),
+                        active_in: CircuitAnchorMode::BINARY,
+                    },
+                    CircuitAnchorLane {
+                        circuit_id: FRI_CIRCUIT_IDS[0],
+                        circuit: fri_references.segment.circuit(),
+                        active_in: CircuitAnchorMode::SEGMENT,
+                    },
+                    CircuitAnchorLane {
+                        circuit_id: FRI_CIRCUIT_IDS[1],
+                        circuit: fri_references.left.circuit(),
+                        active_in: CircuitAnchorMode::BINARY,
+                    },
+                    CircuitAnchorLane {
+                        circuit_id: FRI_CIRCUIT_IDS[2],
+                        circuit: fri_references.right.circuit(),
+                        active_in: CircuitAnchorMode::BINARY,
+                    },
+                ],
+            )
+            .map_err(|error| stage("circuit-anchor preprocessing", error))?;
+
+        let mut segment_operations = CircuitTraces::default();
+        let mut binary_operations = CircuitTraces::default();
+        let mut empty_operations = CircuitTraces::default();
+        for (proof_kind, operations) in [
+            (ProofKind::SegmentLeaf, &mut segment_operations),
+            (ProofKind::BinaryNode, &mut binary_operations),
+            (ProofKind::EmptyLeaf, &mut empty_operations),
+        ] {
+            lower_all_fixed_circuits(
+                operations,
+                proof_kind,
+                &statement_reference,
+                &vm_claim_reference,
+                &vm_public_logup_reference,
+                &vm_composition_reference,
+                recursion_composition_references.lanes(),
+                pcs_references.lanes(),
+                fri_references.lanes(),
+                "reference circuit schedule",
+            )?;
+        }
+        let capacities = recursion_component_log_sizes();
+        let qm31_mul_schedule = crate::qm31_mul::Qm31MulPreprocessed::new_for_modes(
+            capacities[30],
+            [
+                segment_operations.qm31_mul_schedule,
+                binary_operations.qm31_mul_schedule,
+                empty_operations.qm31_mul_schedule,
+            ],
+        )
+        .map_err(|error| stage("multiplication schedule preprocessing", error))?;
+        let qm31_inv_schedule = crate::qm31_inv::Qm31InvPreprocessed::new_for_modes(
+            capacities[31],
+            [
+                segment_operations.qm31_inv_schedule,
+                binary_operations.qm31_inv_schedule,
+                empty_operations.qm31_inv_schedule,
+            ],
+        )
+        .map_err(|error| stage("inversion schedule preprocessing", error))?;
+        let linear_ops_schedule = crate::linear_ops::LinearOpsPreprocessed::new_for_modes(
+            capacities[32],
+            [
+                segment_operations.linear_ops_schedule,
+                binary_operations.linear_ops_schedule,
+                empty_operations.linear_ops_schedule,
+            ],
+        )
+        .map_err(|error| stage("linear-operation schedule preprocessing", error))?;
+
         Ok(Self {
             control,
             transcript_calls,
@@ -2254,6 +3106,7 @@ impl UniversalPreprocessing {
             vm_public_logup_input,
             vm_public_logup_control,
             vm_composition_reference,
+            recursion_composition_references,
             vm_composition_input,
             vm_composition_control,
             query_position,
@@ -2267,6 +3120,9 @@ impl UniversalPreprocessing {
             fri_references,
             fri_control,
             fri_input,
+            qm31_mul_schedule,
+            qm31_inv_schedule,
+            linear_ops_schedule,
         })
     }
 
@@ -2302,9 +3158,9 @@ impl UniversalPreprocessing {
             self.fri_merkle.anchor_log_size(),
             self.fri_control.log_size(),
             self.fri_input.log_size(),
-            4,
-            4,
-            4,
+            recursion_component_log_sizes()[30],
+            recursion_component_log_sizes()[31],
+            recursion_component_log_sizes()[32],
             4,
             4,
             16,
@@ -2365,6 +3221,9 @@ impl UniversalPreprocessing {
         components[27] = self.fri_merkle.gen_anchor_columns();
         components[28] = self.fri_control.gen_columns();
         components[29] = self.fri_input.gen_columns();
+        components[30] = self.qm31_mul_schedule.gen_columns();
+        components[31] = self.qm31_inv_schedule.gen_columns();
+        components[32] = self.linear_ops_schedule.gen_columns();
         components[35] = prover::preprocessed::range_check_8_8::Table::gen_columns();
 
         let actual_count = components.iter().flatten().count();
@@ -2436,6 +3295,17 @@ impl UniversalPreprocessing {
                 &self.vm_composition_reference,
             )
             .map_err(|error| stage("VM composition reference lowering", error))?;
+        }
+        if proof_kind == ProofKind::BinaryNode {
+            for lane in self.recursion_composition_references.lanes() {
+                crate::recursion_air_composition_lowering::lower_recursion_air_composition_circuit(
+                    &mut traces,
+                    lane.circuit_id,
+                    lane.circuit,
+                    lane.circuit,
+                )
+                .map_err(|error| stage("recursion composition reference lowering", error))?;
+            }
         }
         let pcs_lanes = self.pcs_references.lanes();
         let pcs_lanes = if proof_kind == ProofKind::SegmentLeaf {

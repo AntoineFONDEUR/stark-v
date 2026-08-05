@@ -12,6 +12,7 @@
 
 use core::cell::RefCell;
 use core::ops::{Add, AddAssign, Mul, Neg, Sub};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use num_traits::{One, Zero};
@@ -22,7 +23,7 @@ use stwo_constraint_framework::logup::LogupAtRow;
 use stwo_constraint_framework::{EvalAtRow, INTERACTION_TRACE_IDX};
 
 /// One recorded operation over arena nodes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum Op {
     /// A mask input (interaction, column, offset slot).
     Input,
@@ -43,15 +44,46 @@ pub struct Node {
 }
 
 /// The growing list of operations.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+enum OpKey {
+    Const([u32; 4]),
+    Add(usize, usize),
+    Sub(usize, usize),
+    Mul(usize, usize),
+    Neg(usize),
+    Inverse(usize),
+}
+
 #[derive(Default, Debug)]
 pub struct Arena {
     pub nodes: Vec<Node>,
+    // A canonical DAG keeps repeated AIR subexpressions from multiplying the
+    // trusted operation schedule and its recursion preprocessing footprint.
+    interned: HashMap<OpKey, usize>,
 }
 
 impl Arena {
     fn push(&mut self, op: Op, value: SecureField) -> usize {
+        let key = match op {
+            Op::Input => None,
+            Op::Const => Some(OpKey::Const(value.to_m31_array().map(|limb| limb.0))),
+            Op::Add(lhs, rhs) => Some(OpKey::Add(lhs.min(rhs), lhs.max(rhs))),
+            Op::Sub(lhs, rhs) => Some(OpKey::Sub(lhs, rhs)),
+            Op::Mul(lhs, rhs) => Some(OpKey::Mul(lhs.min(rhs), lhs.max(rhs))),
+            Op::Neg(lhs) => Some(OpKey::Neg(lhs)),
+            Op::Inverse(lhs) => Some(OpKey::Inverse(lhs)),
+        };
+        if let Some(key) = key {
+            if let Some(node_id) = self.interned.get(&key).copied() {
+                return node_id;
+            }
+        }
         self.nodes.push(Node { op, value });
-        self.nodes.len() - 1
+        let node_id = self.nodes.len() - 1;
+        if let Some(key) = key {
+            self.interned.insert(key, node_id);
+        }
+        node_id
     }
 }
 

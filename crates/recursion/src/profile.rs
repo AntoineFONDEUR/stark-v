@@ -99,13 +99,13 @@ pub const VM_QUERY_VALUE_COUNT: usize = VM_TABLE_COUNT * FRI_QUERY_COUNT;
 pub const VM_TRACE_PATH_COUNT: usize = COMMITMENT_TREE_COUNT * FRI_QUERY_COUNT;
 
 /// Universal table count compiled from the checked-in component roster.
-pub const RECURSION_TABLE_COUNT: usize = 2104;
+pub const RECURSION_TABLE_COUNT: usize = 2196;
 /// Universal OODS samples compiled from the checked-in component roster.
-pub const RECURSION_SAMPLED_VALUE_COUNT: usize = 2248;
+pub const RECURSION_SAMPLED_VALUE_COUNT: usize = 2340;
 /// Universal AIR constraints compiled from the checked-in component roster.
-pub const RECURSION_AIR_INSTRUCTION_COUNT: usize = 1287;
+pub const RECURSION_AIR_INSTRUCTION_COUNT: usize = 1313;
 /// Universal preprocessing columns in canonical commitment order.
-pub const RECURSION_PREPROCESSED_COLUMN_COUNT: usize = 493;
+pub const RECURSION_PREPROCESSED_COLUMN_COUNT: usize = 577;
 /// Flat authenticated recursion values across every raw query.
 pub const RECURSION_QUERY_VALUE_COUNT: usize = RECURSION_TABLE_COUNT * FRI_QUERY_COUNT;
 /// One recursion trace path exists for every commitment tree and query.
@@ -113,7 +113,7 @@ pub const RECURSION_TRACE_PATH_COUNT: usize = COMMITMENT_TREE_COUNT * FRI_QUERY_
 
 /// Canonical protocol identifier limbs for cross-language conformance.
 pub const PROTOCOL_ID_WORDS: [u32; 8] = [
-    1605643340, 1955314271, 2072188796, 1133138353, 150703753, 2017819881, 1063238005, 332318256,
+    996130352, 439599105, 1840972074, 322360417, 2002034527, 739270897, 775019197, 1167228932,
 ];
 /// Digest of all ordered VM preprocessing identifiers and log sizes.
 pub const VM_PREPROCESSING_WORDS: [u32; 8] = [
@@ -121,7 +121,7 @@ pub const VM_PREPROCESSING_WORDS: [u32; 8] = [
 ];
 /// Digest of all ordered universal preprocessing identifiers and log sizes.
 pub const RECURSION_PREPROCESSING_WORDS: [u32; 8] = [
-    761643539, 1287361923, 126329351, 409804155, 2057204636, 1087354608, 810446001, 105446020,
+    1631792279, 1428956174, 841758055, 1480077960, 892931837, 546857174, 222299338, 151671612,
 ];
 
 /// Manifest type whose array dimensions are the actual AIR layouts.
@@ -420,7 +420,7 @@ pub fn vm_component_log_sizes() -> [u32; COMPONENT_COUNT] {
 /// Returns the fixed universal component capacities in canonical roster order.
 pub fn recursion_component_log_sizes() -> UniversalComponentLogSizes {
     [
-        14, 13, 13, 9, 16, 15, 4, 4, 7, 7, 11, 11, 14, 11, 11, 17, 15, 12, 13, 10, 10, 14, 5, 18,
+        14, 13, 13, 9, 16, 15, 4, 4, 7, 7, 11, 11, 14, 11, 11, 17, 15, 12, 18, 12, 10, 14, 5, 18,
         21, 16, 14, 13, 13, 18, 22, 16, 22, 16, 19, 16,
     ]
 }
@@ -756,7 +756,7 @@ mod tests {
         ];
         assert_eq!(
             actual,
-            [1757, 4, 1865, 20, 924, 14, 2104, 4, 2248, 22, 1287, 493, 36]
+            [1757, 4, 1865, 20, 924, 14, 2196, 4, 2340, 22, 1313, 577, 36]
         );
     }
 
@@ -795,8 +795,8 @@ mod tests {
                 2112168674,
             ]),
             digest([
-                127848648, 1979842229, 65537624, 515341971, 1126208585, 2030290040, 473511199,
-                1257061599,
+                1257248829, 1216201935, 354922115, 2062314934, 1132069174, 1088399207, 325143630,
+                1511814991,
             ]),
         ];
         assert_eq!(actual, expected);
@@ -804,7 +804,7 @@ mod tests {
 
     #[test]
     fn serialized_root_size_is_derived_from_the_recursion_shape() {
-        assert_eq!(ROOT_PROOF_BYTE_SIZE, 3_386_900);
+        assert_eq!(ROOT_PROOF_BYTE_SIZE, 3_459_396);
     }
 
     #[test]

@@ -230,9 +230,13 @@ fn leaf_binding_relation_sum(mut channel: Poseidon2M31Channel) -> SecureField {
         &relation_challenge_relations,
     );
 
-    let public_control_preprocessing =
-        VmPublicLogupControlPreprocessed::new(&vm_plan, public_logup_reference.public_term_count())
-            .expect("fixture VM public control slice is exact");
+    let public_control_preprocessing = VmPublicLogupControlPreprocessed::new(
+        &vm_plan,
+        public_logup_reference.public_term_count(),
+        &recursion_plan,
+        0,
+    )
+    .expect("fixture universal public control slices are exact");
     let (_, public_control_sum) = gen_public_logup_control_interaction(
         &public_control_preprocessing.gen_columns(),
         ProofKind::SegmentLeaf,
@@ -344,16 +348,25 @@ fn leaf_binding_relation_sum(mut channel: Poseidon2M31Channel) -> SecureField {
         &public_logup_witness,
     )
     .expect("fixture public LogUp circuit lowers");
+    let recursion_traces = recursion_traces
+        .into_air_traces()
+        .expect("lowered VM leaf schedules fit their traces");
     let (_, mul_sum) = qm31_mul::gen_interaction_trace(
-        &recursion_traces.qm31_mul.into_witness(),
+        &recursion_traces.qm31_mul,
+        &recursion_traces.qm31_mul_preprocessed,
+        ProofKind::SegmentLeaf,
         &recursion_relations,
     );
     let (_, linear_sum) = linear_ops::gen_interaction_trace(
-        &recursion_traces.linear_ops.into_witness(),
+        &recursion_traces.linear_ops,
+        &recursion_traces.linear_ops_preprocessed,
+        ProofKind::SegmentLeaf,
         &recursion_relations,
     );
     let (_, inverse_sum) = qm31_inv::gen_interaction_trace(
-        &recursion_traces.qm31_inv.into_witness(),
+        &recursion_traces.qm31_inv,
+        &recursion_traces.qm31_inv_preprocessed,
+        ProofKind::SegmentLeaf,
         &recursion_relations,
     );
     let semantic_public_sum = public_vm_public_claim_semantics_terms(

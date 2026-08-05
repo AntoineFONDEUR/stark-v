@@ -1,10 +1,9 @@
 //! Lowering and public anchors for the fixed statement-semantics circuit.
 //!
 //! Arithmetic nodes reuse the recursion multiplication, inverse, and linear
-//! operation tables. Input nodes are supplied by `statement_semantics_input_air`,
-//! constants are emitted by verifier-computed terms, operation definitions
-//! are fixed by the reference circuit, and every designated output is
-//! publicly consumed at zero.
+//! operation tables, whose preprocessing fixes the operation graph. Input
+//! nodes are supplied by `statement_semantics_input_air`; verifier anchors emit
+//! constants and consume every designated output at zero.
 
 use core::fmt;
 
@@ -18,7 +17,7 @@ use stwo_constraint_framework::Relation;
 use crate::circuit::CircuitTraces;
 use crate::circuit::{limbs, lower_arena_operations, use_counts_for_outputs};
 use crate::recorder::Op;
-use crate::relations::{RecursionRelations, op_kind};
+use crate::relations::RecursionRelations;
 
 use super::statement_semantics_circuit::StatementSemanticsCircuit;
 
@@ -40,7 +39,7 @@ pub fn lower_statement_semantics_circuit(
     Ok(())
 }
 
-/// Verifier contribution for circuit constants, structure, and zero outputs.
+/// Verifier contribution for circuit constants and zero outputs.
 pub fn public_statement_semantics_terms(
     circuit_id: u32,
     reference: &StatementSemanticsCircuit,
@@ -65,17 +64,7 @@ pub fn public_statement_semantics_terms(
                         * SecureField::from(M31::from(uses[node_id]));
                 }
             }
-            op => {
-                let (kind, lhs, rhs) = operation_tuple(op)?;
-                let denominator: SecureField = relations.op_def.combine(&[
-                    M31::from(circuit_id),
-                    M31::from(node_id_u32),
-                    M31::from(kind),
-                    M31::from(lhs),
-                    M31::from(rhs),
-                ]);
-                total += denominator.inverse();
-            }
+            Op::Add(_, _) | Op::Sub(_, _) | Op::Mul(_, _) | Op::Neg(_) | Op::Inverse(_) => {}
         }
     }
     for output in reference.circuit().outputs() {
@@ -119,21 +108,6 @@ fn validate_structure(
     Ok(())
 }
 
-fn operation_tuple(op: Op) -> Result<(u32, u32, u32), StatementSemanticsLoweringError> {
-    let convert = |node_id: usize| {
-        u32::try_from(node_id)
-            .map_err(|_| StatementSemanticsLoweringError::NodeIdOutOfRange { node_id })
-    };
-    match op {
-        Op::Add(lhs, rhs) => Ok((op_kind::ADD, convert(lhs)?, convert(rhs)?)),
-        Op::Sub(lhs, rhs) => Ok((op_kind::SUB, convert(lhs)?, convert(rhs)?)),
-        Op::Mul(lhs, rhs) => Ok((op_kind::MUL, convert(lhs)?, convert(rhs)?)),
-        Op::Neg(lhs) => Ok((op_kind::NEG, convert(lhs)?, 0)),
-        Op::Inverse(lhs) => Ok((op_kind::INVERSE, convert(lhs)?, 0)),
-        Op::Input | Op::Const => Err(StatementSemanticsLoweringError::NonArithmeticOperation),
-    }
-}
-
 fn wire_term(
     circuit_id: u32,
     node_id: u32,
@@ -163,7 +137,6 @@ pub enum StatementSemanticsLoweringError {
     NodeCountMismatch { expected: usize, actual: usize },
     NodeStructureMismatch { node_id: usize },
     NodeIdOutOfRange { node_id: usize },
-    NonArithmeticOperation,
 }
 
 impl fmt::Display for StatementSemanticsLoweringError {
@@ -204,12 +177,6 @@ impl fmt::Display for StatementSemanticsLoweringError {
                 write!(
                     formatter,
                     "statement circuit node id {node_id} does not fit u32"
-                )
-            }
-            Self::NonArithmeticOperation => {
-                write!(
-                    formatter,
-                    "input or constant requested as an arithmetic operation"
                 )
             }
         }
@@ -387,10 +354,21 @@ mod tests {
         let mut traces = CircuitTraces::default();
         lower_statement_semantics_circuit(&mut traces, CIRCUIT_ID, &reference, &witness)
             .expect("valid empty statement circuit lowers");
-        let qm31_mul_trace = traces.qm31_mul.into_witness();
-        let linear_ops_trace = traces.linear_ops.into_witness();
-        let (_, mul_sum) = qm31_mul::gen_interaction_trace(&qm31_mul_trace, &relations);
-        let (_, linear_sum) = linear_ops::gen_interaction_trace(&linear_ops_trace, &relations);
+        let traces = traces
+            .into_air_traces()
+            .expect("lowered statement schedules fit their traces");
+        let (_, mul_sum) = qm31_mul::gen_interaction_trace(
+            &traces.qm31_mul,
+            &traces.qm31_mul_preprocessed,
+            ProofKind::SegmentLeaf,
+            &relations,
+        );
+        let (_, linear_sum) = linear_ops::gen_interaction_trace(
+            &traces.linear_ops,
+            &traces.linear_ops_preprocessed,
+            ProofKind::SegmentLeaf,
+            &relations,
+        );
         let public_sum = public_statement_semantics_terms(CIRCUIT_ID, &reference, &relations)
             .expect("reference circuit has zero outputs");
         input_sum

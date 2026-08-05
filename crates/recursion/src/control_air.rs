@@ -9,19 +9,16 @@
 
 use core::fmt;
 
-use num_traits::Zero;
 use simd::AlignedVec;
 use stwo::core::ColumnVec;
 use stwo::core::channel::Channel;
-use stwo::core::fields::FieldExpOps;
-use stwo::core::fields::m31::{BaseField, M31};
-use stwo::core::fields::qm31::{QM31, SecureField};
+use stwo::core::fields::m31::BaseField;
+use stwo::core::fields::qm31::QM31;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::simd::column::BaseColumn;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::CircleEvaluation;
-use stwo_constraint_framework::Relation;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::relation;
 
@@ -34,7 +31,7 @@ pub const RIGHT_RECURSION_VERIFIER_ID: u32 = 2;
 
 const MIN_LOG_SIZE: u32 = 4;
 const MAX_LOG_SIZE: u32 = 30;
-const CONTROL_COLUMN_COUNT: usize = 9;
+const CONTROL_COLUMN_COUNT: usize = 10;
 const SEGMENT_MASK_COLUMN: usize = 0;
 const BINARY_MASK_COLUMN: usize = 1;
 const VERIFIER_ID_COLUMN: usize = 2;
@@ -44,6 +41,7 @@ const ARG_0_COLUMN: usize = 5;
 const ARG_1_COLUMN: usize = 6;
 const ARG_2_COLUMN: usize = 7;
 const ARG_3_COLUMN: usize = 8;
+const TERMINAL_MASK_COLUMN: usize = 9;
 
 relation!(VerifierStepRelation, 7);
 
@@ -74,6 +72,7 @@ struct ControlRow {
     sequence: u32,
     tag: u32,
     args: [u32; 4],
+    terminal_mask: u32,
 }
 
 /// Preprocessed control columns derived only from the two trusted verifier plans.
@@ -166,6 +165,7 @@ impl ControlPreprocessed {
             columns[ARG_1_COLUMN][index] = row.args[1];
             columns[ARG_2_COLUMN][index] = row.args[2];
             columns[ARG_3_COLUMN][index] = row.args[3];
+            columns[TERMINAL_MASK_COLUMN][index] = row.terminal_mask;
         }
         let domain = CanonicCoset::new(self.log_size).circle_domain();
         columns
@@ -201,6 +201,10 @@ fn append_plan_rows(
             sequence,
             tag: encoded.tag(),
             args: encoded.args(),
+            terminal_mask: u32::from(matches!(
+                step,
+                VerifierStep::CloseRelation { .. } | VerifierStep::Complete
+            )),
         });
     }
     Ok(())
@@ -221,6 +225,7 @@ stwo_macros::define_air_fns! {
         arg_1: "recursion_control_arg_1",
         arg_2: "recursion_control_arg_2",
         arg_3: "recursion_control_arg_3",
+        terminal_mask: "recursion_control_terminal_mask",
     },
     embedded_params: [segment_active, binary_active],
 
@@ -236,10 +241,21 @@ stwo_macros::define_air_fns! {
         arg_1,
         arg_2,
         arg_3,
+        terminal_mask,
         segment_active,
         binary_active,
     ) {
-        emit(segment_mask * segment_active + binary_mask * binary_active) step(
+        let active = segment_mask * segment_active + binary_mask * binary_active;
+        emit(active) step(
+            verifier_id,
+            sequence,
+            tag,
+            arg_0,
+            arg_1,
+            arg_2,
+            arg_3,
+        );
+        consume(active * terminal_mask) step(
             verifier_id,
             sequence,
             tag,
@@ -285,41 +301,6 @@ pub fn gen_interaction_trace(
         binary_active,
         relations,
     )
-}
-
-/// Verifier-owned consumers for terminal control steps with no witness table.
-///
-/// `CloseRelation` and `Complete` state assertions are enforced by the outer
-/// global-sum check itself. Their trusted control tuples therefore close
-/// against public negative terms instead of a committed consumer component.
-pub fn public_terminal_control_terms(
-    plan: &VerifierControlPlan,
-    verifier_id: u32,
-    relations: &ControlRelations,
-) -> SecureField {
-    plan.steps()
-        .iter()
-        .copied()
-        .enumerate()
-        .filter(|(_, step)| {
-            matches!(
-                step,
-                VerifierStep::CloseRelation { .. } | VerifierStep::Complete
-            )
-        })
-        .fold(SecureField::zero(), |sum, (sequence, step)| {
-            let encoded = step.encode();
-            let denominator: SecureField = relations.step.combine(&[
-                M31::from(verifier_id),
-                M31::from(u32::try_from(sequence).expect("validated control sequence fits u32")),
-                M31::from(encoded.tag()),
-                M31::from(encoded.args()[0]),
-                M31::from(encoded.args()[1]),
-                M31::from(encoded.args()[2]),
-                M31::from(encoded.args()[3]),
-            ]);
-            sum - denominator.inverse()
-        })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

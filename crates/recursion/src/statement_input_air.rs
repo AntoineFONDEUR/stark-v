@@ -278,7 +278,9 @@ stwo_macros::define_air_fns! {
         consume(active) input_word(
             verifier_id, statement_input_kind, input_item, word_index, value,
         );
-        emit(active) statement_word(statement_scope, word_index, value);
+        emit(active + binary_mask * binary_active) statement_word(
+            statement_scope, word_index, value,
+        );
         emit(segment_mask * segment_active) statement_word(
             vm_claim_scope, word_index, value,
         );
@@ -801,7 +803,7 @@ mod tests {
             .expect("left fixture statement has canonical width")
             + statement_scope_terms(&right, RIGHT_STATEMENT_SCOPE, &statement_relations)
                 .expect("right fixture statement has canonical width");
-        assert_eq!(component + inputs - children, QM31::zero());
+        assert_eq!(component + inputs - children - children, QM31::zero());
     }
 
     #[rstest]

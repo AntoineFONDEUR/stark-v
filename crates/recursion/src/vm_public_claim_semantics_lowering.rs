@@ -1,9 +1,9 @@
 //! Lowering and public anchors for the VM claim semantic circuit.
 //!
 //! Arithmetic nodes reuse the recursion multiplication and linear operation
-//! tables. Verifier terms fix constants, operation definitions, and every zero
-//! output, while the dedicated input AIR owns claim, statement, selector, and
-//! private input nodes.
+//! tables, whose preprocessing fixes the operation graph. Verifier anchors fix
+//! constants and every zero output, while the dedicated input AIR owns claim,
+//! statement, selector, and private input nodes.
 
 use core::fmt;
 
@@ -17,7 +17,7 @@ use stwo_constraint_framework::Relation;
 use crate::circuit::CircuitTraces;
 use crate::circuit::{limbs, lower_arena_operations, use_counts_for_outputs};
 use crate::recorder::Op;
-use crate::relations::{RecursionRelations, op_kind};
+use crate::relations::RecursionRelations;
 
 use super::vm_public_claim_semantics_circuit::VmPublicClaimSemanticsCircuit;
 
@@ -39,7 +39,7 @@ pub fn lower_vm_public_claim_semantics_circuit(
     Ok(())
 }
 
-/// Verifier contribution for constants, operation structure, and zero outputs.
+/// Verifier contribution for constants and zero outputs.
 pub fn public_vm_public_claim_semantics_terms(
     circuit_id: u32,
     reference: &VmPublicClaimSemanticsCircuit,
@@ -64,17 +64,7 @@ pub fn public_vm_public_claim_semantics_terms(
                         * SecureField::from(M31::from(uses[node_id as usize]));
                 }
             }
-            op => {
-                let (kind, lhs, rhs) = operation_tuple(op)?;
-                let denominator: SecureField = relations.op_def.combine(&[
-                    M31::from(circuit_id),
-                    M31::from(node_id),
-                    M31::from(kind),
-                    M31::from(lhs),
-                    M31::from(rhs),
-                ]);
-                total += denominator.inverse();
-            }
+            Op::Add(_, _) | Op::Sub(_, _) | Op::Mul(_, _) | Op::Neg(_) | Op::Inverse(_) => {}
         }
     }
     for output in reference.circuit().outputs() {
@@ -122,21 +112,6 @@ fn validate_structure(
     Ok(())
 }
 
-fn operation_tuple(op: Op) -> Result<(u32, u32, u32), VmPublicClaimSemanticsLoweringError> {
-    let convert = |node_id: usize| {
-        u32::try_from(node_id)
-            .map_err(|_| VmPublicClaimSemanticsLoweringError::NodeIdOutOfRange { node_id })
-    };
-    match op {
-        Op::Add(lhs, rhs) => Ok((op_kind::ADD, convert(lhs)?, convert(rhs)?)),
-        Op::Sub(lhs, rhs) => Ok((op_kind::SUB, convert(lhs)?, convert(rhs)?)),
-        Op::Mul(lhs, rhs) => Ok((op_kind::MUL, convert(lhs)?, convert(rhs)?)),
-        Op::Neg(lhs) => Ok((op_kind::NEG, convert(lhs)?, 0)),
-        Op::Inverse(lhs) => Ok((op_kind::INVERSE, convert(lhs)?, 0)),
-        Op::Input | Op::Const => Err(VmPublicClaimSemanticsLoweringError::NonArithmeticOperation),
-    }
-}
-
 fn wire_term(
     circuit_id: u32,
     node_id: u32,
@@ -165,7 +140,6 @@ pub enum VmPublicClaimSemanticsLoweringError {
     NodeCountMismatch { expected: usize, actual: usize },
     NodeStructureMismatch { node_id: usize },
     NodeIdOutOfRange { node_id: usize },
-    NonArithmeticOperation,
     NonzeroConstraintOutput,
     ReferenceOutputIsNonzero,
 }
@@ -271,10 +245,21 @@ mod tests {
         let mut traces = CircuitTraces::default();
         lower_vm_public_claim_semantics_circuit(&mut traces, CIRCUIT_ID, &reference, &witness)
             .expect("valid VM claim semantic circuit lowers");
-        let (_, mul_sum) =
-            qm31_mul::gen_interaction_trace(&traces.qm31_mul.into_witness(), &relations);
-        let (_, linear_sum) =
-            linear_ops::gen_interaction_trace(&traces.linear_ops.into_witness(), &relations);
+        let traces = traces
+            .into_air_traces()
+            .expect("lowered VM claim schedules fit their traces");
+        let (_, mul_sum) = qm31_mul::gen_interaction_trace(
+            &traces.qm31_mul,
+            &traces.qm31_mul_preprocessed,
+            ProofKind::SegmentLeaf,
+            &relations,
+        );
+        let (_, linear_sum) = linear_ops::gen_interaction_trace(
+            &traces.linear_ops,
+            &traces.linear_ops_preprocessed,
+            ProofKind::SegmentLeaf,
+            &relations,
+        );
         let public_sum = public_vm_public_claim_semantics_terms(CIRCUIT_ID, &reference, &relations)
             .expect("reference circuit has zero outputs");
         input_sum

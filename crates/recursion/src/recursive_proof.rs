@@ -13,6 +13,7 @@ use prover::poseidon2_channel::{Poseidon2M31MerkleChannel, Poseidon2M31MerkleHas
 use stwo::core::air::Components as CoreComponents;
 use stwo::core::channel::Channel;
 use stwo::core::fields::qm31::SecureField;
+use stwo::core::pcs::quotients::CommitmentSchemeProofAux;
 use stwo::core::pcs::{CommitmentSchemeVerifier, TreeVec};
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::proof::StarkProof;
@@ -21,7 +22,7 @@ use stwo::prover::poly::circle::PolyOps;
 use stwo::prover::{CommitmentSchemeProver, CommitmentTreeProver};
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 
-use crate::profile::{FrozenProtocolProfile, recursion_preprocessed_column_ids};
+use crate::profile::{FrozenProtocolProfile, RootProofWire, recursion_preprocessed_column_ids};
 use crate::profiled_channel::{ProfiledPoseidon2M31Channel, ProfiledPoseidon2M31MerkleChannel};
 use crate::recursion_air_program::{
     UNIVERSAL_COMPONENT_COUNT, UniversalComponentLogSizes, universal_components,
@@ -31,7 +32,7 @@ use crate::statement::SpanStatement;
 use crate::universal_relations::UniversalRelations;
 use crate::universal_witness::{
     UniversalMainWitness, UniversalPreprocessing, UniversalTrace, UniversalWitnessError,
-    finish_prepared_witness, prepare_empty_leaf, prepare_segment_leaf,
+    finish_prepared_witness, prepare_binary_node, prepare_empty_leaf, prepare_segment_leaf,
     universal_public_relation_sum,
 };
 use crate::wire::ProofKind;
@@ -69,6 +70,8 @@ pub struct RecursionProof {
     pub component_claim: RecursionComponentClaim,
     pub interaction_claim: RecursionInteractionClaim,
     pub stark_proof: StarkProof<Poseidon2M31MerkleHasher>,
+    /// Expansion data required to encode independent raw-query child openings.
+    pub stark_aux: CommitmentSchemeProofAux<Poseidon2M31MerkleHasher>,
     pub interaction_pow: u64,
 }
 
@@ -126,6 +129,21 @@ pub fn prove_empty_leaf(
     let main = prepare_empty_leaf(profile, statement, &preprocessing.universal)
         .map_err(RecursionProofError::Witness)?;
     prove_prepared(profile, preprocessing, *statement, main)
+}
+
+/// Proves one parent whose complete witness verifies two recursion children.
+pub fn prove_binary_node(
+    profile: &FrozenProtocolProfile,
+    preprocessing: &RecursionPreprocessing,
+    left: &RootProofWire,
+    right: &RootProofWire,
+) -> Result<RecursionProof, RecursionProofError> {
+    validate_preprocessing(profile, preprocessing)?;
+    let statement = SpanStatement::fold(left.statement(), right.statement())
+        .map_err(|error| RecursionProofError::StatementFold(error.to_string()))?;
+    let main = prepare_binary_node(profile, left, right, &preprocessing.universal)
+        .map_err(RecursionProofError::Witness)?;
+    prove_prepared(profile, preprocessing, statement, main)
 }
 
 fn prove_prepared(
@@ -204,8 +222,13 @@ fn prove_prepared(
         &preprocessing.component_log_sizes,
         &claimed_sums,
     );
-    let stark_proof = stwo::prover::prove(&components.provers(), &mut channel, commitment_scheme)
-        .map_err(|error| RecursionProofError::Stwo(error.to_string()))?;
+    let extended = stwo::prover::prove_ex(
+        &components.provers(),
+        &mut channel,
+        commitment_scheme,
+        false,
+    )
+    .map_err(|error| RecursionProofError::Stwo(error.to_string()))?;
     channel
         .finish()
         .map_err(|error| RecursionProofError::Transcript(error.to_string()))?;
@@ -222,7 +245,8 @@ fn prove_prepared(
             public_relation_sum,
             log_sizes: interaction_log_sizes,
         },
-        stark_proof,
+        stark_proof: extended.proof,
+        stark_aux: extended.aux,
         interaction_pow,
     })
 }
@@ -246,9 +270,6 @@ pub fn verify_recursion_proof(
         return Err(RecursionProofError::StatementProtocolMismatch);
     }
     let expected_kind = proof_kind_for_statement(expected_statement);
-    if expected_kind == ProofKind::BinaryNode {
-        return Err(RecursionProofError::UnsupportedProofKind);
-    }
     if proof.component_claim.proof_kind != expected_kind {
         return Err(RecursionProofError::ProofKindMismatch);
     }
@@ -449,7 +470,7 @@ pub enum RecursionProofError {
     ProtocolMismatch,
     StatementMismatch,
     StatementProtocolMismatch,
-    UnsupportedProofKind,
+    StatementFold(String),
     ProofKindMismatch,
     ComponentLogSizesMismatch,
     InteractionLogSizesMismatch,
@@ -477,9 +498,7 @@ impl fmt::Display for RecursionProofError {
                     "statement protocol does not match the expected protocol"
                 )
             }
-            Self::UnsupportedProofKind => {
-                write!(formatter, "binary recursion proofs are not supported yet")
-            }
+            Self::StatementFold(detail) => write!(formatter, "invalid binary fold: {detail}"),
             Self::ProofKindMismatch => write!(formatter, "proof kind does not match the statement"),
             Self::ComponentLogSizesMismatch => {
                 write!(formatter, "component geometry does not match preprocessing")
@@ -514,8 +533,12 @@ impl std::error::Error for RecursionProofError {}
 
 #[cfg(test)]
 mod tests {
-    use air::digest::{IoDigest, ProgramDigest};
+    use std::path::{Path, PathBuf};
+    use std::sync::OnceLock;
+
+    use air::digest::{Digest8, IoDigest, M31Word, ProgramDigest};
     use num_traits::One;
+    use rstest::rstest;
 
     use super::*;
     use crate::statement::{CompleteExecutionStatement, EdgeClaim, ExecutedSpan, JobContext};
@@ -575,6 +598,182 @@ mod tests {
         let right = SpanStatement::segment_leaf(job, 1, right_span)
             .expect("right statement matches the job");
         SpanStatement::fold(&left, &right).expect("fixture leaves form one binary span")
+    }
+
+    fn padding_pair(
+        profile: &FrozenProtocolProfile,
+    ) -> (SpanStatement, SpanStatement, SpanStatement) {
+        let complete = CompleteExecutionStatement::new(
+            profile.manifest().protocol_id(),
+            ProgramDigest::from(digest(2)),
+            state(0),
+            state(5),
+            IoDigest::from(digest(3)),
+            IoDigest::from(digest(4)),
+            20,
+        )
+        .expect("fixture execution is nonempty");
+        let job = JobContext::new(complete, 5).expect("fixture job has five segments");
+        let left = SpanStatement::empty_leaf(job, 6).expect("slot six is suffix padding");
+        let right = SpanStatement::empty_leaf(job, 7).expect("slot seven is suffix padding");
+        let parent = SpanStatement::fold(&left, &right).expect("padding children fold");
+        (left, right, parent)
+    }
+
+    struct BinaryChildFixture {
+        profile: FrozenProtocolProfile,
+        left: Box<RootProofWire>,
+        right: Box<RootProofWire>,
+        parent_statement: SpanStatement,
+    }
+
+    fn binary_child_fixture() -> &'static BinaryChildFixture {
+        static FIXTURE: OnceLock<BinaryChildFixture> = OnceLock::new();
+        FIXTURE.get_or_init(|| {
+            // Proving each child once keeps independent mutation cases focused
+            // on child verification rather than repeated outer proving.
+            let _assembly_guard = crate::segment_leaf::tests::universal_assembly_guard();
+            let profile =
+                crate::profile::frozen_protocol_profile().expect("frozen profile is valid");
+            let preprocessing =
+                preprocess_recursion(&profile).expect("universal preprocessing is valid");
+            let (left_statement, right_statement, parent_statement) = padding_pair(&profile);
+            let left =
+                proved_child_wire(&profile, &preprocessing, &left_statement, "left-child.bin");
+            let right = proved_child_wire(
+                &profile,
+                &preprocessing,
+                &right_statement,
+                "right-child.bin",
+            );
+            BinaryChildFixture {
+                profile,
+                left,
+                right,
+                parent_statement,
+            }
+        })
+    }
+
+    #[derive(Clone, Copy)]
+    enum ChildMutation {
+        Statement,
+        Commitment,
+        Opening,
+        ClaimedSum,
+        FriValue,
+    }
+
+    fn mutated_left_child(
+        fixture: &BinaryChildFixture,
+        mutation: ChildMutation,
+    ) -> Box<RootProofWire> {
+        let mut statement = *fixture.left.statement();
+        let mut stark = fixture.left.stark().clone();
+        match mutation {
+            ChildMutation::Statement => {
+                statement = empty_statement(&fixture.profile, 20);
+            }
+            ChildMutation::Commitment => {
+                let mut words = stark.commitments[1].into_words();
+                words[0] = if words[0] == M31Word::ZERO {
+                    M31Word::from(1_u16)
+                } else {
+                    M31Word::ZERO
+                };
+                stark.commitments[1] = Digest8::new(words);
+            }
+            ChildMutation::Opening => {
+                stark.queried_values[0] = if stark.queried_values[0] == M31Word::ZERO {
+                    M31Word::from(1_u16)
+                } else {
+                    M31Word::ZERO
+                };
+            }
+            ChildMutation::ClaimedSum => {
+                stark.claimed_sums[0] = crate::wire::Qm31Wire::from(
+                    SecureField::from(stark.claimed_sums[0]) + SecureField::one(),
+                );
+            }
+            ChildMutation::FriValue => {
+                stark.last_layer_coefficients[0] = crate::wire::Qm31Wire::from(
+                    SecureField::from(stark.last_layer_coefficients[0]) + SecureField::one(),
+                );
+            }
+        }
+        Box::new(
+            RootProofWire::new(
+                fixture.left.version(),
+                fixture.left.kind(),
+                statement,
+                stark,
+            )
+            .expect("mutation preserves the fixed wire shape"),
+        )
+    }
+
+    fn proved_child_wire(
+        profile: &FrozenProtocolProfile,
+        preprocessing: &RecursionPreprocessing,
+        statement: &SpanStatement,
+        cache_name: &str,
+    ) -> Box<RootProofWire> {
+        let cache_path = std::env::var_os("STARK_V_RECURSION_CHILD_CACHE_DIR")
+            .map(PathBuf::from)
+            .map(|directory| directory.join(cache_name));
+        if let Some(wire) = cache_path
+            .as_deref()
+            .and_then(|path| read_cached_child(path, statement))
+        {
+            return wire;
+        }
+        let proof =
+            prove_empty_leaf(profile, preprocessing, statement).expect("padding child proves");
+        let wire = crate::recursion_child::adapt_recursion_child(profile, &proof)
+            .expect("proof adapts to the child wire");
+        if let Some(path) = cache_path {
+            write_cached_child(&path, wire.as_ref());
+        }
+        wire
+    }
+
+    fn read_cached_child(
+        path: &Path,
+        expected_statement: &SpanStatement,
+    ) -> Option<Box<RootProofWire>> {
+        let raw = std::fs::read(path).ok()?;
+        let wire = std::thread::Builder::new()
+            .name("recursion-child-decode".into())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                let bytes = crate::profile::RootProofBytes::try_from_slice(&raw).ok()?;
+                RootProofWire::decode(&bytes).ok().map(Box::new)
+            })
+            .ok()?
+            .join()
+            .ok()??;
+        (wire.statement() == expected_statement).then_some(wire)
+    }
+
+    fn write_cached_child(path: &Path, wire: &RootProofWire) {
+        let owned = wire.clone();
+        let raw = std::thread::Builder::new()
+            .name("recursion-child-encode".into())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                owned
+                    .encode::<{ crate::profile::ROOT_PROOF_BYTE_SIZE }>()
+                    .expect("child wire has the frozen byte size")
+                    .into_bytes()
+                    .to_vec()
+            })
+            .expect("child cache encoder starts")
+            .join()
+            .expect("child cache encoder completes");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("child cache directory is writable");
+        }
+        std::fs::write(path, raw).expect("child cache file is writable");
     }
 
     #[test]
@@ -642,15 +841,15 @@ mod tests {
             verify_recursion_proof(&profile, &preprocessing, protocol, &statement, proof_kind)
                 .is_err();
         let binary_statement = binary_statement(&profile);
-        let mut unsupported_binary = proof.clone();
-        unsupported_binary.statement = binary_statement;
-        unsupported_binary.component_claim.proof_kind = ProofKind::BinaryNode;
-        let unsupported_binary_rejected = verify_recursion_proof(
+        let mut binary_claim_without_binary_proof = proof.clone();
+        binary_claim_without_binary_proof.statement = binary_statement;
+        binary_claim_without_binary_proof.component_claim.proof_kind = ProofKind::BinaryNode;
+        let binary_claim_without_binary_proof_rejected = verify_recursion_proof(
             &profile,
             &preprocessing,
             protocol,
             &binary_statement,
-            unsupported_binary,
+            binary_claim_without_binary_proof,
         )
         .is_err();
         let mut component_geometry = proof.clone();
@@ -769,7 +968,7 @@ mod tests {
                 expected_statement_rejected,
                 statement_claim_rejected,
                 proof_kind_rejected,
-                unsupported_binary_rejected,
+                binary_claim_without_binary_proof_rejected,
                 component_geometry_rejected,
                 interaction_geometry_rejected,
                 claimed_sum_rejected,
@@ -804,6 +1003,53 @@ mod tests {
                 proof,
             )
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn two_recursion_children_produce_a_valid_binary_proof() {
+        let fixture = binary_child_fixture();
+        let _assembly_guard = crate::segment_leaf::tests::universal_assembly_guard();
+        let preprocessing =
+            preprocess_recursion(&fixture.profile).expect("universal preprocessing is valid");
+        let proof = prove_binary_node(
+            &fixture.profile,
+            &preprocessing,
+            &fixture.left,
+            &fixture.right,
+        )
+        .expect("two authenticated children prove one binary parent");
+        assert!(
+            verify_recursion_proof(
+                &fixture.profile,
+                &preprocessing,
+                fixture.profile.manifest().protocol_id(),
+                &fixture.parent_statement,
+                proof,
+            )
+            .is_ok()
+        );
+    }
+
+    #[rstest]
+    #[case::statement(ChildMutation::Statement)]
+    #[case::commitment(ChildMutation::Commitment)]
+    #[case::opening(ChildMutation::Opening)]
+    #[case::claimed_sum(ChildMutation::ClaimedSum)]
+    #[case::fri_value(ChildMutation::FriValue)]
+    fn recursion_child_rejects_a_mutated_proof_region(#[case] mutation: ChildMutation) {
+        let fixture = binary_child_fixture();
+        let mutated = mutated_left_child(fixture, mutation);
+        let _assembly_guard = crate::segment_leaf::tests::universal_assembly_guard();
+        let preprocessing =
+            preprocess_recursion(&fixture.profile).expect("universal preprocessing is valid");
+        assert!(
+            crate::universal_witness::validate_recursion_child_for_test(
+                &fixture.profile,
+                &preprocessing.universal,
+                &mutated,
+            )
+            .is_err()
         );
     }
 }

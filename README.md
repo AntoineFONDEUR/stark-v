@@ -26,8 +26,9 @@ The main workspace boundaries are:
   proof per segment; proof size and verification work are linear in segment
   count;
 - `recursion`: the universal recursive-verifier AIR plus manifest-bound outer
-  proving and verification for segment and empty leaves; recursion-child replay,
-  binary folding, tree construction, and the root API remain unfinished;
+  proving and verification for segment leaves, empty leaves, and two-child
+  binary parents; tree construction and the application root API remain
+  unfinished;
 - `sdk` and `guest-lib`: host and guest interfaces.
 
 ### Memory Layout
@@ -52,7 +53,7 @@ Address Range           Region          Size
 - [RV32IM AIR architecture](docs/airs.md) describes the active system and points
   to source truth.
 - [Recursive proving](docs/recursion.md) distinguishes current components from
-  the missing constant-size root pipeline.
+  the remaining tree and constant-size root API work.
 - [Project roadmap](docs/roadmap.md) is the dependency-ordered finish-line task
   list and classifies current versus planned documents.
 - [Felt AIR compiler](docs/felt-air-compiler.md),

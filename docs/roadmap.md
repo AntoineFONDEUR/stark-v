@@ -238,8 +238,19 @@ set.
     rejected, two real recursion children produced and verified one parent
     proof, profile/control/empty regressions and all direct-DSL guards passed,
     release clippy and compilation passed, and repository hooks passed.
-- `[active] REC-007` Prove the two-child binary branch.
-- `[pending] REC-008` Build the recursive tree driver.
+- `[done] REC-007` Prove the two-child binary branch.
+  - Binary witnesses materialize independent left and right recursion-verifier
+    lanes under distinct verifier and circuit identifiers, then route both
+    through the same universal DSL-owned component roster.
+  - The unique statement fold enforces common jobs, equal heights, aligned
+    adjacency, execution and cycle continuity, machine-state equality, and
+    edge-claim placement before parent proving.
+  - Evidence: commits `9f849f7d` and `b6f6c9be`; two valid child proofs produced
+    and verified one parent, all five required invalid pair classes failed at
+    the fold boundary, the statement model and AIR substitution matrices passed,
+    all direct-DSL guards passed, release compilation and clippy passed, and
+    repository hooks passed.
+- `[active] REC-008` Build the recursive tree driver.
 - `[pending] REC-009` Expose and bind the application root API.
 - `[pending] REC-010` Demonstrate constant root-proof size.
 - `[pending] PRE-001` Prepare the hash-precompile proof split for production.
@@ -495,7 +506,7 @@ Done when one real recursion proof closes every relation as a child and one
 focused test rejects each mutated statement, commitment, opening, sum, and FRI
 value.
 
-### `[active] REC-007` Binary node
+### `[done] REC-007` Binary node
 
 Dependencies: `REC-006`.
 
@@ -510,7 +521,7 @@ Required work:
 Done when two valid adjacent child proofs produce one verified parent proof and
 swapped, duplicated, gapped, overlapping, or mismatched children fail.
 
-### `[pending] REC-008` Tree driver
+### `[active] REC-008` Tree driver
 
 Dependencies: `REC-007`.
 
@@ -955,6 +966,27 @@ the recorded command without committing a machine-specific path.
   passed.
 - `prek run --all-files`: passed.
 - Commit `9f849f7d` pushed to `origin/chore/scratchpad-cleanups`.
+
+### `REC-007` — 2026-08-05
+
+- The REC-006 end-to-end command proved and verified the valid adjacent-child
+  branch in 785.29 seconds from two independently generated recursion proofs.
+- `STARK_V_RECURSION_CHILD_CACHE_DIR=<temporary-cache> cargo test --release -p recursion recursive_proof::tests::binary_node_rejects_an_invalid_child_pair -- --nocapture`:
+  swapped, duplicated, gapped, overlapping, and job-mismatched pairs were each
+  rejected specifically as statement-fold failures; all 5 generated tests passed
+  in 169.69 seconds after sharing one trusted preprocessing instance.
+- `cargo test --release -p recursion statement::tests::binary_fold_rejects_adversarial_children -- --nocapture`:
+  all 9 statement-model attacks passed, including height, state, cycle, empty,
+  and edge-claim violations.
+- `cargo test --release -p recursion statement_semantics_circuit::tests::every_binary_fold_boundary_rejects_substitution -- --nocapture`:
+  all 10 AIR-circuit substitution attacks passed.
+- `cargo test --release -p recursion --test air_dsl_guard -- --nocapture`: all 5
+  roster, owner-policy, and direct-DSL structural guards passed.
+- `cargo test --release -p recursion --no-run` and
+  `cargo clippy --release -p recursion --all-targets --no-deps -- -D warnings`:
+  passed.
+- `prek run --all-files`: passed.
+- Commit `b6f6c9be` pushed to `origin/chore/scratchpad-cleanups`.
 
 ## Project finish line
 

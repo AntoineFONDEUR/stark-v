@@ -1196,6 +1196,14 @@ mod tests {
         );
     }
 
+    #[test]
+    fn empty_leaf_is_rejected_outside_the_tree_capacity() {
+        assert_eq!(
+            SpanStatement::empty_leaf(job(3, 3), 4),
+            Err(StatementError::SlotsOutsideJob)
+        );
+    }
+
     #[derive(Clone, Copy, Debug)]
     enum FoldAttack {
         Gap,

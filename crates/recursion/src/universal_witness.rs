@@ -399,22 +399,153 @@ pub fn assemble_segment_leaf(
         fri_circuit.nonzero_output_count(),
     )?;
 
-    assemble_segment_components(
-        leaf,
+    assemble_universal_components(
         profile,
         relations,
         preprocessing,
-        transcript,
-        raw_queries,
-        fri_opening,
-        statement_circuit,
-        vm_claim_circuit,
-        vm_public_logup_circuit,
-        vm_composition_circuit,
-        pcs_circuit,
-        fri_circuit,
         component_log_sizes,
+        UniversalAssemblyBranch::Segment {
+            leaf,
+            transcript: Box::new(transcript),
+            raw_queries,
+            fri_opening,
+            statement_circuit: Box::new(statement_circuit),
+            vm_claim_circuit: Box::new(vm_claim_circuit),
+            vm_public_logup_circuit: Box::new(vm_public_logup_circuit),
+            vm_composition_circuit: Box::new(vm_composition_circuit),
+            pcs_circuit: Box::new(pcs_circuit),
+            fri_circuit: Box::new(fri_circuit),
+        },
     )
+}
+
+/// Assembles the unique proof-free witness for one canonical padding slot.
+pub fn assemble_empty_leaf(
+    profile: &FrozenProtocolProfile,
+    statement: &SpanStatement,
+    relations: &UniversalRelations,
+) -> Result<UniversalWitness, UniversalWitnessError> {
+    if statement.slots().height() != 0 || !statement.body().is_empty() {
+        return Err(stage(
+            "empty-leaf statement",
+            "the empty branch requires one canonical height-zero padding slot",
+        ));
+    }
+    let component_log_sizes = recursion_component_log_sizes();
+    if profile.recursion_program().component_log_sizes() != &component_log_sizes {
+        return Err(stage(
+            "universal component capacities",
+            "profile and assembler log sizes differ",
+        ));
+    }
+    let preprocessing = UniversalPreprocessing::new(profile)?;
+    preprocessing.validate_capacities(&component_log_sizes)?;
+
+    let parent: StatementWords =
+        statement
+            .canonical_words()
+            .try_into()
+            .map_err(|words: Vec<M31Word>| {
+                stage(
+                    "empty statement words",
+                    format_args!(
+                        "got {} words, expected {SPAN_STATEMENT_CANONICAL_WORDS}",
+                        words.len()
+                    ),
+                )
+            })?;
+    let zero_statement = [M31Word::ZERO; SPAN_STATEMENT_CANONICAL_WORDS];
+    let statement_circuit = build_statement_semantics_circuit(StatementSemanticsCircuitWitness {
+        segment_selector: false,
+        binary_selector: false,
+        empty_selector: true,
+        segment: &zero_statement,
+        left: &zero_statement,
+        right: &zero_statement,
+        parent: &parent,
+    });
+    ensure_zero_outputs(
+        "empty statement circuit",
+        statement_circuit.nonzero_output_count(),
+    )?;
+    let zero_claim = vec![M31Word::ZERO; profile.public_claim_shape().claim_word_count()];
+    let claimed_sum_count =
+        u32::try_from(COMPONENT_COUNT).map_err(|error| stage("VM component count", error))?;
+    let zero_claimed_sums = vec![SecureField::zero(); COMPONENT_COUNT];
+    let vm_public_logup_circuit = build_vm_public_logup_circuit(
+        profile.public_claim_shape(),
+        claimed_sum_count,
+        VmPublicLogupWitness {
+            segment_selector: false,
+            claim_words: &zero_claim,
+            relation_challenges: VmPublicLogupChallengeWords::new(
+                [M31Word::ZERO; 8],
+                [M31Word::ZERO; 8],
+                [M31Word::ZERO; 8],
+            ),
+            claimed_sums: &zero_claimed_sums,
+        },
+    )
+    .map_err(|error| stage("inactive VM public-LogUp circuit", error))?;
+
+    assemble_universal_components(
+        profile,
+        relations,
+        preprocessing,
+        component_log_sizes,
+        UniversalAssemblyBranch::Empty {
+            statement,
+            statement_circuit: Box::new(statement_circuit),
+            vm_public_logup_circuit: Box::new(vm_public_logup_circuit),
+        },
+    )
+}
+
+enum UniversalAssemblyBranch<'a> {
+    Segment {
+        leaf: &'a VmSegmentLeafWire,
+        transcript: Box<VerifierTranscriptExecution<RecordingTranscriptBackend>>,
+        raw_queries: Vec<M31Word>,
+        fri_opening: FriMerkleOpeningSet,
+        statement_circuit: Box<StatementSemanticsCircuit>,
+        vm_claim_circuit: Box<VmPublicClaimSemanticsCircuit>,
+        vm_public_logup_circuit: Box<VmPublicLogupCircuit>,
+        vm_composition_circuit: Box<VmAirCompositionCircuit>,
+        pcs_circuit: Box<PcsDeepCircuit>,
+        fri_circuit: Box<FriVerifierCircuit>,
+    },
+    Empty {
+        statement: &'a SpanStatement,
+        statement_circuit: Box<StatementSemanticsCircuit>,
+        vm_public_logup_circuit: Box<VmPublicLogupCircuit>,
+    },
+}
+
+impl UniversalAssemblyBranch<'_> {
+    const fn proof_kind(&self) -> ProofKind {
+        match self {
+            Self::Segment { .. } => ProofKind::SegmentLeaf,
+            Self::Empty { .. } => ProofKind::EmptyLeaf,
+        }
+    }
+
+    const fn statement(&self) -> &SpanStatement {
+        match self {
+            Self::Segment { leaf, .. } => leaf.statement(),
+            Self::Empty { statement, .. } => statement,
+        }
+    }
+
+    fn statement_circuit(&self) -> &StatementSemanticsCircuit {
+        match self {
+            Self::Segment {
+                statement_circuit, ..
+            }
+            | Self::Empty {
+                statement_circuit, ..
+            } => statement_circuit.as_ref(),
+        }
+    }
 }
 
 struct FriRoutes {
@@ -800,15 +931,14 @@ fn ensure_universal_trace_layout(
 
 #[allow(clippy::too_many_arguments)]
 fn finalize_universal_witness(
-    statement: &SpanStatement,
+    proof_kind: ProofKind,
     relations: &UniversalRelations,
-    preprocessing: UniversalPreprocessing,
+    public_relation_sum: SecureField,
     preprocessed_components: [UniversalTrace; UNIVERSAL_COMPONENT_COUNT],
     original_components: [UniversalTrace; UNIVERSAL_COMPONENT_COUNT],
     component_log_sizes: UniversalComponentLogSizes,
     expected_column_log_sizes: &TreeVec<Vec<u32>>,
 ) -> Result<UniversalWitness, UniversalWitnessError> {
-    let proof_kind = ProofKind::SegmentLeaf;
     let mut interaction_components: [UniversalTrace; UNIVERSAL_COMPONENT_COUNT] =
         core::array::from_fn(|_| Vec::new());
     let mut claimed_sums = [SecureField::zero(); UNIVERSAL_COMPONENT_COUNT];
@@ -1089,52 +1219,6 @@ fn finalize_universal_witness(
         )?;
     }
 
-    let mut public_relation_sum =
-        crate::statement_input_air::public_statement_terms(statement, &relations.statement_input)
-            .map_err(|error| stage("public statement terms", error))?;
-    public_relation_sum += crate::control_air::public_terminal_control_terms(
-        preprocessing.transcript_calls.vm_plan(),
-        SEGMENT_VERIFIER_ID,
-        &relations.control,
-    );
-    public_relation_sum += crate::statement_semantics_lowering::public_statement_semantics_terms(
-        STATEMENT_CIRCUIT_ID,
-        &preprocessing.statement_reference,
-        &relations.recursion,
-    )
-    .map_err(|error| stage("public statement-circuit terms", error))?;
-    public_relation_sum +=
-        crate::vm_public_claim_semantics_lowering::public_vm_public_claim_semantics_terms(
-            VM_CLAIM_CIRCUIT_ID,
-            &preprocessing.vm_claim_reference,
-            &relations.recursion,
-        )
-        .map_err(|error| stage("public VM claim-circuit terms", error))?;
-    public_relation_sum += crate::vm_public_logup_lowering::public_vm_public_logup_terms(
-        VM_PUBLIC_LOGUP_CIRCUIT_ID,
-        &preprocessing.vm_public_logup_reference,
-        &relations.recursion,
-    )
-    .map_err(|error| stage("public VM LogUp-circuit terms", error))?;
-    public_relation_sum += crate::vm_air_composition_lowering::public_vm_air_composition_terms(
-        VM_COMPOSITION_CIRCUIT_ID,
-        &preprocessing.vm_composition_reference,
-        &relations.recursion,
-    )
-    .map_err(|error| stage("public VM composition-circuit terms", error))?;
-    public_relation_sum += crate::pcs_deep_lowering::public_pcs_deep_terms(
-        PCS_CIRCUIT_IDS[0],
-        &preprocessing.pcs_references.segment,
-        &relations.recursion,
-    )
-    .map_err(|error| stage("public PCS circuit terms", error))?;
-    public_relation_sum += crate::fri_verifier_lowering::public_fri_verifier_terms(
-        FRI_CIRCUIT_IDS[0],
-        &preprocessing.fri_references.segment,
-        &relations.recursion,
-    )
-    .map_err(|error| stage("public FRI circuit terms", error))?;
-
     let preprocessing_ids = universal_preprocessed_column_ids(&component_log_sizes);
     let preprocessed_trace = preprocessed_components
         .into_iter()
@@ -1178,38 +1262,40 @@ fn finalize_universal_witness(
     Ok(witness)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn assemble_segment_components(
-    leaf: &VmSegmentLeafWire,
+fn assemble_universal_components(
     profile: &FrozenProtocolProfile,
     relations: &UniversalRelations,
     preprocessing: UniversalPreprocessing,
-    transcript: VerifierTranscriptExecution<RecordingTranscriptBackend>,
-    raw_queries: Vec<M31Word>,
-    fri_opening: FriMerkleOpeningSet,
-    statement_circuit: StatementSemanticsCircuit,
-    vm_claim_circuit: VmPublicClaimSemanticsCircuit,
-    vm_public_logup_circuit: VmPublicLogupCircuit,
-    vm_composition_circuit: VmAirCompositionCircuit,
-    pcs_circuit: PcsDeepCircuit,
-    fri_circuit: FriVerifierCircuit,
     component_log_sizes: UniversalComponentLogSizes,
+    branch: UniversalAssemblyBranch<'_>,
 ) -> Result<UniversalWitness, UniversalWitnessError> {
-    let proof_kind = ProofKind::SegmentLeaf;
-    let transcript_witness = UniversalTranscriptWitness::Segment(&transcript);
-    let transcript_trace = transcript.backend().trace();
+    let proof_kind = branch.proof_kind();
+    let statement = branch.statement();
+    let statement_circuit = branch.statement_circuit();
+    let transcript_witness = match &branch {
+        UniversalAssemblyBranch::Segment { transcript, .. } => {
+            UniversalTranscriptWitness::Segment(transcript)
+        }
+        UniversalAssemblyBranch::Empty { .. } => UniversalTranscriptWitness::Empty,
+    };
+    let transcript_trace = match &branch {
+        UniversalAssemblyBranch::Segment { transcript, .. } => Some(transcript.backend().trace()),
+        UniversalAssemblyBranch::Empty { .. } => None,
+    };
     let mut poseidon2 = Poseidon2Table::new();
     let mut original_components: [UniversalTrace; UNIVERSAL_COMPONENT_COUNT] =
         core::array::from_fn(|_| Vec::new());
 
     let mut transcript_table = crate::transcript_air::TranscriptHashCallTable::new();
-    crate::transcript_air::push_transcript_calls(
-        &mut transcript_table,
-        &mut poseidon2,
-        SEGMENT_VERIFIER_ID,
-        transcript_trace,
-    )
-    .map_err(|error| stage("transcript hash calls", error))?;
+    if let Some(transcript_trace) = transcript_trace {
+        crate::transcript_air::push_transcript_calls(
+            &mut transcript_table,
+            &mut poseidon2,
+            SEGMENT_VERIFIER_ID,
+            transcript_trace,
+        )
+        .map_err(|error| stage("transcript hash calls", error))?;
+    }
 
     let mut binding_table = crate::transcript_binding_air::TranscriptCallBindingTable::new();
     crate::transcript_binding_air::push_call_bindings(
@@ -1241,20 +1327,22 @@ fn assemble_segment_components(
     .map_err(|error| stage("transcript payloads", error))?;
 
     let mut pow_table = crate::pow::PowCheckTable::new();
-    push_pow_checks(
-        &mut pow_table,
-        SEGMENT_VERIFIER_ID,
-        profile.vm_plan(),
-        transcript_trace,
-    )?;
     let mut pow_frame_table = crate::pow::PowFrameTable::new();
-    crate::pow::push_pow_frames(
-        &mut pow_frame_table,
-        SEGMENT_VERIFIER_ID,
-        profile.vm_plan(),
-        transcript_trace,
-    )
-    .map_err(|error| stage("PoW frames", error))?;
+    if let Some(transcript_trace) = transcript_trace {
+        push_pow_checks(
+            &mut pow_table,
+            SEGMENT_VERIFIER_ID,
+            profile.vm_plan(),
+            transcript_trace,
+        )?;
+        crate::pow::push_pow_frames(
+            &mut pow_frame_table,
+            SEGMENT_VERIFIER_ID,
+            profile.vm_plan(),
+            transcript_trace,
+        )
+        .map_err(|error| stage("PoW frames", error))?;
+    }
 
     let mut challenge_table = crate::relation_challenge_air::RelationChallengeTable::new();
     crate::relation_challenge_air::push_relation_challenges(
@@ -1275,7 +1363,12 @@ fn assemble_segment_components(
     crate::statement_input_air::push_statement_inputs(
         &mut statement_table,
         &preprocessing.statement_input,
-        StatementInputWitness::Segment(leaf.statement()),
+        match &branch {
+            UniversalAssemblyBranch::Segment { leaf, .. } => {
+                StatementInputWitness::Segment(leaf.statement())
+            }
+            UniversalAssemblyBranch::Empty { .. } => StatementInputWitness::Empty,
+        },
     )
     .map_err(|error| stage("statement inputs", error))?;
     let mut statement_semantics_table =
@@ -1283,17 +1376,22 @@ fn assemble_segment_components(
     crate::statement_semantics_input_air::push_statement_semantics_inputs(
         &mut statement_semantics_table,
         &preprocessing.statement_semantics,
-        &statement_circuit,
+        statement_circuit,
         proof_kind,
     )
     .map_err(|error| stage("statement-semantic inputs", error))?;
 
+    let zero_claim = vec![M31Word::ZERO; profile.public_claim_shape().claim_word_count()];
+    let claim_words: &[M31Word] = match &branch {
+        UniversalAssemblyBranch::Segment { leaf, .. } => &leaf.public_claim_words()[..],
+        UniversalAssemblyBranch::Empty { .. } => &zero_claim,
+    };
     let mut claim_table = crate::vm_public_claim_input_air::VmPublicClaimInputTable::new();
     crate::vm_public_claim_input_air::push_vm_public_claim_word_inputs(
         &mut claim_table,
         &preprocessing.vm_claim_input,
         proof_kind,
-        leaf.public_claim_words(),
+        claim_words,
     )
     .map_err(|error| stage("VM public-claim inputs", error))?;
     let mut claim_hash_table = crate::vm_public_claim_hash_air::VmPublicClaimHashTable::new();
@@ -1302,7 +1400,7 @@ fn assemble_segment_components(
         &mut poseidon2,
         &preprocessing.vm_claim_hash,
         proof_kind,
-        leaf.public_claim_words(),
+        claim_words,
     )
     .map_err(|error| stage("VM public-claim hash", error))?;
     let mut io_hash_table = crate::vm_public_io_hash_air::VmPublicIoHashTable::new();
@@ -1311,7 +1409,7 @@ fn assemble_segment_components(
         &mut poseidon2,
         &preprocessing.vm_io_hash,
         proof_kind,
-        leaf.public_claim_words(),
+        claim_words,
     )
     .map_err(|error| stage("VM public-IO hashes", error))?;
     let mut claim_semantics_table =
@@ -1320,7 +1418,12 @@ fn assemble_segment_components(
         &mut claim_semantics_table,
         &preprocessing.vm_claim_semantics,
         &preprocessing.vm_claim_reference,
-        &vm_claim_circuit,
+        match &branch {
+            UniversalAssemblyBranch::Segment {
+                vm_claim_circuit, ..
+            } => vm_claim_circuit,
+            UniversalAssemblyBranch::Empty { .. } => &preprocessing.vm_claim_reference,
+        },
         proof_kind,
     )
     .map_err(|error| stage("VM claim-semantic inputs", error))?;
@@ -1329,7 +1432,16 @@ fn assemble_segment_components(
         &mut public_logup_table,
         &preprocessing.vm_public_logup_input,
         &preprocessing.vm_public_logup_reference,
-        &vm_public_logup_circuit,
+        match &branch {
+            UniversalAssemblyBranch::Segment {
+                vm_public_logup_circuit,
+                ..
+            } => vm_public_logup_circuit,
+            UniversalAssemblyBranch::Empty {
+                vm_public_logup_circuit,
+                ..
+            } => vm_public_logup_circuit,
+        },
         proof_kind,
     )
     .map_err(|error| stage("VM public-LogUp inputs", error))?;
@@ -1339,7 +1451,13 @@ fn assemble_segment_components(
         &mut composition_table,
         &preprocessing.vm_composition_input,
         &preprocessing.vm_composition_reference,
-        &vm_composition_circuit,
+        match &branch {
+            UniversalAssemblyBranch::Segment {
+                vm_composition_circuit,
+                ..
+            } => vm_composition_circuit,
+            UniversalAssemblyBranch::Empty { .. } => &preprocessing.vm_composition_reference,
+        },
         proof_kind,
     )
     .map_err(|error| stage("VM AIR-composition inputs", error))?;
@@ -1350,24 +1468,40 @@ fn assemble_segment_components(
         &mut query_bits_table,
         &mut query_mapping_table,
         &preprocessing.query_position,
-        UniversalRawQueryWitness::Segment(&raw_queries),
+        match &branch {
+            UniversalAssemblyBranch::Segment { raw_queries, .. } => {
+                UniversalRawQueryWitness::Segment(raw_queries)
+            }
+            UniversalAssemblyBranch::Empty { .. } => UniversalRawQueryWitness::Empty,
+        },
     )
     .map_err(|error| stage("query positions", error))?;
 
-    let fri_commitments = fri_opening
-        .layers
-        .iter()
-        .map(|layer| layer.commitment)
-        .collect::<Vec<_>>();
-    let roots = crate::merkle_root_air::MerkleRootSet {
-        trace: &leaf.proof().commitments,
-        fri: &fri_commitments,
+    let fri_commitments = match &branch {
+        UniversalAssemblyBranch::Segment { fri_opening, .. } => fri_opening
+            .layers
+            .iter()
+            .map(|layer| layer.commitment)
+            .collect::<Vec<_>>(),
+        UniversalAssemblyBranch::Empty { .. } => Vec::new(),
     };
     let mut merkle_root_table = crate::merkle_root_air::MerkleRootTable::new();
     crate::merkle_root_air::push_merkle_roots(
         &mut merkle_root_table,
         &preprocessing.merkle_root,
-        crate::merkle_root_air::UniversalMerkleRootWitness::Segment(roots),
+        match &branch {
+            UniversalAssemblyBranch::Segment { leaf, .. } => {
+                crate::merkle_root_air::UniversalMerkleRootWitness::Segment(
+                    crate::merkle_root_air::MerkleRootSet {
+                        trace: &leaf.proof().commitments,
+                        fri: &fri_commitments,
+                    },
+                )
+            }
+            UniversalAssemblyBranch::Empty { .. } => {
+                crate::merkle_root_air::UniversalMerkleRootWitness::Empty
+            }
+        },
     )
     .map_err(|error| stage("Merkle roots", error))?;
 
@@ -1377,10 +1511,15 @@ fn assemble_segment_components(
         &mut poseidon2,
         &preprocessing.trace_merkle,
         &preprocessing.query_position,
-        UniversalTraceOpeningWitness::Segment(TraceOpeningSet {
-            queried_values: &leaf.proof().queried_values[..],
-            raw_queries: &raw_queries,
-        }),
+        match &branch {
+            UniversalAssemblyBranch::Segment {
+                leaf, raw_queries, ..
+            } => UniversalTraceOpeningWitness::Segment(TraceOpeningSet {
+                queried_values: &leaf.proof().queried_values[..],
+                raw_queries,
+            }),
+            UniversalAssemblyBranch::Empty { .. } => UniversalTraceOpeningWitness::Empty,
+        },
     )
     .map_err(|error| stage("trace Merkle leaves", error))?;
     let mut merkle_path_table = merkle_path::MerklePathTable::new();
@@ -1388,23 +1527,31 @@ fn assemble_segment_components(
         &mut merkle_path_table,
         &mut poseidon2,
         &trace_claims,
-        UniversalTracePathWitness::Segment(TracePathSet {
-            roots: &leaf.proof().commitments,
-            paths: &leaf.proof().trace_paths[..],
-        }),
+        match &branch {
+            UniversalAssemblyBranch::Segment { leaf, .. } => {
+                UniversalTracePathWitness::Segment(TracePathSet {
+                    roots: &leaf.proof().commitments,
+                    paths: &leaf.proof().trace_paths[..],
+                })
+            }
+            UniversalAssemblyBranch::Empty { .. } => UniversalTracePathWitness::Empty,
+        },
     )
     .map_err(|error| stage("trace Merkle paths", error))?;
 
     let pcs_references = preprocessing.pcs_references.lanes();
-    let pcs_witnesses = [
-        PcsDeepCircuitLane {
-            verifier_id: SEGMENT_VERIFIER_ID,
-            circuit_id: PCS_CIRCUIT_IDS[0],
-            circuit: &pcs_circuit,
-        },
-        pcs_references[1],
-        pcs_references[2],
-    ];
+    let pcs_witnesses = match &branch {
+        UniversalAssemblyBranch::Segment { pcs_circuit, .. } => [
+            PcsDeepCircuitLane {
+                verifier_id: SEGMENT_VERIFIER_ID,
+                circuit_id: PCS_CIRCUIT_IDS[0],
+                circuit: pcs_circuit,
+            },
+            pcs_references[1],
+            pcs_references[2],
+        ],
+        UniversalAssemblyBranch::Empty { .. } => pcs_references,
+    };
     let mut pcs_input_table = crate::pcs_deep_input_air::PcsDeepInputTable::new();
     crate::pcs_deep_input_air::push_pcs_deep_inputs(
         &mut pcs_input_table,
@@ -1426,24 +1573,33 @@ fn assemble_segment_components(
         &mut poseidon2,
         &preprocessing.fri_merkle,
         &preprocessing.query_position,
-        UniversalFriMerkleWitness::Segment(&fri_opening),
+        match &branch {
+            UniversalAssemblyBranch::Segment { fri_opening, .. } => {
+                UniversalFriMerkleWitness::Segment(fri_opening)
+            }
+            UniversalAssemblyBranch::Empty { .. } => UniversalFriMerkleWitness::Empty,
+        },
     )
     .map_err(|error| stage("FRI Merkle authentication", error))?;
 
-    let inactive_queries =
+    let inactive_vm_queries = vec![M31Word::ZERO; preprocessing.query_position.vm_query_count()];
+    let inactive_recursion_queries =
         vec![M31Word::ZERO; preprocessing.query_position.recursion_query_count()];
     let query_lanes = [
         FriVerifierQueryLane {
             verifier_id: SEGMENT_VERIFIER_ID,
-            raw_queries: &raw_queries,
+            raw_queries: match &branch {
+                UniversalAssemblyBranch::Segment { raw_queries, .. } => raw_queries,
+                UniversalAssemblyBranch::Empty { .. } => &inactive_vm_queries,
+            },
         },
         FriVerifierQueryLane {
             verifier_id: LEFT_RECURSION_VERIFIER_ID,
-            raw_queries: &inactive_queries,
+            raw_queries: &inactive_recursion_queries,
         },
         FriVerifierQueryLane {
             verifier_id: RIGHT_RECURSION_VERIFIER_ID,
-            raw_queries: &inactive_queries,
+            raw_queries: &inactive_recursion_queries,
         },
     ];
     let mut fri_control_table = crate::fri_verifier_control_air::FriVerifierControlTable::new();
@@ -1456,15 +1612,18 @@ fn assemble_segment_components(
     )
     .map_err(|error| stage("FRI verifier control", error))?;
     let fri_references = preprocessing.fri_references.lanes();
-    let fri_witnesses = [
-        FriVerifierCircuitLane {
-            verifier_id: SEGMENT_VERIFIER_ID,
-            circuit_id: FRI_CIRCUIT_IDS[0],
-            circuit: &fri_circuit,
-        },
-        fri_references[1],
-        fri_references[2],
-    ];
+    let fri_witnesses = match &branch {
+        UniversalAssemblyBranch::Segment { fri_circuit, .. } => [
+            FriVerifierCircuitLane {
+                verifier_id: SEGMENT_VERIFIER_ID,
+                circuit_id: FRI_CIRCUIT_IDS[0],
+                circuit: fri_circuit,
+            },
+            fri_references[1],
+            fri_references[2],
+        ],
+        UniversalAssemblyBranch::Empty { .. } => fri_references,
+    };
     let mut fri_input_table = crate::fri_verifier_input_air::FriVerifierInputTable::new();
     crate::fri_verifier_input_air::push_fri_verifier_inputs(
         &mut fri_input_table,
@@ -1480,44 +1639,102 @@ fn assemble_segment_components(
         &mut circuit_traces,
         STATEMENT_CIRCUIT_ID,
         &preprocessing.statement_reference,
-        &statement_circuit,
+        statement_circuit,
     )
     .map_err(|error| stage("statement circuit lowering", error))?;
-    crate::vm_public_claim_semantics_lowering::lower_vm_public_claim_semantics_circuit(
-        &mut circuit_traces,
-        VM_CLAIM_CIRCUIT_ID,
-        &preprocessing.vm_claim_reference,
-        &vm_claim_circuit,
+    if let UniversalAssemblyBranch::Segment {
+        vm_claim_circuit,
+        vm_public_logup_circuit,
+        vm_composition_circuit,
+        pcs_circuit,
+        fri_circuit,
+        ..
+    } = &branch
+    {
+        crate::vm_public_claim_semantics_lowering::lower_vm_public_claim_semantics_circuit(
+            &mut circuit_traces,
+            VM_CLAIM_CIRCUIT_ID,
+            &preprocessing.vm_claim_reference,
+            vm_claim_circuit,
+        )
+        .map_err(|error| stage("VM claim circuit lowering", error))?;
+        crate::vm_public_logup_lowering::lower_vm_public_logup_circuit(
+            &mut circuit_traces,
+            VM_PUBLIC_LOGUP_CIRCUIT_ID,
+            &preprocessing.vm_public_logup_reference,
+            vm_public_logup_circuit,
+        )
+        .map_err(|error| stage("VM public-LogUp circuit lowering", error))?;
+        crate::vm_air_composition_lowering::lower_vm_air_composition_circuit(
+            &mut circuit_traces,
+            VM_COMPOSITION_CIRCUIT_ID,
+            &preprocessing.vm_composition_reference,
+            vm_composition_circuit,
+        )
+        .map_err(|error| stage("VM AIR-composition circuit lowering", error))?;
+        crate::pcs_deep_lowering::lower_pcs_deep_circuit(
+            &mut circuit_traces,
+            PCS_CIRCUIT_IDS[0],
+            &preprocessing.pcs_references.segment,
+            pcs_circuit,
+        )
+        .map_err(|error| stage("PCS DEEP circuit lowering", error))?;
+        crate::fri_verifier_lowering::lower_fri_verifier_circuit(
+            &mut circuit_traces,
+            FRI_CIRCUIT_IDS[0],
+            &preprocessing.fri_references.segment,
+            fri_circuit,
+        )
+        .map_err(|error| stage("FRI verifier circuit lowering", error))?;
+    }
+
+    let mut public_relation_sum =
+        crate::statement_input_air::public_statement_terms(statement, &relations.statement_input)
+            .map_err(|error| stage("public statement terms", error))?;
+    public_relation_sum += crate::statement_semantics_lowering::public_statement_semantics_terms(
+        STATEMENT_CIRCUIT_ID,
+        &preprocessing.statement_reference,
+        &relations.recursion,
     )
-    .map_err(|error| stage("VM claim circuit lowering", error))?;
-    crate::vm_public_logup_lowering::lower_vm_public_logup_circuit(
-        &mut circuit_traces,
-        VM_PUBLIC_LOGUP_CIRCUIT_ID,
-        &preprocessing.vm_public_logup_reference,
-        &vm_public_logup_circuit,
-    )
-    .map_err(|error| stage("VM public-LogUp circuit lowering", error))?;
-    crate::vm_air_composition_lowering::lower_vm_air_composition_circuit(
-        &mut circuit_traces,
-        VM_COMPOSITION_CIRCUIT_ID,
-        &preprocessing.vm_composition_reference,
-        &vm_composition_circuit,
-    )
-    .map_err(|error| stage("VM AIR-composition circuit lowering", error))?;
-    crate::pcs_deep_lowering::lower_pcs_deep_circuit(
-        &mut circuit_traces,
-        PCS_CIRCUIT_IDS[0],
-        &preprocessing.pcs_references.segment,
-        &pcs_circuit,
-    )
-    .map_err(|error| stage("PCS DEEP circuit lowering", error))?;
-    crate::fri_verifier_lowering::lower_fri_verifier_circuit(
-        &mut circuit_traces,
-        FRI_CIRCUIT_IDS[0],
-        &preprocessing.fri_references.segment,
-        &fri_circuit,
-    )
-    .map_err(|error| stage("FRI verifier circuit lowering", error))?;
+    .map_err(|error| stage("public statement-circuit terms", error))?;
+    if matches!(&branch, UniversalAssemblyBranch::Segment { .. }) {
+        public_relation_sum += crate::control_air::public_terminal_control_terms(
+            preprocessing.transcript_calls.vm_plan(),
+            SEGMENT_VERIFIER_ID,
+            &relations.control,
+        );
+        public_relation_sum +=
+            crate::vm_public_claim_semantics_lowering::public_vm_public_claim_semantics_terms(
+                VM_CLAIM_CIRCUIT_ID,
+                &preprocessing.vm_claim_reference,
+                &relations.recursion,
+            )
+            .map_err(|error| stage("public VM claim-circuit terms", error))?;
+        public_relation_sum += crate::vm_public_logup_lowering::public_vm_public_logup_terms(
+            VM_PUBLIC_LOGUP_CIRCUIT_ID,
+            &preprocessing.vm_public_logup_reference,
+            &relations.recursion,
+        )
+        .map_err(|error| stage("public VM LogUp-circuit terms", error))?;
+        public_relation_sum += crate::vm_air_composition_lowering::public_vm_air_composition_terms(
+            VM_COMPOSITION_CIRCUIT_ID,
+            &preprocessing.vm_composition_reference,
+            &relations.recursion,
+        )
+        .map_err(|error| stage("public VM composition-circuit terms", error))?;
+        public_relation_sum += crate::pcs_deep_lowering::public_pcs_deep_terms(
+            PCS_CIRCUIT_IDS[0],
+            &preprocessing.pcs_references.segment,
+            &relations.recursion,
+        )
+        .map_err(|error| stage("public PCS circuit terms", error))?;
+        public_relation_sum += crate::fri_verifier_lowering::public_fri_verifier_terms(
+            FRI_CIRCUIT_IDS[0],
+            &preprocessing.fri_references.segment,
+            &relations.recursion,
+        )
+        .map_err(|error| stage("public FRI circuit terms", error))?;
+    }
 
     original_components[1] = table_trace(
         transcript_table.into_witness_with_log_size(component_log_sizes[1]),
@@ -1677,9 +1894,9 @@ fn assemble_segment_components(
     )?;
 
     finalize_universal_witness(
-        leaf.statement(),
+        proof_kind,
         relations,
-        preprocessing,
+        public_relation_sum,
         preprocessed_components,
         original_components,
         component_log_sizes,
@@ -2293,6 +2510,79 @@ impl std::error::Error for UniversalWitnessError {}
 mod tests {
     use super::*;
     use crate::profile::frozen_protocol_profile;
+    use crate::recursion_air_program::assert_universal_constraints;
+    use crate::test_fixtures::{job, leaf, state, two_empty};
+
+    fn empty_statement() -> SpanStatement {
+        let job = job(3, 12);
+        SpanStatement::empty_leaf(job, 3).expect("slot three is canonical padding")
+    }
+
+    fn empty_witness(
+        profile: &FrozenProtocolProfile,
+        relations: &UniversalRelations,
+    ) -> UniversalWitness {
+        assemble_empty_leaf(profile, &empty_statement(), relations)
+            .expect("canonical padding assembles")
+    }
+
+    #[test]
+    fn canonical_empty_leaf_satisfies_the_complete_universal_air() {
+        let profile = frozen_protocol_profile().expect("frozen profile is valid");
+        let mut channel = prover::poseidon2_channel::Poseidon2M31Channel::default();
+        let relations = UniversalRelations::draw(&mut channel);
+        let witness = empty_witness(&profile, &relations);
+        let accepted = assert_universal_constraints(
+            witness.traces(),
+            witness.preprocessing_ids(),
+            &relations,
+            witness.proof_kind(),
+            witness.component_log_sizes(),
+            witness.claimed_sums(),
+        );
+        assert_eq!(
+            (
+                witness.proof_kind(),
+                witness.global_relation_sum(),
+                accepted
+            ),
+            (
+                ProofKind::EmptyLeaf,
+                SecureField::zero(),
+                UNIVERSAL_COMPONENT_COUNT,
+            )
+        );
+    }
+
+    #[test]
+    fn empty_branch_rejects_an_executed_slot() {
+        let profile = frozen_protocol_profile().expect("frozen profile is valid");
+        let relations = UniversalRelations::dummy();
+        let job = job(1, 1);
+        let executed = leaf(job, 0, 0, 1, state(0), state(1));
+        assert!(assemble_empty_leaf(&profile, &executed, &relations).is_err());
+    }
+
+    #[test]
+    fn empty_branch_rejects_a_non_leaf_padding_span() {
+        let profile = frozen_protocol_profile().expect("frozen profile is valid");
+        let relations = UniversalRelations::dummy();
+        let (_, _, folded_empty) = two_empty();
+        assert!(assemble_empty_leaf(&profile, &folded_empty, &relations).is_err());
+    }
+
+    #[test]
+    fn empty_branch_materializes_zero_for_an_inactive_transcript_column() {
+        let profile = frozen_protocol_profile().expect("frozen profile is valid");
+        let mut channel = prover::poseidon2_channel::Poseidon2M31Channel::default();
+        let relations = UniversalRelations::draw(&mut channel);
+        let witness = empty_witness(&profile, &relations);
+        let values = witness.traces.0[1][0].values.clone().into_cpu_vec();
+        assert_eq!(
+            values,
+            vec![BaseField::zero(); 1 << witness.component_log_sizes()[1]]
+        );
+    }
 
     #[test]
     fn structural_tables_fit_the_frozen_component_capacities() {

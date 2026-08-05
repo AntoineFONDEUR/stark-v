@@ -46,19 +46,22 @@ The implemented foundation includes:
 - VM AIR composition evaluation generated from the prover component roster;
 - DEEP quotient, trace-Merkle, FRI-Merkle, FRI-fold, last-layer, and query
   position constraints;
-- deterministic segment-leaf witness assembly across all 36 universal
-  components, including preprocessing, committed traces, interactions, public
-  relation terms, exact global LogUp closure, and direct constraint acceptance;
+- deterministic segment-leaf and canonical empty-leaf witness assembly across
+  all 36 universal components, including preprocessing, committed traces,
+  interactions, public relation terms, exact global LogUp closure, and direct
+  constraint acceptance;
 - complete segment-leaf replay through VM claim semantics, AIR composition,
   trace and FRI authentication, DEEP quotient evaluation, both proofs of work,
   and the last-layer polynomial check;
+- proof-free empty-leaf assembly that binds one checked height-zero padding
+  statement and materializes every inactive verifier lane as zero;
 - an AIR self-program for verifying a recursion child;
 - shared QM31 multiplication, inversion, linear-operation, and Merkle-path trace
   tables;
 - component, malformed-witness, relation-closure, and leaf-binding tests.
 
-The assembled segment-leaf witness is not yet a recursion proof. The empty and
-binary branches, the outer prover and verifier, recursive child replay, tree
+The assembled segment and empty witnesses are not yet recursion proofs. The
+binary branch, the outer prover and verifier, recursive child replay, tree
 construction, and the public root API remain unfinished. A real recursion proof
 therefore cannot yet be used as a binary child.
 
@@ -118,9 +121,10 @@ relation closures.
 The universal relation registry fixes relation draw order. The VM relation
 bundle comes first so shared VM components preserve their established challenge
 layout. Recursion-local relations then connect control, transcript, statement,
-arithmetic, query, Merkle, DEEP, and FRI tables. Segment-leaf assembly rejects a
-nonzero global LogUp sum across the complete roster; the outer prover must carry
-the same component claims and public terms into proof verification.
+arithmetic, query, Merkle, DEEP, and FRI tables. Segment- and empty-leaf
+assembly reject a nonzero global LogUp sum across the complete roster; the outer
+prover must carry the same component claims and public terms into proof
+verification.
 
 ## Soundness invariants
 

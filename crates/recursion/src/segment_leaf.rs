@@ -949,13 +949,15 @@ impl From<WireError> for SegmentLeafError {
 #[cfg(test)]
 mod tests {
     use std::hash::{Hash, Hasher};
-    use std::sync::OnceLock;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
 
     use air::digest::{MemoryDigest, ProgramDigest, ProtocolId};
+    use num_traits::Zero;
     use prover::components::COMPONENT_COUNT;
     use prover::e2e::{ensure_guest_built, guest_bin_dir};
     use prover::poseidon2_channel::Poseidon2M31MerkleChannel;
     use prover::{preprocess_with_channel, prove_rv32im_with_channel_at_log_sizes_and_transcript};
+    use rstest::rstest;
     use stwo::core::air::Components as CoreComponents;
     use stwo::core::channel::Channel;
     use stwo::core::fields::m31::BaseField;
@@ -988,6 +990,11 @@ mod tests {
                     .expect("real-proof fixture thread completes")
             })
             .as_ref()
+    }
+
+    fn universal_assembly_guard() -> MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn build_real_fixture() -> Box<RealFixture> {
@@ -1247,6 +1254,7 @@ mod tests {
 
     #[test]
     fn real_poseidon_leaf_materializes_the_universal_witness() {
+        let _assembly_guard = universal_assembly_guard();
         let fixture = real_fixture();
         let mut channel = prover::poseidon2_channel::Poseidon2M31Channel::default();
         let relations = crate::universal_relations::UniversalRelations::draw(&mut channel);
@@ -1265,12 +1273,20 @@ mod tests {
             witness.claimed_sums(),
         );
         let first_fingerprint = universal_witness_fingerprint(&witness);
+        let terminal_control_terms = crate::control_air::public_terminal_control_terms(
+            fixture.profile.vm_plan(),
+            crate::control_air::SEGMENT_VERIFIER_ID,
+            &relations.control,
+        );
+        let terminal_control_phase_is_required =
+            !(witness.global_relation_sum() - terminal_control_terms).is_zero();
         let first_shape = (
             witness.proof_kind(),
             witness.traces().len(),
             witness.claimed_sums().len(),
             witness.preprocessing_ids().len(),
             accepted_components,
+            terminal_control_phase_is_required,
         );
         drop(witness);
         let second = crate::universal_witness::assemble_segment_leaf(
@@ -1288,10 +1304,191 @@ mod tests {
                     crate::recursion_air_program::UNIVERSAL_COMPONENT_COUNT,
                     493,
                     crate::recursion_air_program::UNIVERSAL_COMPONENT_COUNT,
+                    true,
                 ),
                 universal_witness_fingerprint(&second),
             )
         );
+    }
+
+    #[derive(Clone, Copy)]
+    enum ProofRegionMutation {
+        StatementHeight,
+        PublicClaim,
+        TraceCommitment,
+        ClaimedSum,
+        SampledValue,
+        QueriedValue,
+        TracePath,
+        FriCommitment,
+        FriValue,
+        FriPath,
+        LastLayerCoefficient,
+        InteractionPow,
+        PcsPow,
+    }
+
+    #[rstest]
+    #[case::statement_height(ProofRegionMutation::StatementHeight)]
+    #[case::public_claim(ProofRegionMutation::PublicClaim)]
+    #[case::trace_commitment(ProofRegionMutation::TraceCommitment)]
+    #[case::claimed_sum(ProofRegionMutation::ClaimedSum)]
+    #[case::sampled_value(ProofRegionMutation::SampledValue)]
+    #[case::queried_value(ProofRegionMutation::QueriedValue)]
+    #[case::trace_path(ProofRegionMutation::TracePath)]
+    #[case::fri_commitment(ProofRegionMutation::FriCommitment)]
+    #[case::fri_value(ProofRegionMutation::FriValue)]
+    #[case::fri_path(ProofRegionMutation::FriPath)]
+    #[case::last_layer_coefficient(ProofRegionMutation::LastLayerCoefficient)]
+    #[case::interaction_pow(ProofRegionMutation::InteractionPow)]
+    #[case::pcs_pow(ProofRegionMutation::PcsPow)]
+    fn universal_leaf_rejects_each_independently_mutated_proof_region(
+        #[case] mutation: ProofRegionMutation,
+    ) {
+        let _assembly_guard = universal_assembly_guard();
+        let fixture = real_fixture();
+        let leaf = mutated_leaf(fixture, mutation);
+        let mut channel = prover::poseidon2_channel::Poseidon2M31Channel::default();
+        let relations = crate::universal_relations::UniversalRelations::draw(&mut channel);
+        assert!(
+            crate::universal_witness::assemble_segment_leaf(&fixture.profile, &leaf, &relations,)
+                .is_err()
+        );
+    }
+
+    fn mutated_leaf(fixture: &RealFixture, mutation: ProofRegionMutation) -> VmSegmentLeafWire {
+        let mut leaf = fixture.wire.as_ref().clone();
+        match mutation {
+            ProofRegionMutation::StatementHeight => {
+                leaf.statement = height_one_statement(fixture);
+            }
+            ProofRegionMutation::PublicClaim => {
+                leaf.public_claim_words[0] = flipped_word(leaf.public_claim_words[0]);
+            }
+            ProofRegionMutation::TraceCommitment => {
+                leaf.proof.commitments[0] = flipped_digest(leaf.proof.commitments[0]);
+            }
+            ProofRegionMutation::ClaimedSum => {
+                leaf.proof.claimed_sums[0] = flipped_qm31(leaf.proof.claimed_sums[0]);
+            }
+            ProofRegionMutation::SampledValue => {
+                leaf.proof.sampled_values[0] = flipped_qm31(leaf.proof.sampled_values[0]);
+            }
+            ProofRegionMutation::QueriedValue => {
+                leaf.proof.queried_values[0] = flipped_word(leaf.proof.queried_values[0]);
+            }
+            ProofRegionMutation::TracePath => {
+                leaf.proof.trace_paths[0] = flipped_path(leaf.proof.trace_paths[0]);
+            }
+            ProofRegionMutation::FriCommitment => {
+                let layer = leaf.proof.fri_layers[0].clone();
+                leaf.proof.fri_layers[0] = FriLayerWire::new(
+                    layer.active_width(),
+                    flipped_digest(layer.commitment()),
+                    Box::new(*layer.queries()),
+                )
+                .expect("the active FRI width is unchanged");
+            }
+            ProofRegionMutation::FriValue => {
+                let layer = leaf.proof.fri_layers[0].clone();
+                let mut queries = Box::new(*layer.queries());
+                let query = queries[0];
+                let mut values = *query.values();
+                values[0] = flipped_qm31(values[0]);
+                queries[0] = FriQueryWire::new(values, *query.path());
+                leaf.proof.fri_layers[0] =
+                    FriLayerWire::new(layer.active_width(), layer.commitment(), queries)
+                        .expect("the active FRI width is unchanged");
+            }
+            ProofRegionMutation::FriPath => {
+                let layer = leaf.proof.fri_layers[0].clone();
+                let mut queries = Box::new(*layer.queries());
+                let query = queries[0];
+                queries[0] = FriQueryWire::new(*query.values(), flipped_path(*query.path()));
+                leaf.proof.fri_layers[0] =
+                    FriLayerWire::new(layer.active_width(), layer.commitment(), queries)
+                        .expect("the active FRI width is unchanged");
+            }
+            ProofRegionMutation::LastLayerCoefficient => {
+                leaf.proof.last_layer_coefficients[0] =
+                    flipped_qm31(leaf.proof.last_layer_coefficients[0]);
+            }
+            ProofRegionMutation::InteractionPow => leaf.proof.interaction_pow ^= 1,
+            ProofRegionMutation::PcsPow => leaf.proof.pcs_pow ^= 1,
+        }
+        leaf
+    }
+
+    fn height_one_statement(fixture: &RealFixture) -> SpanStatement {
+        let complete = fixture.job.complete();
+        let synthetic_complete = crate::statement::CompleteExecutionStatement::new(
+            complete.protocol(),
+            complete.program(),
+            complete.initial_state(),
+            complete.final_state(),
+            complete.public_input(),
+            complete.public_output(),
+            2,
+        )
+        .expect("the synthetic execution has two cycles");
+        let job =
+            JobContext::new(synthetic_complete, 2).expect("two segments define a height-one job");
+        let left_span = ExecutedSpan::new(
+            0,
+            1,
+            0,
+            1,
+            complete.initial_state(),
+            complete.initial_state(),
+            EdgeClaim::present(complete.public_input()),
+            EdgeClaim::absent(),
+        )
+        .expect("the synthetic left segment is nonempty");
+        let right_span = ExecutedSpan::new(
+            1,
+            1,
+            1,
+            1,
+            complete.initial_state(),
+            complete.final_state(),
+            EdgeClaim::absent(),
+            EdgeClaim::present(complete.public_output()),
+        )
+        .expect("the synthetic right segment is nonempty");
+        let left = SpanStatement::segment_leaf(job, 0, left_span)
+            .expect("the synthetic left statement is canonical");
+        let right = SpanStatement::segment_leaf(job, 1, right_span)
+            .expect("the synthetic right statement is canonical");
+        SpanStatement::fold(&left, &right).expect("two adjacent leaves form a height-one statement")
+    }
+
+    fn flipped_word(word: M31Word) -> M31Word {
+        if word == M31Word::ZERO {
+            M31Word::from(1)
+        } else {
+            M31Word::ZERO
+        }
+    }
+
+    fn flipped_qm31(value: Qm31Wire) -> Qm31Wire {
+        let mut words = *value.words();
+        words[0] = flipped_word(words[0]);
+        Qm31Wire::new(words)
+    }
+
+    fn flipped_digest(value: Digest8) -> Digest8 {
+        let mut words = value.into_words();
+        words[0] = flipped_word(words[0]);
+        Digest8::new(words)
+    }
+
+    fn flipped_path<const MAX_DEPTH: usize>(
+        path: MerklePathWire<MAX_DEPTH>,
+    ) -> MerklePathWire<MAX_DEPTH> {
+        let mut siblings = *path.siblings();
+        siblings[0] = flipped_digest(siblings[0]);
+        MerklePathWire::new(path.active_depth(), siblings)
+            .expect("an active sibling changes without changing path shape")
     }
 
     fn universal_witness_fingerprint(witness: &crate::universal_witness::UniversalWitness) -> u64 {

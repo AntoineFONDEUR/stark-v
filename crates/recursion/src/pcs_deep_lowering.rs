@@ -353,15 +353,13 @@ mod tests {
         );
 
         let mut traces = CircuitTraces::default();
-        for (reference, witness) in references.lanes().iter().zip(witnesses.lanes().iter()) {
-            lower_pcs_deep_circuit(
-                &mut traces,
-                reference.circuit_id,
-                reference.circuit,
-                witness.circuit,
-            )
-            .expect("valid DEEP circuit lowers");
-        }
+        lower_pcs_deep_circuit(
+            &mut traces,
+            CIRCUIT_IDS[0],
+            &references.segment,
+            &witnesses.segment,
+        )
+        .expect("valid segment DEEP circuit lowers");
         let (_, mul_sum) =
             qm31_mul::gen_interaction_trace(&traces.qm31_mul.into_witness(), &circuit_relations);
         let (_, inverse_sum) =
@@ -370,14 +368,9 @@ mod tests {
             &traces.linear_ops.into_witness(),
             &circuit_relations,
         );
-        let public_sum = references
-            .lanes()
-            .iter()
-            .map(|lane| {
-                public_pcs_deep_terms(lane.circuit_id, lane.circuit, &circuit_relations)
-                    .expect("reference outputs are zero")
-            })
-            .sum::<SecureField>();
+        let public_sum =
+            public_pcs_deep_terms(CIRCUIT_IDS[0], &references.segment, &circuit_relations)
+                .expect("segment reference outputs are zero");
         assert!(
             (input_sum + semantic_sum + mul_sum + inverse_sum + linear_sum + public_sum).is_zero()
         );

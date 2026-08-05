@@ -636,37 +636,38 @@ mod query_bits_dsl {
 
             consume(active) randomness_word(verifier_id, raw_query_kind, query, 0, word);
             emit(active * use_count) bits(verifier_id, query, bit_0, bit_1, bit_2, bit_3, bit_4, bit_5, bit_6, bit_7, bit_8, bit_9, bit_10, bit_11, bit_12, bit_13, bit_14, bit_15, bit_16, bit_17, bit_18, bit_19, bit_20, bit_21, bit_22, bit_23, bit_24, bit_25, bit_26, bit_27, bit_28, bit_29, bit_30);
-        emit(active) bit_value(verifier_id, query, 0, bit_0);
-        emit(active) bit_value(verifier_id, query, 1, bit_1);
-        emit(active) bit_value(verifier_id, query, 2, bit_2);
-        emit(active) bit_value(verifier_id, query, 3, bit_3);
-        emit(active) bit_value(verifier_id, query, 4, bit_4);
-        emit(active) bit_value(verifier_id, query, 5, bit_5);
-        emit(active) bit_value(verifier_id, query, 6, bit_6);
-        emit(active) bit_value(verifier_id, query, 7, bit_7);
-        emit(active) bit_value(verifier_id, query, 8, bit_8);
-        emit(active) bit_value(verifier_id, query, 9, bit_9);
-        emit(active) bit_value(verifier_id, query, 10, bit_10);
-        emit(active) bit_value(verifier_id, query, 11, bit_11);
-        emit(active) bit_value(verifier_id, query, 12, bit_12);
-        emit(active) bit_value(verifier_id, query, 13, bit_13);
-        emit(active) bit_value(verifier_id, query, 14, bit_14);
-        emit(active) bit_value(verifier_id, query, 15, bit_15);
-        emit(active) bit_value(verifier_id, query, 16, bit_16);
-        emit(active) bit_value(verifier_id, query, 17, bit_17);
-        emit(active) bit_value(verifier_id, query, 18, bit_18);
-        emit(active) bit_value(verifier_id, query, 19, bit_19);
-        emit(active) bit_value(verifier_id, query, 20, bit_20);
-        emit(active) bit_value(verifier_id, query, 21, bit_21);
-        emit(active) bit_value(verifier_id, query, 22, bit_22);
-        emit(active) bit_value(verifier_id, query, 23, bit_23);
-        emit(active) bit_value(verifier_id, query, 24, bit_24);
-        emit(active) bit_value(verifier_id, query, 25, bit_25);
-        emit(active) bit_value(verifier_id, query, 26, bit_26);
-        emit(active) bit_value(verifier_id, query, 27, bit_27);
-        emit(active) bit_value(verifier_id, query, 28, bit_28);
-        emit(active) bit_value(verifier_id, query, 29, bit_29);
-        emit(active) bit_value(verifier_id, query, 30, bit_30);
+        // PCS DEEP and FRI verification each consume every canonical query bit.
+        emit(active * 2) bit_value(verifier_id, query, 0, bit_0);
+        emit(active * 2) bit_value(verifier_id, query, 1, bit_1);
+        emit(active * 2) bit_value(verifier_id, query, 2, bit_2);
+        emit(active * 2) bit_value(verifier_id, query, 3, bit_3);
+        emit(active * 2) bit_value(verifier_id, query, 4, bit_4);
+        emit(active * 2) bit_value(verifier_id, query, 5, bit_5);
+        emit(active * 2) bit_value(verifier_id, query, 6, bit_6);
+        emit(active * 2) bit_value(verifier_id, query, 7, bit_7);
+        emit(active * 2) bit_value(verifier_id, query, 8, bit_8);
+        emit(active * 2) bit_value(verifier_id, query, 9, bit_9);
+        emit(active * 2) bit_value(verifier_id, query, 10, bit_10);
+        emit(active * 2) bit_value(verifier_id, query, 11, bit_11);
+        emit(active * 2) bit_value(verifier_id, query, 12, bit_12);
+        emit(active * 2) bit_value(verifier_id, query, 13, bit_13);
+        emit(active * 2) bit_value(verifier_id, query, 14, bit_14);
+        emit(active * 2) bit_value(verifier_id, query, 15, bit_15);
+        emit(active * 2) bit_value(verifier_id, query, 16, bit_16);
+        emit(active * 2) bit_value(verifier_id, query, 17, bit_17);
+        emit(active * 2) bit_value(verifier_id, query, 18, bit_18);
+        emit(active * 2) bit_value(verifier_id, query, 19, bit_19);
+        emit(active * 2) bit_value(verifier_id, query, 20, bit_20);
+        emit(active * 2) bit_value(verifier_id, query, 21, bit_21);
+        emit(active * 2) bit_value(verifier_id, query, 22, bit_22);
+        emit(active * 2) bit_value(verifier_id, query, 23, bit_23);
+        emit(active * 2) bit_value(verifier_id, query, 24, bit_24);
+        emit(active * 2) bit_value(verifier_id, query, 25, bit_25);
+        emit(active * 2) bit_value(verifier_id, query, 26, bit_26);
+        emit(active * 2) bit_value(verifier_id, query, 27, bit_27);
+        emit(active * 2) bit_value(verifier_id, query, 28, bit_28);
+        emit(active * 2) bit_value(verifier_id, query, 29, bit_29);
+        emit(active * 2) bit_value(verifier_id, query, 30, bit_30);
 
             return word;
         }
@@ -1398,7 +1399,7 @@ mod tests {
                         M31::from(bit),
                         M31::from((word >> bit) & 1),
                     ]);
-                    sum - denominator.inverse()
+                    sum - denominator.inverse() - denominator.inverse()
                 })
             });
         assert!(

@@ -256,7 +256,9 @@ stwo_macros::define_air_fns! {
             statement_scope, word_index, value,
         );
         consume(segment_active * io_digest_mask) digest(io_kind, word_index, value);
-        emit(row_mask * use_count) wire(circuit_id, node_id, value, 0, 0, 0);
+        emit(segment_active * row_mask * use_count) wire(
+            circuit_id, node_id, value, 0, 0, 0,
+        );
 
         return value;
     }

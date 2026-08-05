@@ -9,20 +9,23 @@
 
 use core::fmt;
 
+use num_traits::Zero;
 use simd::AlignedVec;
 use stwo::core::ColumnVec;
 use stwo::core::channel::Channel;
-use stwo::core::fields::m31::BaseField;
-use stwo::core::fields::qm31::QM31;
+use stwo::core::fields::FieldExpOps;
+use stwo::core::fields::m31::{BaseField, M31};
+use stwo::core::fields::qm31::{QM31, SecureField};
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::backend::simd::column::BaseColumn;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::CircleEvaluation;
+use stwo_constraint_framework::Relation;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::relation;
 
-use super::kernel::{VerifierControlPlan, VerifierSchema};
+use super::kernel::{VerifierControlPlan, VerifierSchema, VerifierStep};
 use super::wire::ProofKind;
 
 pub const SEGMENT_VERIFIER_ID: u32 = 0;
@@ -282,6 +285,41 @@ pub fn gen_interaction_trace(
         binary_active,
         relations,
     )
+}
+
+/// Verifier-owned consumers for terminal control steps with no witness table.
+///
+/// `CloseRelation` and `Complete` state assertions are enforced by the outer
+/// global-sum check itself. Their trusted control tuples therefore close
+/// against public negative terms instead of a committed consumer component.
+pub fn public_terminal_control_terms(
+    plan: &VerifierControlPlan,
+    verifier_id: u32,
+    relations: &ControlRelations,
+) -> SecureField {
+    plan.steps()
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(_, step)| {
+            matches!(
+                step,
+                VerifierStep::CloseRelation { .. } | VerifierStep::Complete
+            )
+        })
+        .fold(SecureField::zero(), |sum, (sequence, step)| {
+            let encoded = step.encode();
+            let denominator: SecureField = relations.step.combine(&[
+                M31::from(verifier_id),
+                M31::from(u32::try_from(sequence).expect("validated control sequence fits u32")),
+                M31::from(encoded.tag()),
+                M31::from(encoded.args()[0]),
+                M31::from(encoded.args()[1]),
+                M31::from(encoded.args()[2]),
+                M31::from(encoded.args()[3]),
+            ]);
+            sum - denominator.inverse()
+        })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

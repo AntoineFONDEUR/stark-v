@@ -417,7 +417,9 @@ stwo_macros::define_air_fns! {
         consume(segment_active * oods_point_mask) randomness_word(
             verifier_id, oods_point_kind, source_index_0, source_index_1, value,
         );
-        emit(row_mask * use_count) wire(circuit_id, node_id, value, 0, 0, 0);
+        emit(segment_active * row_mask * use_count) wire(
+            circuit_id, node_id, value, 0, 0, 0,
+        );
 
         return value;
     }

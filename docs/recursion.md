@@ -48,16 +48,19 @@ The implemented foundation includes:
   position constraints;
 - deterministic segment-leaf witness assembly across all 36 universal
   components, including preprocessing, committed traces, interactions, public
-  relation terms, and direct constraint acceptance;
+  relation terms, exact global LogUp closure, and direct constraint acceptance;
+- complete segment-leaf replay through VM claim semantics, AIR composition,
+  trace and FRI authentication, DEEP quotient evaluation, both proofs of work,
+  and the last-layer polynomial check;
 - an AIR self-program for verifying a recursion child;
 - shared QM31 multiplication, inversion, linear-operation, and Merkle-path trace
   tables;
 - component, malformed-witness, relation-closure, and leaf-binding tests.
 
-The assembled segment-leaf witness is not yet a recursion proof. Global LogUp
-closure, the empty and binary branches, the outer prover and verifier, recursive
-child replay, tree construction, and the public root API remain unfinished. A
-real recursion proof therefore cannot yet be used as a binary child.
+The assembled segment-leaf witness is not yet a recursion proof. The empty and
+binary branches, the outer prover and verifier, recursive child replay, tree
+construction, and the public root API remain unfinished. A real recursion proof
+therefore cannot yet be used as a binary child.
 
 The live universal roster has 36 components. Every recursion-local component is
 authored directly through `define_air_fns!`; Poseidon2 uses the same macro, and
@@ -115,8 +118,9 @@ relation closures.
 The universal relation registry fixes relation draw order. The VM relation
 bundle comes first so shared VM components preserve their established challenge
 layout. Recursion-local relations then connect control, transcript, statement,
-arithmetic, query, Merkle, DEEP, and FRI tables. The final proof must enforce
-global LogUp closure across the complete roster.
+arithmetic, query, Merkle, DEEP, and FRI tables. Segment-leaf assembly rejects a
+nonzero global LogUp sum across the complete roster; the outer prover must carry
+the same component claims and public terms into proof verification.
 
 ## Soundness invariants
 

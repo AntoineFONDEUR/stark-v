@@ -385,7 +385,9 @@ stwo_macros::define_air_fns! {
         consume(segment_active * claimed_sum_mask) verifier_input_word(
             verifier_id, claimed_sum_kind, source_index_0, source_index_1, value,
         );
-        emit(row_mask * use_count) wire(circuit_id, node_id, value, 0, 0, 0);
+        emit(segment_active * row_mask * use_count) wire(
+            circuit_id, node_id, value, 0, 0, 0,
+        );
 
         return value;
     }

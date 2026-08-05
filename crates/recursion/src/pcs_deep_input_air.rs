@@ -520,7 +520,7 @@ stwo_macros::define_air_fns! {
         emit(active * answer_mask) answer_word(
             verifier_id, source_index_0, source_index_1, value,
         );
-        emit(row_mask * use_count) wire(circuit_id, node_id, value, 0, 0, 0);
+        emit(active * use_count) wire(circuit_id, node_id, value, 0, 0, 0);
 
         return value;
     }

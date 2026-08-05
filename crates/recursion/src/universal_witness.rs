@@ -140,6 +140,11 @@ impl UniversalWitness {
         self.public_relation_sum
     }
 
+    /// Sum checked by the outer verifier after adding every component claim.
+    pub fn global_relation_sum(&self) -> SecureField {
+        self.claimed_sums.iter().copied().sum::<SecureField>() + self.public_relation_sum
+    }
+
     pub const fn component_log_sizes(&self) -> &UniversalComponentLogSizes {
         &self.component_log_sizes
     }
@@ -215,6 +220,10 @@ pub fn assemble_segment_leaf(
         right: &zero_statement,
         parent: &statement_words,
     });
+    ensure_zero_outputs(
+        "segment statement circuit",
+        statement_circuit.nonzero_output_count(),
+    )?;
     let input_digest =
         *public_input_digest_from_claim(leaf.public_claim_words(), profile.public_claim_shape())
             .map_err(|error| stage("public-input digest", error))?
@@ -236,6 +245,10 @@ pub fn assemble_segment_leaf(
         },
     )
     .map_err(|error| stage("VM public-claim semantic circuit", error))?;
+    ensure_zero_outputs(
+        "VM public-claim semantic circuit",
+        vm_claim_circuit.nonzero_output_count(),
+    )?;
     let proof_claimed_sums = leaf
         .proof()
         .claimed_sums
@@ -259,6 +272,10 @@ pub fn assemble_segment_leaf(
         },
     )
     .map_err(|error| stage("VM public-LogUp circuit", error))?;
+    ensure_zero_outputs(
+        "VM public-LogUp circuit",
+        vm_public_logup_circuit.nonzero_output_count(),
+    )?;
     let sampled_values = leaf
         .proof()
         .sampled_values
@@ -278,6 +295,10 @@ pub fn assemble_segment_leaf(
         },
     )
     .map_err(|error| stage("VM AIR-composition circuit", error))?;
+    ensure_zero_outputs(
+        "VM AIR-composition circuit",
+        vm_composition_circuit.nonzero_output_count(),
+    )?;
 
     let queried_values = leaf
         .proof()
@@ -345,6 +366,7 @@ pub fn assemble_segment_leaf(
         },
     )
     .map_err(|error| stage("VM PCS DEEP circuit", error))?;
+    ensure_zero_outputs("VM PCS DEEP circuit", pcs_circuit.nonzero_output_count())?;
     let last_layer_positions = last_layer_positions(
         &preprocessing.query_position,
         SEGMENT_VERIFIER_ID,
@@ -372,6 +394,10 @@ pub fn assemble_segment_leaf(
         },
     )
     .map_err(|error| stage("VM FRI verifier circuit", error))?;
+    ensure_zero_outputs(
+        "VM FRI verifier circuit",
+        fri_circuit.nonzero_output_count(),
+    )?;
 
     assemble_segment_components(
         leaf,
@@ -1066,6 +1092,11 @@ fn finalize_universal_witness(
     let mut public_relation_sum =
         crate::statement_input_air::public_statement_terms(statement, &relations.statement_input)
             .map_err(|error| stage("public statement terms", error))?;
+    public_relation_sum += crate::control_air::public_terminal_control_terms(
+        preprocessing.transcript_calls.vm_plan(),
+        SEGMENT_VERIFIER_ID,
+        &relations.control,
+    );
     public_relation_sum += crate::statement_semantics_lowering::public_statement_semantics_terms(
         STATEMENT_CIRCUIT_ID,
         &preprocessing.statement_reference,
@@ -1129,14 +1160,22 @@ fn finalize_universal_witness(
         .collect::<Vec<_>>();
     let traces = TreeVec::new(vec![preprocessed_trace, original_trace, interaction_trace]);
     ensure_universal_trace_layout(&traces, expected_column_log_sizes)?;
-    Ok(UniversalWitness {
+    let witness = UniversalWitness {
         proof_kind,
         traces,
         claimed_sums,
         public_relation_sum,
         component_log_sizes,
         preprocessing_ids,
-    })
+    };
+    let global_relation_sum = witness.global_relation_sum();
+    if !global_relation_sum.is_zero() {
+        return Err(stage(
+            "universal relation closure",
+            format_args!("global LogUp sum is nonzero: {global_relation_sum:?}"),
+        ));
+    }
+    Ok(witness)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1444,12 +1483,6 @@ fn assemble_segment_components(
         &statement_circuit,
     )
     .map_err(|error| stage("statement circuit lowering", error))?;
-    if let Some((ordinal, node_id, value)) = vm_claim_circuit.first_nonzero_output() {
-        return Err(stage(
-            "VM claim circuit",
-            format_args!("constraint output {ordinal} at node {node_id} is nonzero: {value:?}"),
-        ));
-    }
     crate::vm_public_claim_semantics_lowering::lower_vm_public_claim_semantics_circuit(
         &mut circuit_traces,
         VM_CLAIM_CIRCUIT_ID,
@@ -2224,6 +2257,20 @@ fn stage(stage: &'static str, error: impl fmt::Display) -> UniversalWitnessError
     UniversalWitnessError {
         stage,
         detail: error.to_string(),
+    }
+}
+
+fn ensure_zero_outputs(
+    circuit: &'static str,
+    nonzero_output_count: usize,
+) -> Result<(), UniversalWitnessError> {
+    if nonzero_output_count == 0 {
+        Ok(())
+    } else {
+        Err(stage(
+            circuit,
+            format_args!("{nonzero_output_count} constraint outputs are nonzero"),
+        ))
     }
 }
 

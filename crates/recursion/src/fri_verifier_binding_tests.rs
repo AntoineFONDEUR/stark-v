@@ -362,31 +362,27 @@ fn fri_route_bridge_closes_between_control_and_input_airs() {
     );
 
     let mut traces = CircuitTraces::default();
-    for (reference, witness) in circuit_lanes(&references)
-        .iter()
-        .zip(circuit_lanes(&witnesses).iter())
-    {
-        lower_fri_verifier_circuit(
-            &mut traces,
-            reference.circuit_id,
-            reference.circuit,
-            witness.circuit,
-        )
-        .expect("valid FRI circuit lowers");
-    }
+    let segment_reference = circuit_lanes(&references)[0];
+    let segment_witness = circuit_lanes(&witnesses)[0];
+    lower_fri_verifier_circuit(
+        &mut traces,
+        segment_reference.circuit_id,
+        segment_reference.circuit,
+        segment_witness.circuit,
+    )
+    .expect("valid segment FRI circuit lowers");
     let (_, mul_sum) =
         qm31_mul::gen_interaction_trace(&traces.qm31_mul.into_witness(), &circuit_relations);
     let (_, inverse_sum) =
         qm31_inv::gen_interaction_trace(&traces.qm31_inv.into_witness(), &circuit_relations);
     let (_, linear_sum) =
         linear_ops::gen_interaction_trace(&traces.linear_ops.into_witness(), &circuit_relations);
-    let public_sum = circuit_lanes(&references)
-        .iter()
-        .map(|lane| {
-            public_fri_verifier_terms(lane.circuit_id, lane.circuit, &circuit_relations)
-                .expect("reference outputs are zero")
-        })
-        .sum::<SecureField>();
+    let public_sum = public_fri_verifier_terms(
+        segment_reference.circuit_id,
+        segment_reference.circuit,
+        &circuit_relations,
+    )
+    .expect("segment reference outputs are zero");
 
     assert!(
         (control_sum

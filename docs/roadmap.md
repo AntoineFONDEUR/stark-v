@@ -168,8 +168,25 @@ set.
   - Evidence: commit `93dc88b3`; focused real-proof, malformed metadata, fixed
     wire, fixed trace, macro, clippy, full recursion, full release workspace,
     and repository hook suites passed.
-- `[active] REC-002` Build the universal trace assembler.
-- `[pending] REC-003` Close the segment-leaf branch end to end.
+- `[done] REC-002` Build the universal trace assembler.
+  - Recursion-targeted VM proofs use the trusted manifest transcript while the
+    ordinary prover retains its native public transcript and compact proof
+    auxiliary state.
+  - `UniversalWitness` deterministically fills preprocessing, original, and
+    interaction trees for all 36 components, derives all claimed sums and
+    verifier-owned public terms, and validates every emitted column against the
+    frozen program registry.
+  - STWO-omitted FRI query values are reconstructed from the DEEP answer and
+    prior folds before both Merkle and folding checks; PCS periodicity uses the
+    committed-domain log sizes.
+  - The corrected active profile has 22 recursion FRI layers, a 3,383,748-byte
+    fixed proof wire, and protocol identifier limbs
+    `[802324842, 833766223, 1950912128, 622344095, 673876662, 1623355154, 788242498, 1733274698]`.
+  - Evidence: commit `827ec9a9`; deterministic real-proof assembly, all 36
+    direct component checks, focused malformed-FRI tests, the ordinary prover
+    integration, the full recursion and workspace release suites, clippy, DSL
+    guards, and repository hooks passed.
+- `[active] REC-003` Close the segment-leaf branch end to end.
 - `[pending] REC-004` Close the canonical empty-leaf branch.
 - `[pending] REC-005` Implement the outer recursion prover and verifier.
 - `[pending] REC-006` Verify a real recursion proof as a child.
@@ -351,7 +368,7 @@ Required work:
 Done when a real proof round-trips and one focused test rejects each malformed
 wire or metadata field.
 
-### `[active] REC-002` Universal trace assembler
+### `[done] REC-002` Universal trace assembler
 
 Dependencies: `REC-001`.
 
@@ -369,7 +386,7 @@ Done when assembling the same verifier input twice produces identical traces,
 claims, log sizes, and preprocessing identifiers and every component accepts the
 assembled witness.
 
-### `[pending] REC-003` Segment-leaf closure
+### `[active] REC-003` Segment-leaf closure
 
 Dependencies: `REC-002`.
 
@@ -761,6 +778,32 @@ commands run, observed test counts or measurements, and the pushed commit.
 - `cargo test --release --workspace`: passed in 271.02 seconds.
 - `prek run --all-files`: passed.
 - Commit `93dc88b3` pushed to `origin/chore/scratchpad-cleanups`.
+
+### `REC-002` — 2026-08-05
+
+- `cargo test --release -p recursion fri_verifier_circuit::tests:: -- --nocapture`:
+  15 FRI arithmetic and malformed-query tests passed.
+- `cargo test --release -p recursion segment_leaf::tests:: -- --nocapture`: 16
+  tests passed in 88.41 seconds, including profiled-prover transcript parity,
+  direct STWO verification, deterministic double assembly, and acceptance by all
+  36 macro-generated components.
+- `cargo test --release -p recursion profile::tests:: -- --nocapture`: 7 active
+  profile construction and conformance tests passed.
+- `cargo test --release -p recursion universal_witness::tests:: -- --nocapture`:
+  2 structural-capacity tests passed.
+- `cargo test --release -p recursion vm_public_claim -- --nocapture`: 51 claim,
+  hashing, semantics, and malformed-witness tests passed.
+- `cargo test --release -p prover --test integration test_prove_verify_poseidon2_channel -- --exact --nocapture`:
+  the ordinary native-transcript Poseidon proof verified in 65.00 seconds.
+- `cargo test --release -p recursion --test air_dsl_guard -- --nocapture`: all 5
+  universal and inner-VM direct-DSL structural guards passed.
+- `cargo clippy --release -p stwo-macros -p air -p prover -p recursion --all-targets --no-deps -- -D warnings`:
+  passed.
+- `cargo test --release -p recursion`: 617 unit and 5 structural integration
+  tests passed in 169.80 seconds.
+- `cargo test --release --workspace`: passed in 280.89 seconds.
+- `prek run --all-files`: passed.
+- Commit `827ec9a9` pushed to `origin/chore/scratchpad-cleanups`.
 
 ## Project finish line
 

@@ -73,9 +73,11 @@ pub mod recursion;
 pub mod relations;
 pub mod verifier;
 
+mod backend_bridge;
+
 pub use errors::VerificationError;
 pub use preprocessed::{Preprocessing, preprocess, preprocess_with_channel};
-pub use prover::{prove_rv32im, prove_rv32im_with_channel};
+pub use prover::{prove_rv32im, prove_rv32im_cpu, prove_rv32im_with_channel};
 pub use public_data::PublicData;
 pub use verifier::{verify_rv32im, verify_rv32im_with_channel};
 

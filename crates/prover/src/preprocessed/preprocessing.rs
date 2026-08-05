@@ -97,6 +97,47 @@ impl<H: MerkleHasherLifted> Preprocessing<H> {
 
         (polynomials, merkle_prover)
     }
+
+    /// Reconstruct the cached commitment tree for the scalar CPU backend.
+    ///
+    /// Raw M31 words are copied without field reduction because `0` and `P`
+    /// are distinct commitment inputs even though they denote the same field
+    /// element.
+    pub(crate) fn to_cpu_commitment_tree(
+        &self,
+    ) -> (
+        Vec<stwo::prover::Poly<stwo::prover::backend::CpuBackend>>,
+        stwo::prover::vcs_lifted::prover::MerkleProverLifted<stwo::prover::backend::CpuBackend, H>,
+    ) {
+        use stwo::core::poly::circle::CanonicCoset;
+        use stwo::prover::Poly;
+        use stwo::prover::backend::CpuBackend;
+        use stwo::prover::poly::circle::CircleEvaluation;
+        use stwo::prover::vcs_lifted::prover::MerkleProverLifted;
+
+        let polynomials: Vec<Poly<CpuBackend>> = self
+            .extended_evals
+            .iter()
+            .zip(self.domain_log_sizes.iter())
+            .map(|(data, &domain_log_size)| {
+                let values = data
+                    .iter()
+                    .copied()
+                    .map(crate::backend_bridge::checked_m31_from_raw)
+                    .collect();
+                let domain = CanonicCoset::new(domain_log_size).circle_domain();
+                let evals = CircleEvaluation::new(domain, values);
+
+                Poly::new(None, evals)
+            })
+            .collect();
+
+        let merkle_prover = MerkleProverLifted {
+            layers: self.merkle_layers.clone(),
+        };
+
+        (polynomials, merkle_prover)
+    }
 }
 
 /// Generate preprocessed data for RV32IM proving.

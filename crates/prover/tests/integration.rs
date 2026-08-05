@@ -197,6 +197,34 @@ fn test_prove_verify_mul_output() {
     .expect("Verification failed");
 }
 
+/// The scalar backend must produce the same transcript and proof bytes as the
+/// default SIMD backend for an identical deterministic execution.
+#[test_log::test]
+fn test_cpu_backend_proof_matches_simd_and_verifies() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, prove_rv32im_cpu, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+
+    let elf_path = guest_bin_dir().join("mul_output");
+    let elf_bytes = std::fs::read(&elf_path).expect("Failed to read mul_output ELF");
+    let simd_run = run(&elf_bytes, 10_000_000).expect("Failed to run SIMD fixture");
+    let cpu_run = run(&elf_bytes, 10_000_000).expect("Failed to run CPU fixture");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+
+    let simd_proof = prove_rv32im(simd_run, config, &preprocessing);
+    let cpu_proof = prove_rv32im_cpu(cpu_run, config, &preprocessing);
+
+    let simd_bytes = postcard::to_allocvec(&simd_proof).expect("serialize SIMD proof");
+    let cpu_bytes = postcard::to_allocvec(&cpu_proof).expect("serialize CPU proof");
+    assert_eq!(cpu_bytes, simd_bytes, "backend proof bytes diverged");
+
+    verify_rv32im(cpu_proof, config, &preprocessing)
+        .expect("CPU-backend proof failed the existing verifier");
+}
+
 /// Constraint-only check for single MUL output repro using drawn relations.
 #[test_log::test]
 fn test_mul_output_constraints_drawn_relations() {

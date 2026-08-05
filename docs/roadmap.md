@@ -224,8 +224,21 @@ set.
     profile, macro, mutation, DSL-guard, and release-clippy tests, the 640-test
     recursion suite, the full release workspace suite, and repository hooks
     passed.
-- `[active] REC-006` Verify a real recursion proof as a child.
-- `[pending] REC-007` Prove the two-child binary branch.
+- `[done] REC-006` Verify a real recursion proof as a child.
+  - Native recursion proofs retain STWO's authenticated expansion data and
+    encode into the fixed child wire with independent raw-query values, trace
+    paths, FRI cosets, commitments, claimed sums, and final polynomial data.
+  - Each child replays the trusted recursion transcript and closes its public
+    LogUp sum, AIR composition, PCS DEEP quotient, Merkle openings, FRI folds,
+    proofs of work, and final polynomial inside the universal witness.
+  - Binary mode activates two verifier-owned child lanes through the existing
+    `define_air_fns!` components; no handwritten AIR, component-table macro, or
+    wrapper macro was added.
+  - Evidence: commit `9f849f7d`; five independent child-proof mutations were
+    rejected, two real recursion children produced and verified one parent
+    proof, profile/control/empty regressions and all direct-DSL guards passed,
+    release clippy and compilation passed, and repository hooks passed.
+- `[active] REC-007` Prove the two-child binary branch.
 - `[pending] REC-008` Build the recursive tree driver.
 - `[pending] REC-009` Expose and bind the application root API.
 - `[pending] REC-010` Demonstrate constant root-proof size.
@@ -466,7 +479,7 @@ Required work:
 Done when real segment and empty leaves produce valid recursion proofs and each
 public claim or proof mutation is rejected.
 
-### `[active] REC-006` Recursion-child closure
+### `[done] REC-006` Recursion-child closure
 
 Dependencies: `REC-005`.
 
@@ -482,7 +495,7 @@ Done when one real recursion proof closes every relation as a child and one
 focused test rejects each mutated statement, commitment, opening, sum, and FRI
 value.
 
-### `[pending] REC-007` Binary node
+### `[active] REC-007` Binary node
 
 Dependencies: `REC-006`.
 
@@ -906,6 +919,42 @@ commands run, observed test counts or measurements, and the pushed commit.
 - `prek run --all-files`: passed after formatter output was applied and checked
   explicitly.
 - Commit `396f6ade` pushed to `origin/chore/scratchpad-cleanups`.
+
+### `REC-006` — 2026-08-05
+
+`<temporary-cache>` below denotes the test-only local cache directory used by
+the recorded command without committing a machine-specific path.
+
+- `cargo test --release -p recursion profile::tests -- --nocapture`: all 7
+  profile and conformance tests passed with 2,196 table columns, 2,340 sampled
+  values, 1,313 AIR instructions, 577 preprocessing columns, and a
+  3,459,396-byte fixed proof wire.
+- `cargo test --release -p recursion vm_air_composition_control_air::tests -- --nocapture`:
+  all 9 segment, binary, empty, and malformed-control tests passed.
+- `cargo test --release -p recursion vm_public_logup_control_air::tests -- --nocapture`:
+  all 7 public-LogUp control tests passed.
+- `cargo test --release -p recursion statement_input_air::tests -- --nocapture`:
+  all 10 statement-routing and inactive-lane tests passed.
+- `cargo test --release -p recursion universal_witness::tests::canonical_empty_leaf_satisfies_the_complete_universal_air -- --exact --nocapture`:
+  the complete empty witness passed all universal components in 30.05 seconds.
+- `STARK_V_RECURSION_CHILD_CACHE_DIR=<temporary-cache> cargo test --release -p recursion recursive_proof::tests::recursion_child_rejects_a_mutated_proof_region -- --nocapture`:
+  statement, commitment, queried-opening, claimed-sum, and final-layer FRI
+  mutations were independently rejected; all 5 tests passed in 1,027.41 seconds.
+- `STARK_V_RECURSION_CHILD_CACHE_DIR=<temporary-cache> cargo test --release -p recursion recursive_proof::tests::two_recursion_children_produce_a_valid_binary_proof -- --exact --nocapture`:
+  two independently proved recursion children produced one binary parent proof,
+  and the outer verifier accepted its folded statement in 785.29 seconds.
+- `cargo test --release -p recursion --test air_dsl_guard -- --nocapture`: all 5
+  roster, owner-policy, and direct-DSL structural guards passed.
+- `sg -p 'impl FrameworkEval for $TYPE { $$$BODY }' -l rust --json=compact crates/recursion/src crates/air/src/schema.rs crates/air/src/poseidon2.rs`:
+  zero matches.
+- `rg -n 'define_component_tables!|define_component_tables' crates/recursion/src crates/air/src/schema.rs crates/air/src/poseidon2.rs`:
+  zero matches.
+- `cargo check --release -p recursion`,
+  `cargo test --release -p recursion --no-run`, and
+  `cargo clippy --release -p recursion --all-targets --no-deps -- -D warnings`:
+  passed.
+- `prek run --all-files`: passed.
+- Commit `9f849f7d` pushed to `origin/chore/scratchpad-cleanups`.
 
 ## Project finish line
 

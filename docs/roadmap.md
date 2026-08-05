@@ -197,8 +197,19 @@ set.
   - Evidence: commit `058023c6`; focused circuit-closure and mutation tests, the
     630-test recursion suite, all 5 DSL guards, the full release workspace
     suite, release clippy for the recursion crate, and repository hooks passed.
-- `[active] REC-004` Close the canonical empty-leaf branch.
-- `[pending] REC-005` Implement the outer recursion prover and verifier.
+- `[done] REC-004` Close the canonical empty-leaf branch.
+  - One proof-free entry point accepts only a checked height-zero empty
+    statement and routes it through the same 36-component universal assembler.
+  - Empty witnesses lower only the existing statement-semantics DSL circuit;
+    every verifier, transcript, claim, query, Merkle, PCS, and FRI lane is
+    materialized through its existing inactive-zero path.
+  - Executed statements, folded empty spans, interior empties, out-of-capacity
+    slots, and nonzero inactive component wires are rejected.
+  - Evidence: commit `4374b123`; focused empty-branch and segment-regression
+    tests, the 635-test recursion suite, all 5 DSL guards, the full release
+    workspace suite, release clippy for the recursion crate, and repository
+    hooks passed.
+- `[active] REC-005` Implement the outer recursion prover and verifier.
 - `[pending] REC-006` Verify a real recursion proof as a child.
 - `[pending] REC-007` Prove the two-child binary branch.
 - `[pending] REC-008` Build the recursive tree driver.
@@ -412,7 +423,7 @@ Required work:
 Done when a valid VM proof satisfies the entire universal AIR and an independent
 mutation in every proof region or omitted control phase fails.
 
-### `[active] REC-004` Canonical empty leaf
+### `[done] REC-004` Canonical empty leaf
 
 Dependencies: `REC-003`.
 
@@ -426,7 +437,7 @@ Required work:
 Done when canonical padding verifies and executed-slot empties, out-of-capacity
 slots, and non-zero inactive wires fail.
 
-### `[pending] REC-005` Outer prover and verifier
+### `[active] REC-005` Outer prover and verifier
 
 Dependencies: `REC-004`.
 

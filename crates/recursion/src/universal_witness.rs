@@ -123,6 +123,23 @@ pub struct UniversalWitness {
     preprocessing_ids: Vec<PreProcessedColumnId>,
 }
 
+/// Relation-independent preprocessing and main trace for one universal proof.
+pub(crate) struct UniversalMainWitness {
+    proof_kind: ProofKind,
+    statement: SpanStatement,
+    preprocessed_components: [UniversalTrace; UNIVERSAL_COMPONENT_COUNT],
+    original_components: [UniversalTrace; UNIVERSAL_COMPONENT_COUNT],
+    component_log_sizes: UniversalComponentLogSizes,
+    expected_column_log_sizes: TreeVec<Vec<u32>>,
+}
+
+impl UniversalMainWitness {
+    /// Clones the main columns only for the transcript precommit that derives LogUp challenges.
+    pub(crate) fn original_trace_cloned(&self) -> UniversalTrace {
+        self.original_components.iter().flatten().cloned().collect()
+    }
+}
+
 impl UniversalWitness {
     pub const fn proof_kind(&self) -> ProofKind {
         self.proof_kind
@@ -152,6 +169,10 @@ impl UniversalWitness {
     pub fn preprocessing_ids(&self) -> &[PreProcessedColumnId] {
         &self.preprocessing_ids
     }
+
+    pub(crate) fn into_traces(self) -> TreeVec<UniversalTrace> {
+        self.traces
+    }
 }
 
 /// Assembles every universal component for one authenticated VM segment.
@@ -160,6 +181,17 @@ pub fn assemble_segment_leaf(
     leaf: &VmSegmentLeafWire,
     relations: &UniversalRelations,
 ) -> Result<UniversalWitness, UniversalWitnessError> {
+    let preprocessing = UniversalPreprocessing::new(profile)?;
+    let main = prepare_segment_leaf(profile, leaf, &preprocessing)?;
+    finish_prepared_witness(&preprocessing, main, relations)
+}
+
+/// Builds the segment branch before the outer Fiat-Shamir relation draw.
+pub(crate) fn prepare_segment_leaf(
+    profile: &FrozenProtocolProfile,
+    leaf: &VmSegmentLeafWire,
+    preprocessing: &UniversalPreprocessing,
+) -> Result<UniversalMainWitness, UniversalWitnessError> {
     let component_log_sizes = recursion_component_log_sizes();
     if profile.recursion_program().component_log_sizes() != &component_log_sizes {
         return Err(stage(
@@ -167,7 +199,6 @@ pub fn assemble_segment_leaf(
             "profile and assembler log sizes differ",
         ));
     }
-    let preprocessing = UniversalPreprocessing::new(profile)?;
     preprocessing.validate_capacities(&component_log_sizes)?;
 
     let claim_digest =
@@ -401,7 +432,6 @@ pub fn assemble_segment_leaf(
 
     assemble_universal_components(
         profile,
-        relations,
         preprocessing,
         component_log_sizes,
         UniversalAssemblyBranch::Segment {
@@ -425,6 +455,17 @@ pub fn assemble_empty_leaf(
     statement: &SpanStatement,
     relations: &UniversalRelations,
 ) -> Result<UniversalWitness, UniversalWitnessError> {
+    let preprocessing = UniversalPreprocessing::new(profile)?;
+    let main = prepare_empty_leaf(profile, statement, &preprocessing)?;
+    finish_prepared_witness(&preprocessing, main, relations)
+}
+
+/// Builds the empty branch before the outer Fiat-Shamir relation draw.
+pub(crate) fn prepare_empty_leaf(
+    profile: &FrozenProtocolProfile,
+    statement: &SpanStatement,
+    preprocessing: &UniversalPreprocessing,
+) -> Result<UniversalMainWitness, UniversalWitnessError> {
     if statement.slots().height() != 0 || !statement.body().is_empty() {
         return Err(stage(
             "empty-leaf statement",
@@ -438,7 +479,6 @@ pub fn assemble_empty_leaf(
             "profile and assembler log sizes differ",
         ));
     }
-    let preprocessing = UniversalPreprocessing::new(profile)?;
     preprocessing.validate_capacities(&component_log_sizes)?;
 
     let parent: StatementWords =
@@ -490,7 +530,6 @@ pub fn assemble_empty_leaf(
 
     assemble_universal_components(
         profile,
-        relations,
         preprocessing,
         component_log_sizes,
         UniversalAssemblyBranch::Empty {
@@ -929,16 +968,85 @@ fn ensure_universal_trace_layout(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn finalize_universal_witness(
+pub(crate) fn finish_prepared_witness(
+    preprocessing: &UniversalPreprocessing,
+    main: UniversalMainWitness,
+    relations: &UniversalRelations,
+) -> Result<UniversalWitness, UniversalWitnessError> {
+    let public_relation_sum =
+        universal_public_relation_sum(preprocessing, &main.statement, main.proof_kind, relations)?;
+    finalize_universal_witness(main, relations, public_relation_sum)
+}
+
+/// Computes every verifier-owned LogUp term for one universal public claim.
+pub(crate) fn universal_public_relation_sum(
+    preprocessing: &UniversalPreprocessing,
+    statement: &SpanStatement,
     proof_kind: ProofKind,
     relations: &UniversalRelations,
+) -> Result<SecureField, UniversalWitnessError> {
+    let mut sum =
+        crate::statement_input_air::public_statement_terms(statement, &relations.statement_input)
+            .map_err(|error| stage("public statement terms", error))?;
+    sum += crate::statement_semantics_lowering::public_statement_semantics_terms(
+        STATEMENT_CIRCUIT_ID,
+        &preprocessing.statement_reference,
+        &relations.recursion,
+    )
+    .map_err(|error| stage("public statement-circuit terms", error))?;
+    if proof_kind == ProofKind::SegmentLeaf {
+        sum += crate::control_air::public_terminal_control_terms(
+            preprocessing.transcript_calls.vm_plan(),
+            SEGMENT_VERIFIER_ID,
+            &relations.control,
+        );
+        sum += crate::vm_public_claim_semantics_lowering::public_vm_public_claim_semantics_terms(
+            VM_CLAIM_CIRCUIT_ID,
+            &preprocessing.vm_claim_reference,
+            &relations.recursion,
+        )
+        .map_err(|error| stage("public VM claim-circuit terms", error))?;
+        sum += crate::vm_public_logup_lowering::public_vm_public_logup_terms(
+            VM_PUBLIC_LOGUP_CIRCUIT_ID,
+            &preprocessing.vm_public_logup_reference,
+            &relations.recursion,
+        )
+        .map_err(|error| stage("public VM LogUp-circuit terms", error))?;
+        sum += crate::vm_air_composition_lowering::public_vm_air_composition_terms(
+            VM_COMPOSITION_CIRCUIT_ID,
+            &preprocessing.vm_composition_reference,
+            &relations.recursion,
+        )
+        .map_err(|error| stage("public VM composition-circuit terms", error))?;
+        sum += crate::pcs_deep_lowering::public_pcs_deep_terms(
+            PCS_CIRCUIT_IDS[0],
+            &preprocessing.pcs_references.segment,
+            &relations.recursion,
+        )
+        .map_err(|error| stage("public PCS circuit terms", error))?;
+        sum += crate::fri_verifier_lowering::public_fri_verifier_terms(
+            FRI_CIRCUIT_IDS[0],
+            &preprocessing.fri_references.segment,
+            &relations.recursion,
+        )
+        .map_err(|error| stage("public FRI circuit terms", error))?;
+    }
+    Ok(sum)
+}
+
+fn finalize_universal_witness(
+    main: UniversalMainWitness,
+    relations: &UniversalRelations,
     public_relation_sum: SecureField,
-    preprocessed_components: [UniversalTrace; UNIVERSAL_COMPONENT_COUNT],
-    original_components: [UniversalTrace; UNIVERSAL_COMPONENT_COUNT],
-    component_log_sizes: UniversalComponentLogSizes,
-    expected_column_log_sizes: &TreeVec<Vec<u32>>,
 ) -> Result<UniversalWitness, UniversalWitnessError> {
+    let UniversalMainWitness {
+        proof_kind,
+        statement: _,
+        preprocessed_components,
+        original_components,
+        component_log_sizes,
+        expected_column_log_sizes,
+    } = main;
     let mut interaction_components: [UniversalTrace; UNIVERSAL_COMPONENT_COUNT] =
         core::array::from_fn(|_| Vec::new());
     let mut claimed_sums = [SecureField::zero(); UNIVERSAL_COMPONENT_COUNT];
@@ -1243,7 +1351,7 @@ fn finalize_universal_witness(
         .flatten()
         .collect::<Vec<_>>();
     let traces = TreeVec::new(vec![preprocessed_trace, original_trace, interaction_trace]);
-    ensure_universal_trace_layout(&traces, expected_column_log_sizes)?;
+    ensure_universal_trace_layout(&traces, &expected_column_log_sizes)?;
     let witness = UniversalWitness {
         proof_kind,
         traces,
@@ -1264,11 +1372,10 @@ fn finalize_universal_witness(
 
 fn assemble_universal_components(
     profile: &FrozenProtocolProfile,
-    relations: &UniversalRelations,
-    preprocessing: UniversalPreprocessing,
+    preprocessing: &UniversalPreprocessing,
     component_log_sizes: UniversalComponentLogSizes,
     branch: UniversalAssemblyBranch<'_>,
-) -> Result<UniversalWitness, UniversalWitnessError> {
+) -> Result<UniversalMainWitness, UniversalWitnessError> {
     let proof_kind = branch.proof_kind();
     let statement = branch.statement();
     let statement_circuit = branch.statement_circuit();
@@ -1688,54 +1795,6 @@ fn assemble_universal_components(
         .map_err(|error| stage("FRI verifier circuit lowering", error))?;
     }
 
-    let mut public_relation_sum =
-        crate::statement_input_air::public_statement_terms(statement, &relations.statement_input)
-            .map_err(|error| stage("public statement terms", error))?;
-    public_relation_sum += crate::statement_semantics_lowering::public_statement_semantics_terms(
-        STATEMENT_CIRCUIT_ID,
-        &preprocessing.statement_reference,
-        &relations.recursion,
-    )
-    .map_err(|error| stage("public statement-circuit terms", error))?;
-    if matches!(&branch, UniversalAssemblyBranch::Segment { .. }) {
-        public_relation_sum += crate::control_air::public_terminal_control_terms(
-            preprocessing.transcript_calls.vm_plan(),
-            SEGMENT_VERIFIER_ID,
-            &relations.control,
-        );
-        public_relation_sum +=
-            crate::vm_public_claim_semantics_lowering::public_vm_public_claim_semantics_terms(
-                VM_CLAIM_CIRCUIT_ID,
-                &preprocessing.vm_claim_reference,
-                &relations.recursion,
-            )
-            .map_err(|error| stage("public VM claim-circuit terms", error))?;
-        public_relation_sum += crate::vm_public_logup_lowering::public_vm_public_logup_terms(
-            VM_PUBLIC_LOGUP_CIRCUIT_ID,
-            &preprocessing.vm_public_logup_reference,
-            &relations.recursion,
-        )
-        .map_err(|error| stage("public VM LogUp-circuit terms", error))?;
-        public_relation_sum += crate::vm_air_composition_lowering::public_vm_air_composition_terms(
-            VM_COMPOSITION_CIRCUIT_ID,
-            &preprocessing.vm_composition_reference,
-            &relations.recursion,
-        )
-        .map_err(|error| stage("public VM composition-circuit terms", error))?;
-        public_relation_sum += crate::pcs_deep_lowering::public_pcs_deep_terms(
-            PCS_CIRCUIT_IDS[0],
-            &preprocessing.pcs_references.segment,
-            &relations.recursion,
-        )
-        .map_err(|error| stage("public PCS circuit terms", error))?;
-        public_relation_sum += crate::fri_verifier_lowering::public_fri_verifier_terms(
-            FRI_CIRCUIT_IDS[0],
-            &preprocessing.fri_references.segment,
-            &relations.recursion,
-        )
-        .map_err(|error| stage("public FRI circuit terms", error))?;
-    }
-
     original_components[1] = table_trace(
         transcript_table.into_witness_with_log_size(component_log_sizes[1]),
         "transcript trace capacity",
@@ -1893,15 +1952,14 @@ fn assemble_universal_components(
         "range-check trace",
     )?;
 
-    finalize_universal_witness(
+    Ok(UniversalMainWitness {
         proof_kind,
-        relations,
-        public_relation_sum,
+        statement: *statement,
         preprocessed_components,
         original_components,
         component_log_sizes,
-        profile.recursion_program().column_log_sizes(),
-    )
+        expected_column_log_sizes: profile.recursion_program().column_log_sizes().clone(),
+    })
 }
 
 const STATEMENT_CIRCUIT_ID: u32 = 1;
@@ -1968,7 +2026,7 @@ impl FriCircuitSet {
 }
 
 /// Trusted preprocessing and inactive circuit structure for the full roster.
-struct UniversalPreprocessing {
+pub(crate) struct UniversalPreprocessing {
     control: ControlPreprocessed,
     transcript_calls: TranscriptCallPreprocessed,
     transcript_state: TranscriptStatePreprocessed,
@@ -2004,7 +2062,7 @@ struct UniversalPreprocessing {
 }
 
 impl UniversalPreprocessing {
-    fn new(profile: &FrozenProtocolProfile) -> Result<Self, UniversalWitnessError> {
+    pub(crate) fn new(profile: &FrozenProtocolProfile) -> Result<Self, UniversalWitnessError> {
         let vm_plan = profile.vm_plan();
         let recursion_plan = profile.recursion_plan();
         let manifest = profile.manifest();
@@ -2275,7 +2333,7 @@ impl UniversalPreprocessing {
         Ok(())
     }
 
-    fn preprocessed_components(
+    pub(crate) fn preprocessed_components(
         &self,
         expected_log_sizes: &[u32],
     ) -> Result<[UniversalTrace; UNIVERSAL_COMPONENT_COUNT], UniversalWitnessError> {

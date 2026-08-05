@@ -24,4 +24,5 @@ rstest.workspace = true
 syn.workspace = true
 
 [features]
-parallel = ["prover/parallel"]
+# Universal quotient evaluation dominates recursion proof time and shares STWO's worker pool.
+parallel = ["prover/parallel", "stwo-constraint-framework/parallel"]

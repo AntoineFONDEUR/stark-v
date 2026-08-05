@@ -77,8 +77,8 @@ set.
 - `[done] BASE-001` Establish the cleanup baseline.
   - Host continuation lives in `crates/continuation` and returns one proof per
     segment.
-  - `crates/recursion` contains the active universal verifier design without a
-    `v2` namespace or abandoned aggregation wrappers.
+  - `crates/recursion` exposes the active universal verifier design at the crate
+    root; abandoned aggregation wrappers are absent.
   - Current and planned documentation are explicitly distinguished.
   - Evidence: commit `54d55fc8`; focused recursion and continuation tests, the
     full release workspace suite, and repository hooks passed.
@@ -154,7 +154,7 @@ set.
     verifier plans, preprocessing registries, exact wire types, and the protocol
     identifier from one profile constructor.
   - The profile fixes 193 FRI queries, 4 KiB public-input and public-output
-    capacities, and a 3,383,748-byte universal proof wire.
+    capacities, and a 3,386,900-byte universal proof wire.
   - Evidence: commit `b0a3f2ae`; focused profile, manifest mutation, macro,
     recursion, full release workspace, and repository hook suites passed.
 - `[done] REC-001` Adapt a real VM proof to the recursive leaf wire.
@@ -179,9 +179,9 @@ set.
   - STWO-omitted FRI query values are reconstructed from the DEEP answer and
     prior folds before both Merkle and folding checks; PCS periodicity uses the
     committed-domain log sizes.
-  - The corrected active profile has 22 recursion FRI layers, a 3,383,748-byte
+  - The corrected active profile has 22 recursion FRI layers, a 3,386,900-byte
     fixed proof wire, and protocol identifier limbs
-    `[802324842, 833766223, 1950912128, 622344095, 673876662, 1623355154, 788242498, 1733274698]`.
+    `[1605643340, 1955314271, 2072188796, 1133138353, 150703753, 2017819881, 1063238005, 332318256]`.
   - Evidence: commit `827ec9a9`; deterministic real-proof assembly, all 36
     direct component checks, focused malformed-FRI tests, the ordinary prover
     integration, the full recursion and workspace release suites, clippy, DSL
@@ -825,6 +825,37 @@ commands run, observed test counts or measurements, and the pushed commit.
 - `cargo test --release --workspace`: passed in 280.89 seconds.
 - `prek run --all-files`: passed.
 - Commit `827ec9a9` pushed to `origin/chore/scratchpad-cleanups`.
+
+### `REC-003` — 2026-08-05
+
+- `cargo test --release -p recursion universal_leaf_rejects_each_independently_mutated_proof_region -- --nocapture && cargo test --release -p recursion real_poseidon_leaf_materializes_the_universal_witness -- --nocapture`:
+  all 13 proof-region mutations were rejected and the valid real segment witness
+  passed all 36 universal components.
+- `cargo test --release -p recursion --test air_dsl_guard -- --nocapture`: all 5
+  structural DSL guards passed.
+- `cargo clippy --release -p recursion --all-targets --no-deps -- -D warnings`:
+  passed.
+- `/usr/bin/time -p cargo test --release -p recursion`: 630 unit tests and 5
+  structural integration tests passed after the three previous fixture failures
+  were rerun successfully.
+- `/usr/bin/time -p cargo test --release --workspace`: passed in 246.60 seconds.
+- `prek run --all-files`: passed.
+- Commit `058023c6` pushed to `origin/chore/scratchpad-cleanups`.
+
+### `REC-004` — 2026-08-05
+
+- `cargo test --release -p recursion universal_witness::tests::canonical_empty_leaf_satisfies_the_complete_universal_air -- --nocapture && cargo test --release -p recursion universal_witness::tests::empty_branch -- --nocapture && cargo test --release -p recursion statement::tests::empty_leaf_is_rejected_outside_the_tree_capacity -- --nocapture`:
+  canonical padding passed; executed, folded, and out-of-capacity empty
+  statements were rejected.
+- `cargo test --release -p recursion segment_leaf::tests::real_poseidon_leaf_materializes_the_universal_witness -- --nocapture`:
+  the real segment branch remained valid after the shared-assembler change.
+- `cargo clippy --release -p recursion --all-targets --no-deps -- -D warnings`:
+  passed.
+- `/usr/bin/time -p cargo test --release -p recursion`: 635 unit tests and 5
+  structural integration tests passed in 115.20 seconds.
+- `/usr/bin/time -p cargo test --release --workspace`: passed in 261.83 seconds.
+- `prek run --all-files`: passed.
+- Commit `4374b123` pushed to `origin/chore/scratchpad-cleanups`.
 
 ## Project finish line
 

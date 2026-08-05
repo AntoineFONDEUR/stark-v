@@ -332,6 +332,47 @@ mod embedded_relation_bundle {
     }
 }
 
+mod unbatched_tail_bundle {
+    stwo_constraint_framework::relation!(PassRelation, 1);
+    stwo_constraint_framework::relation!(RecordRelation, 1);
+
+    /// Relation instances owned by the host system embedding this AIR.
+    #[derive(Clone)]
+    pub struct Relations {
+        pub pass: PassRelation,
+        pub record: RecordRelation,
+    }
+
+    impl Relations {
+        pub fn dummy() -> Self {
+            Self {
+                pass: PassRelation::dummy(),
+                record: RecordRelation::dummy(),
+            }
+        }
+    }
+
+    stwo_macros::define_air_fns! {
+        max_degree: 3,
+        embedded: [],
+        embedded_component: true,
+        embedded_relations: crate::unbatched_tail_bundle::Relations,
+        logup_batch: 2,
+        logup_unbatched_tail: 2,
+
+        relation pass(1);
+        relation record(1);
+
+        fn guarded(value, active) {
+            emit(active) pass(value);
+            consume(active) record(value);
+            emit(active) pass(value + 1);
+            consume(active) record(value + 1);
+            return value;
+        }
+    }
+}
+
 mod preprocessed_schedule {
     stwo_constraint_framework::relation!(PassRelation, 1);
 
@@ -436,6 +477,20 @@ fn test_embedded_component_batches_relation_pairs() {
 
     // One QM31 interaction column is represented by four base-field columns.
     assert_eq!(interaction.len(), 4);
+}
+
+#[test]
+fn test_embedded_component_keeps_the_declared_tail_unbatched() {
+    let mut table = unbatched_tail_bundle::GuardedTable::new();
+    unbatched_tail_bundle::guarded_fill(&mut table, [felt(7), felt(1)], []);
+    let trace = table.into_witness();
+    let (interaction, _) = unbatched_tail_bundle::component::witness::gen_interaction_trace(
+        &trace,
+        &unbatched_tail_bundle::Relations::dummy(),
+    );
+
+    // One pair and two singletons produce three QM31 interaction columns.
+    assert_eq!(interaction.len(), 12);
 }
 
 #[test]

@@ -133,6 +133,10 @@ struct AirFnsInput {
     /// Number of adjacent LogUp fractions combined in one interaction column
     /// for generated embedded components.
     logup_batch: usize,
+    /// Number of trailing relation entries kept in singleton LogUp columns.
+    /// This preserves pair batching for linear relations without multiplying
+    /// higher-degree denominators together.
+    logup_unbatched_tail: usize,
     /// Whether the embedded component also exposes named-relation evaluation
     /// for compilation into another AIR.
     embedded_dynamic_component: bool,
@@ -161,12 +165,7 @@ impl Parse for AirFnsInput {
         let lit: syn::LitInt = input.parse()?;
         let max_degree: usize = lit.base10_parse()?;
         if !(2..=3).contains(&max_degree) {
-            // The component shells use max_constraint_log_degree_bound =
-            // log_size + 1, which admits constraint degree 3.
-            return Err(syn::Error::new(
-                lit.span(),
-                "max_degree must be 2 or 3 (the component degree bound admits 3)",
-            ));
+            return Err(syn::Error::new(lit.span(), "max_degree must be 2 or 3"));
         }
         input.parse::<Token![,]>()?;
 
@@ -248,6 +247,27 @@ impl Parse for AirFnsInput {
             batch
         } else {
             1
+        };
+
+        let logup_unbatched_tail = if input
+            .cursor()
+            .ident()
+            .is_some_and(|(ident, _)| ident == "logup_unbatched_tail")
+        {
+            input.parse::<Ident>()?;
+            input.parse::<Token![:]>()?;
+            let lit = input.parse::<syn::LitInt>()?;
+            input.parse::<Token![,]>()?;
+            let tail = lit.base10_parse::<usize>()?;
+            if logup_batch == 1 && tail != 0 {
+                return Err(syn::Error::new(
+                    lit.span(),
+                    "logup_unbatched_tail requires logup_batch: 2",
+                ));
+            }
+            tail
+        } else {
+            0
         };
 
         let embedded_dynamic_component = if input
@@ -333,6 +353,7 @@ impl Parse for AirFnsInput {
             embedded_enabler_boolean,
             embedded_relations,
             logup_batch,
+            logup_unbatched_tail,
             embedded_dynamic_component,
             embedded_preprocessed,
             embedded_params,
@@ -1917,6 +1938,7 @@ pub fn define_air_fns(input: TokenStream) -> TokenStream {
         embedded_enabler_boolean,
         embedded_relations,
         logup_batch,
+        logup_unbatched_tail,
         embedded_dynamic_component,
         embedded_preprocessed,
         embedded_params,
@@ -2003,6 +2025,7 @@ pub fn define_air_fns(input: TokenStream) -> TokenStream {
                 embedded_enabler_boolean,
                 &embedded_preprocessed,
                 &embedded_params,
+                logup_unbatched_tail,
             );
         }
         // In embedded mode the declared relations are NOT given their own
@@ -2016,6 +2039,7 @@ pub fn define_air_fns(input: TokenStream) -> TokenStream {
             embedded_component,
             &embedded_relations,
             logup_batch,
+            logup_unbatched_tail,
             embedded_dynamic_component,
         );
     }
@@ -2155,6 +2179,47 @@ pub fn define_air_fns(input: TokenStream) -> TokenStream {
 /// preprocessed columns or verifier-supplied field constants. No committed
 /// table is emitted: the same lowered frame evaluates the AIR relation entries
 /// and the matching interaction trace over the fixed schedule.
+fn logup_batches(
+    entry_count: usize,
+    batch_size: usize,
+    unbatched_tail: usize,
+) -> syn::Result<Vec<Vec<usize>>> {
+    if unbatched_tail > entry_count {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "logup_unbatched_tail exceeds the relation-entry count",
+        ));
+    }
+    let batched_count = entry_count - unbatched_tail;
+    let mut batches = (0..batched_count)
+        .collect::<Vec<_>>()
+        .chunks(batch_size)
+        .map(<[usize]>::to_vec)
+        .collect::<Vec<_>>();
+    batches.extend((batched_count..entry_count).map(|index| vec![index]));
+    Ok(batches)
+}
+
+fn logup_finalize(
+    batches: &[Vec<usize>],
+    batch_size: usize,
+    unbatched_tail: usize,
+) -> TokenStream2 {
+    if unbatched_tail == 0 {
+        if batch_size == 2 {
+            quote! { eval.finalize_logup_in_pairs(); }
+        } else {
+            quote! { eval.finalize_logup(); }
+        }
+    } else {
+        let assignments = batches
+            .iter()
+            .enumerate()
+            .flat_map(|(batch, entries)| entries.iter().map(move |_| batch));
+        quote! { eval.finalize_logup_batched(&vec![#(#assignments),*]); }
+    }
+}
+
 fn generate_embedded_preprocessed(
     lowered: &mut [LoweredFn],
     relations_path: &Path,
@@ -2162,6 +2227,7 @@ fn generate_embedded_preprocessed(
     enabler_boolean: bool,
     preprocessed: &[(Ident, LitStr)],
     params: &[Ident],
+    logup_unbatched_tail: usize,
 ) -> TokenStream {
     let [function] = lowered else {
         return syn::Error::new(
@@ -2362,15 +2428,15 @@ fn generate_embedded_preprocessed(
         quote! { preprocessed[0].domain.log_size() }
     };
 
-    let constraint_skip = usize::from(!enabler_boolean);
-    let finalize_logup = if logup_batch == 2 {
-        quote! { eval.finalize_logup_in_pairs(); }
-    } else {
-        quote! { eval.finalize_logup(); }
+    let batches = match logup_batches(n_entries, logup_batch, logup_unbatched_tail) {
+        Ok(batches) => batches,
+        Err(error) => return error.to_compile_error().into(),
     };
-    let interaction_columns: Vec<TokenStream2> = indices
-        .chunks(logup_batch)
-        .map(|batch| match batch {
+    let constraint_skip = usize::from(!enabler_boolean);
+    let finalize_logup = logup_finalize(&batches, logup_batch, logup_unbatched_tail);
+    let interaction_columns: Vec<TokenStream2> = batches
+        .iter()
+        .map(|batch| match batch.as_slice() {
             [index] => quote! {
                 {
                     let mut column = logup_gen.new_col();
@@ -2557,6 +2623,7 @@ fn generate_embedded(
     embedded_component: bool,
     relations_path: &Path,
     logup_batch: usize,
+    logup_unbatched_tail: usize,
     embedded_dynamic_component: bool,
 ) -> TokenStream {
     let [function] = lowered else {
@@ -2594,6 +2661,7 @@ fn generate_embedded(
                 function,
                 relations_path,
                 logup_batch,
+                logup_unbatched_tail,
                 embedded_dynamic_component,
             )
         }
@@ -2636,6 +2704,7 @@ fn generate_embedded_opcode_component(
     function: &LoweredFn,
     relations_path: &Path,
     logup_batch: usize,
+    logup_unbatched_tail: usize,
     embedded_dynamic_component: bool,
 ) -> TokenStream2 {
     let columns_type = column_struct_name(&function.name);
@@ -2668,14 +2737,14 @@ fn generate_embedded_opcode_component(
     let pp_entry_indices: Vec<usize> = preprocessed.iter().map(|(i, _)| *i).collect();
     let pp_relations: Vec<&Ident> = preprocessed.iter().map(|(_, r)| *r).collect();
     let n_preprocessed = preprocessed.len();
-    let finalize_logup = if logup_batch == 2 {
-        quote! { eval.finalize_logup_in_pairs(); }
-    } else {
-        quote! { eval.finalize_logup(); }
+    let batches = match logup_batches(n_entries, logup_batch, logup_unbatched_tail) {
+        Ok(batches) => batches,
+        Err(error) => return error.to_compile_error(),
     };
-    let interaction_columns: Vec<TokenStream2> = indices
-        .chunks(logup_batch)
-        .map(|batch| match batch {
+    let finalize_logup = logup_finalize(&batches, logup_batch, logup_unbatched_tail);
+    let interaction_columns: Vec<TokenStream2> = batches
+        .iter()
+        .map(|batch| match batch.as_slice() {
             [index] => quote! {
                 {
                     let mut col = logup_gen.new_col();

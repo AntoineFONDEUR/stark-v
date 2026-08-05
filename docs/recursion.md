@@ -28,7 +28,7 @@ The implemented foundation includes:
 - a canonical protocol manifest and fixed-width proof wire;
 - one frozen protocol profile without a version suffix, derived from both
   generated AIR rosters, with 193 FRI queries, 4 KiB public-input and
-  public-output capacities, and an exact 3,383,748-byte universal proof wire;
+  public-output capacities, and an exact 3,386,900-byte universal proof wire;
 - fixed VM trace generation that pads ordinary instruction and access tables to
   log size 6 and the finalized program, memory, Merkle, and Poseidon2 tables to
   log size 11, rejecting a segment instead of changing verifier-owned geometry;
@@ -55,15 +55,18 @@ The implemented foundation includes:
   and the last-layer polynomial check;
 - proof-free empty-leaf assembly that binds one checked height-zero padding
   statement and materializes every inactive verifier lane as zero;
+- manifest-bound outer preprocessing, proving, and verification for real segment
+  leaves and canonical empty leaves over the complete 36-component roster;
 - an AIR self-program for verifying a recursion child;
 - shared QM31 multiplication, inversion, linear-operation, and Merkle-path trace
   tables;
 - component, malformed-witness, relation-closure, and leaf-binding tests.
 
-The assembled segment and empty witnesses are not yet recursion proofs. The
-binary branch, the outer prover and verifier, recursive child replay, tree
-construction, and the public root API remain unfinished. A real recursion proof
-therefore cannot yet be used as a binary child.
+Segment and empty witnesses now produce recursion proofs that bind the expected
+protocol, statement, component claims, interaction claims, and STWO proof. The
+binary branch, recursive child replay, tree construction, and the public root
+API remain unfinished. A real recursion proof therefore cannot yet be used as a
+binary child.
 
 The live universal roster has 36 components. Every recursion-local component is
 authored directly through `define_air_fns!`; Poseidon2 uses the same macro, and
@@ -122,9 +125,9 @@ The universal relation registry fixes relation draw order. The VM relation
 bundle comes first so shared VM components preserve their established challenge
 layout. Recursion-local relations then connect control, transcript, statement,
 arithmetic, query, Merkle, DEEP, and FRI tables. Segment- and empty-leaf
-assembly reject a nonzero global LogUp sum across the complete roster; the outer
-prover must carry the same component claims and public terms into proof
-verification.
+assembly reject a nonzero global LogUp sum across the complete roster. The outer
+proof carries the same component claims and public terms, and verification
+recomputes the public relation sum before accepting the STWO proof.
 
 ## Soundness invariants
 

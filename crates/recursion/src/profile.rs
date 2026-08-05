@@ -99,11 +99,11 @@ pub const VM_QUERY_VALUE_COUNT: usize = VM_TABLE_COUNT * FRI_QUERY_COUNT;
 pub const VM_TRACE_PATH_COUNT: usize = COMMITMENT_TREE_COUNT * FRI_QUERY_COUNT;
 
 /// Universal table count compiled from the checked-in component roster.
-pub const RECURSION_TABLE_COUNT: usize = 2100;
+pub const RECURSION_TABLE_COUNT: usize = 2104;
 /// Universal OODS samples compiled from the checked-in component roster.
-pub const RECURSION_SAMPLED_VALUE_COUNT: usize = 2244;
+pub const RECURSION_SAMPLED_VALUE_COUNT: usize = 2248;
 /// Universal AIR constraints compiled from the checked-in component roster.
-pub const RECURSION_AIR_INSTRUCTION_COUNT: usize = 1286;
+pub const RECURSION_AIR_INSTRUCTION_COUNT: usize = 1287;
 /// Universal preprocessing columns in canonical commitment order.
 pub const RECURSION_PREPROCESSED_COLUMN_COUNT: usize = 493;
 /// Flat authenticated recursion values across every raw query.
@@ -113,7 +113,7 @@ pub const RECURSION_TRACE_PATH_COUNT: usize = COMMITMENT_TREE_COUNT * FRI_QUERY_
 
 /// Canonical protocol identifier limbs for cross-language conformance.
 pub const PROTOCOL_ID_WORDS: [u32; 8] = [
-    802324842, 833766223, 1950912128, 622344095, 673876662, 1623355154, 788242498, 1733274698,
+    1605643340, 1955314271, 2072188796, 1133138353, 150703753, 2017819881, 1063238005, 332318256,
 ];
 /// Digest of all ordered VM preprocessing identifiers and log sizes.
 pub const VM_PREPROCESSING_WORDS: [u32; 8] = [
@@ -756,7 +756,7 @@ mod tests {
         ];
         assert_eq!(
             actual,
-            [1757, 4, 1865, 20, 924, 14, 2100, 4, 2244, 22, 1286, 493, 36]
+            [1757, 4, 1865, 20, 924, 14, 2104, 4, 2248, 22, 1287, 493, 36]
         );
     }
 
@@ -795,8 +795,8 @@ mod tests {
                 2112168674,
             ]),
             digest([
-                1907648559, 196205058, 352011390, 325762365, 1835616284, 2092506603, 1365598535,
-                1331536374,
+                127848648, 1979842229, 65537624, 515341971, 1126208585, 2030290040, 473511199,
+                1257061599,
             ]),
         ];
         assert_eq!(actual, expected);
@@ -804,7 +804,7 @@ mod tests {
 
     #[test]
     fn serialized_root_size_is_derived_from_the_recursion_shape() {
-        assert_eq!(ROOT_PROOF_BYTE_SIZE, 3_383_748);
+        assert_eq!(ROOT_PROOF_BYTE_SIZE, 3_386_900);
     }
 
     #[test]

@@ -25,8 +25,9 @@ The main workspace boundaries are:
 - `continuation`: host-side verification of a non-empty chain containing one
   proof per segment; proof size and verification work are linear in segment
   count;
-- `recursion`: universal binary recursive-verifier components under active
-  development; it does not yet expose a recursive prover or root verifier;
+- `recursion`: the universal recursive-verifier AIR plus manifest-bound outer
+  proving and verification for segment and empty leaves; recursion-child replay,
+  binary folding, tree construction, and the root API remain unfinished;
 - `sdk` and `guest-lib`: host and guest interfaces.
 
 ### Memory Layout

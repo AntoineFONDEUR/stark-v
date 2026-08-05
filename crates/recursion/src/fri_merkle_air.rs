@@ -671,6 +671,7 @@ mod fri_merkle_leaf_dsl {
         embedded_enabler_boolean: false,
         embedded_relations: crate::fri_merkle_air::FriMerkleLeafComponentRelations,
         logup_batch: 2,
+        logup_unbatched_tail: 2,
         embedded_preprocessed: {
             row_mask: "recursion_fri_merkle_leaf_row_mask",
             segment_mask: "recursion_fri_merkle_leaf_segment_mask",
@@ -2079,11 +2080,17 @@ mod tests {
         Poseidon2M31Channel, Poseidon2M31Hash, Poseidon2M31MerkleHasher,
     };
     use rstest::rstest;
+    use stwo::core::channel::Blake2sChannel;
     use stwo::core::fields::FieldExpOps;
     use stwo::core::fields::m31::M31;
-    use stwo::core::pcs::TreeVec;
+    use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig, TreeVec};
+    use stwo::core::vcs_lifted::blake2_merkle::Blake2sMerkleChannel;
     use stwo::core::vcs_lifted::merkle_hasher::MerkleHasherLifted;
-    use stwo_constraint_framework::{FrameworkEval, Relation, assert_constraints_on_polys};
+    use stwo::prover::poly::circle::PolyOps;
+    use stwo::prover::{CommitmentSchemeProver, ComponentProver};
+    use stwo_constraint_framework::{
+        FrameworkEval, Relation, TraceLocationAllocator, assert_constraints_on_polys,
+    };
 
     use super::*;
     use crate::kernel::VerifierProgramSpec;
@@ -2155,6 +2162,154 @@ mod tests {
         Qm31Wire::new(core::array::from_fn(|word| {
             M31Word::from(seed + word as u16)
         }))
+    }
+
+    #[test]
+    fn leaf_component_uses_the_declared_constraint_degree_domain() {
+        let eval = leaf_eval_for_proof_kind(
+            16,
+            ProofKind::SegmentLeaf,
+            &Relations::dummy(),
+            &FriMerkleRelations::dummy(),
+            &RecursionRelations::dummy(),
+        );
+
+        assert_eq!(eval.max_constraint_log_degree_bound(), 17);
+    }
+
+    #[test]
+    fn leaf_component_degree_includes_preprocessed_endpoint_products() {
+        let eval = leaf_eval_for_proof_kind(
+            16,
+            ProofKind::SegmentLeaf,
+            &Relations::dummy(),
+            &FriMerkleRelations::dummy(),
+            &RecursionRelations::dummy(),
+        );
+        let expressions = eval.evaluate(stwo_constraint_framework::expr::ExprEvaluator::new());
+        let max_degree = crate::recursion_air_program::constraint_degree_bounds_with_preprocessed(
+            &expressions,
+            &fri_merkle_leaf_dsl::preprocessed_column_ids(),
+        )
+        .into_iter()
+        .max();
+
+        assert_eq!(max_degree, Some(3));
+    }
+
+    #[test]
+    fn leaf_component_proves_at_the_declared_constraint_degree_bound() {
+        let materialized = materialize(ProofKind::SegmentLeaf);
+        let preprocessed = materialized.preprocessing.gen_leaf_columns();
+        let trace = materialized.leaf.into_witness();
+        let log_size = materialized.preprocessing.leaf_log_size();
+        let config = PcsConfig {
+            lifting_log_size: Some(log_size + 2),
+            ..PcsConfig::default()
+        };
+        let twiddles = SimdBackend::precompute_twiddles(
+            CanonicCoset::new(log_size + 2 + config.fri_config.log_blowup_factor)
+                .circle_domain()
+                .half_coset,
+        );
+        let mut prover_channel = Blake2sChannel::default();
+        let mut commitment_scheme =
+            CommitmentSchemeProver::<_, Blake2sMerkleChannel>::new(config, &twiddles);
+        commitment_scheme.set_store_polynomials_coefficients();
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(preprocessed.clone());
+        tree_builder.commit(&mut prover_channel);
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(trace.clone());
+        tree_builder.commit(&mut prover_channel);
+        let vm_relations = Relations::draw(&mut prover_channel);
+        let fri_relations = FriMerkleRelations::draw(&mut prover_channel);
+        let recursion_relations = RecursionRelations::draw(&mut prover_channel);
+        let (interaction, claimed_sum) = gen_leaf_interaction_trace(
+            &trace,
+            &preprocessed,
+            ProofKind::SegmentLeaf,
+            &vm_relations,
+            &fri_relations,
+            &recursion_relations,
+        );
+        let interaction_log_sizes = interaction
+            .iter()
+            .map(|column| column.domain.log_size())
+            .collect::<Vec<_>>();
+        let mut tree_builder = commitment_scheme.tree_builder();
+        tree_builder.extend_evals(interaction);
+        tree_builder.commit(&mut prover_channel);
+        let ids = fri_merkle_leaf_dsl::preprocessed_column_ids();
+        let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+        let component = LeafComponent::new(
+            &mut allocator,
+            leaf_eval_for_proof_kind(
+                log_size,
+                ProofKind::SegmentLeaf,
+                &vm_relations,
+                &fri_relations,
+                &recursion_relations,
+            ),
+            claimed_sum,
+        );
+        let proof = stwo::prover::prove(
+            &[&component as &dyn ComponentProver<SimdBackend>],
+            &mut prover_channel,
+            commitment_scheme,
+        )
+        .expect("the declared degree domain contains the leaf quotient");
+
+        let preprocessed_log_sizes = preprocessed
+            .iter()
+            .map(|column| column.domain.log_size())
+            .collect::<Vec<_>>();
+        let trace_log_sizes = trace
+            .iter()
+            .map(|column| column.domain.log_size())
+            .collect::<Vec<_>>();
+        let mut verifier_channel = Blake2sChannel::default();
+        let mut verifier_scheme = CommitmentSchemeVerifier::<Blake2sMerkleChannel>::new(config);
+        verifier_scheme.commit(
+            proof.commitments[0],
+            &preprocessed_log_sizes,
+            &mut verifier_channel,
+        );
+        verifier_scheme.commit(
+            proof.commitments[1],
+            &trace_log_sizes,
+            &mut verifier_channel,
+        );
+        let vm_relations = Relations::draw(&mut verifier_channel);
+        let fri_relations = FriMerkleRelations::draw(&mut verifier_channel);
+        let recursion_relations = RecursionRelations::draw(&mut verifier_channel);
+        verifier_scheme.commit(
+            proof.commitments[2],
+            &interaction_log_sizes,
+            &mut verifier_channel,
+        );
+        let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+        let verifier_component = LeafComponent::new(
+            &mut allocator,
+            leaf_eval_for_proof_kind(
+                log_size,
+                ProofKind::SegmentLeaf,
+                &vm_relations,
+                &fri_relations,
+                &recursion_relations,
+            ),
+            claimed_sum,
+        );
+
+        assert!(
+            stwo::core::verifier::verify(
+                &[&verifier_component],
+                &mut verifier_channel,
+                &mut verifier_scheme,
+                proof,
+            )
+            .is_ok()
+        );
     }
 
     fn hash_leaf(values: &[Qm31Wire]) -> Poseidon2M31Hash {

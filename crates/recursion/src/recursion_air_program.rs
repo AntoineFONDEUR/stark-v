@@ -25,16 +25,42 @@ use stwo::core::fields::m31::BaseField;
 use stwo::core::fields::qm31::{SECURE_EXTENSION_DEGREE, SecureField};
 use stwo::core::pcs::{TreeSubspan, TreeVec};
 use stwo::core::poly::circle::{MAX_CIRCLE_DOMAIN_LOG_SIZE, MIN_CIRCLE_DOMAIN_LOG_SIZE};
+use stwo::prover::ComponentProver;
 use stwo::prover::backend::Column;
 use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::CircleEvaluation;
-use stwo_constraint_framework::expr::ExprEvaluator;
+use stwo_constraint_framework::expr::degree::NamedExprs;
+use stwo_constraint_framework::expr::{BaseExpr, ColumnExpr, ExprEvaluator};
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
     EvalAtRow, FrameworkComponent, FrameworkEval, PREPROCESSED_TRACE_IDX, TraceLocationAllocator,
     assert_constraints_on_trace,
 };
+
+/// Measures constraints with verifier preprocessing treated as degree-one columns.
+///
+/// Named preprocessing expressions are otherwise unresolved by `ExprEvaluator`,
+/// which would understate products that combine fixed columns with witness data.
+pub(crate) fn constraint_degree_bounds_with_preprocessed(
+    expressions: &ExprEvaluator,
+    preprocessed: &[PreProcessedColumnId],
+) -> Vec<usize> {
+    let mut base_expressions = expressions.intermediates.clone();
+    for (index, id) in preprocessed.iter().enumerate() {
+        base_expressions.insert(
+            id.id.clone(),
+            BaseExpr::Col(ColumnExpr::from((PREPROCESSED_TRACE_IDX, index, 0))),
+        );
+    }
+    let named_expressions =
+        NamedExprs::new(base_expressions, expressions.ext_intermediates.clone());
+    expressions
+        .constraints
+        .iter()
+        .map(|constraint| constraint.degree_bound(&named_expressions))
+        .collect()
+}
 
 use super::air_expression_circuit::{
     AirExpressionError, AirExpressionInputs, accumulate_air_constraints, evaluate_air_expressions,
@@ -150,10 +176,62 @@ pub fn assert_universal_constraints(
         log_sizes,
         claimed_sums,
     );
-    for checker in &collector.constraint_checkers {
-        checker.assert_constraints(&cpu_traces);
+    for (name, checker) in UNIVERSAL_COMPONENT_NAMES
+        .iter()
+        .zip(&collector.constraint_checkers)
+    {
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            checker.assert_constraints(&cpu_traces);
+        }))
+        .is_err()
+        {
+            panic!("universal component {name} rejected the assembled trace");
+        }
     }
     collector.constraint_checkers.len()
+}
+
+/// One canonical universal roster instantiated for native proving or verification.
+pub(crate) struct UniversalComponents {
+    components: Vec<Box<dyn UniversalComponent>>,
+}
+
+impl UniversalComponents {
+    pub(crate) fn provers(&self) -> Vec<&dyn ComponentProver<SimdBackend>> {
+        self.components
+            .iter()
+            .map(|component| component.as_prover())
+            .collect()
+    }
+
+    pub(crate) fn verifiers(&self) -> Vec<&dyn stwo::core::air::Component> {
+        self.components
+            .iter()
+            .map(|component| component.as_verifier())
+            .collect()
+    }
+}
+
+/// Instantiates the same generated roster used by self-evaluation and direct checks.
+pub(crate) fn universal_components(
+    preprocessing_ids: &[PreProcessedColumnId],
+    relations: &UniversalRelations,
+    proof_kind: ProofKind,
+    log_sizes: &UniversalComponentLogSizes,
+    claimed_sums: &[SecureField; UNIVERSAL_COMPONENT_COUNT],
+) -> UniversalComponents {
+    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(preprocessing_ids);
+    let mut collector = RosterCollector::default();
+    collector.push_all(
+        &mut allocator,
+        relations,
+        proof_kind,
+        log_sizes,
+        claimed_sums,
+    );
+    UniversalComponents {
+        components: collector.component_refs,
+    }
 }
 
 /// Records the exact mask-consumption order of one component's `evaluate`.
@@ -384,7 +462,7 @@ impl RecursionAirProgram {
         let core_components = stwo::core::air::Components {
             components: component_refs
                 .iter()
-                .map(|component| component.as_ref())
+                .map(|component| component.as_verifier())
                 .collect(),
             n_preprocessed_columns: preprocessed_ids.len(),
         };
@@ -627,8 +705,26 @@ impl RecursionComponentProgram {
 #[derive(Default)]
 struct RosterCollector {
     components: Vec<UnresolvedComponentProgram>,
-    component_refs: Vec<Box<dyn stwo::core::air::Component>>,
+    component_refs: Vec<Box<dyn UniversalComponent>>,
     constraint_checkers: Vec<Box<dyn UniversalConstraintChecker>>,
+}
+
+trait UniversalComponent {
+    fn as_prover(&self) -> &dyn ComponentProver<SimdBackend>;
+    fn as_verifier(&self) -> &dyn stwo::core::air::Component;
+}
+
+impl<T> UniversalComponent for T
+where
+    T: ComponentProver<SimdBackend> + 'static,
+{
+    fn as_prover(&self) -> &dyn ComponentProver<SimdBackend> {
+        self
+    }
+
+    fn as_verifier(&self) -> &dyn stwo::core::air::Component {
+        self
+    }
 }
 
 trait UniversalConstraintChecker {
@@ -749,6 +845,25 @@ impl RosterCollector {
         let component = FrameworkComponent::new(allocator, eval, claimed_sum);
         let recorder = (*component).evaluate(MaskConsumptionRecorder::default());
         let expressions = (*component).evaluate(ExprEvaluator::new());
+        let max_degree = constraint_degree_bounds_with_preprocessed(
+            &expressions,
+            &recorder.preprocessed_columns,
+        )
+        .into_iter()
+        .max()
+        .unwrap_or(0);
+        let constraint_log_degree_offset = component
+            .max_constraint_log_degree_bound()
+            .checked_sub(component.log_size())
+            .expect("component constraint domain contains its trace domain");
+        let max_supported_degree = 1_usize
+            .checked_shl(constraint_log_degree_offset + 1)
+            .unwrap_or(usize::MAX)
+            .saturating_sub(1);
+        assert!(
+            max_degree <= max_supported_degree,
+            "component {name} has constraint degree {max_degree}, exceeding degree {max_supported_degree} supported by its framework bound"
+        );
         let mut column_variables = HashMap::new();
         let mut per_interaction: HashMap<usize, usize> = HashMap::new();
         for (variable, (interaction, _offsets)) in recorder.consumption.iter().enumerate() {
@@ -1681,18 +1796,14 @@ mod tests {
     fn build_native_components(
         relations: &UniversalRelations,
         claimed_sums: &[SecureField; UNIVERSAL_COMPONENT_COUNT],
-    ) -> Vec<Box<dyn stwo::core::air::Component>> {
-        let mut allocator =
-            TraceLocationAllocator::new_with_preprocessed_columns(&preprocessed_ids());
-        let mut collector = RosterCollector::default();
-        collector.push_all(
-            &mut allocator,
+    ) -> UniversalComponents {
+        universal_components(
+            &preprocessed_ids(),
             relations,
             ProofKind::SegmentLeaf,
             &log_sizes(),
             claimed_sums,
-        );
-        collector.component_refs
+        )
     }
 
     fn drawn_relation_parameters(
@@ -1779,7 +1890,7 @@ mod tests {
         {
             assert_eq!(
                 program.constraint_count,
-                stwo::core::air::Component::n_constraints(component.as_ref()),
+                component.as_verifier().n_constraints(),
                 "constraint count mismatch for {}",
                 program.name
             );
@@ -1813,10 +1924,7 @@ mod tests {
         });
         let native_components = build_native_components(&relations, &claimed_sum_values);
         let core_components = stwo::core::air::Components {
-            components: native_components
-                .iter()
-                .map(|component| component.as_ref())
-                .collect(),
+            components: native_components.verifiers(),
             n_preprocessed_columns: preprocessed_ids().len(),
         };
         let seed = SecureField::from_m31_array([

@@ -1,9 +1,10 @@
 //! AIR components and protocol types for binary recursive proving.
 //!
-//! The crate defines one verifier circuit that accepts either a stark-v
-//! segment proof or two proofs produced by this same circuit. It does not yet
-//! expose a complete recursive prover or root-verifier API; `docs/recursion.md`
-//! tracks the remaining integration work.
+//! The crate defines one universal verifier AIR with segment, binary, and empty
+//! branches. Its outer prover and verifier currently support authenticated
+//! segment leaves and canonical empty leaves. Recursion-child replay, binary
+//! proving, and the root-verifier API remain integration work tracked in
+//! `docs/recursion.md`.
 //!
 //! Every recursion-owned roster component is authored in `define_air!` or
 //! `define_air_fns!`, so its AIR evaluation and interaction witness share one
@@ -37,6 +38,7 @@ pub mod qm31_mul;
 pub mod query_position_air;
 pub mod recorder;
 pub mod recursion_air_program;
+pub mod recursive_proof;
 pub mod relation_challenge_air;
 pub mod relations;
 pub mod segment_leaf;

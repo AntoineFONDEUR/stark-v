@@ -387,7 +387,7 @@ stwo_macros::define_air_fns! {
             verifier_id,
             hash_id,
             word_index,
-            is_payload * value + constant_mask * constant_value,
+            value + constant_value,
         );
         consume(active * is_payload) payload_word(
             verifier_id, sequence, tag, arg_0, arg_1, arg_2, arg_3, payload_index, value,

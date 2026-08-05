@@ -947,7 +947,7 @@ impl From<WireError> for SegmentLeafError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::hash::{Hash, Hasher};
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -967,17 +967,17 @@ mod tests {
 
     use super::*;
 
-    struct RealFixture {
-        profile: FrozenProtocolProfile,
+    pub(crate) struct RealFixture {
+        pub(crate) profile: FrozenProtocolProfile,
         proof: Proof<Poseidon2M31MerkleHasher>,
         metadata: SegmentRunMetadata,
         job: JobContext,
-        wire: Box<VmSegmentLeafWire>,
+        pub(crate) wire: Box<VmSegmentLeafWire>,
         prover_draws: Vec<(crate::kernel::VerifierStep, [M31Word; 8])>,
         preprocessing: prover::Preprocessing<Poseidon2M31MerkleHasher>,
     }
 
-    fn real_fixture() -> &'static RealFixture {
+    pub(crate) fn real_fixture() -> &'static RealFixture {
         static FIXTURE: OnceLock<Box<RealFixture>> = OnceLock::new();
         FIXTURE
             .get_or_init(|| {
@@ -992,7 +992,7 @@ mod tests {
             .as_ref()
     }
 
-    fn universal_assembly_guard() -> MutexGuard<'static, ()> {
+    pub(crate) fn universal_assembly_guard() -> MutexGuard<'static, ()> {
         static LOCK: Mutex<()> = Mutex::new(());
         LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }

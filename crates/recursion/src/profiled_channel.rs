@@ -60,12 +60,47 @@ impl ProfiledPoseidon2M31Channel {
         Ok(channel)
     }
 
+    /// Initializes the fixed prefix of one universal recursion proof.
+    pub fn for_recursion_proof(
+        plan: &VerifierControlPlan,
+        protocol_id: ProtocolId,
+        statement: &SpanStatement,
+    ) -> Result<Self, ProfiledChannelError> {
+        if plan.schema() != VerifierSchema::Recursion {
+            return Err(ProfiledChannelError::SchemaMismatch {
+                expected: VerifierSchema::Recursion,
+                actual: plan.schema(),
+            });
+        }
+        let mut channel = Self {
+            kernel: TranscriptKernel::default(),
+            plan: Some(plan.clone()),
+            next_sequence: 0,
+            draws: Vec::new(),
+        };
+        channel.consume_exact_mix(VerifierStep::BindProtocol, protocol_id.digest().words())?;
+        channel.consume_exact_mix(VerifierStep::BindStatement, &statement.canonical_words())?;
+        channel.consume_exact_mix(
+            VerifierStep::BindPcsParameters,
+            &plan.pcs_parameters().canonical_words(),
+        )?;
+        Ok(channel)
+    }
+
     /// Binds the fixed canonical VM claim after the main trace commitment.
     pub fn absorb_vm_public_claim(
         &mut self,
         digest: VmPublicClaimDigest,
     ) -> Result<(), ProfiledChannelError> {
         self.consume_exact_mix(VerifierStep::AbsorbPublicClaim, digest.digest().words())
+    }
+
+    /// Consumes the recursion schema's empty public-claim frame.
+    ///
+    /// The complete recursion claim is the statement bound in the fixed prefix,
+    /// but the shared verifier schedule retains this domain-separation step.
+    pub fn absorb_recursion_public_claim(&mut self) -> Result<(), ProfiledChannelError> {
+        self.consume_exact_mix(VerifierStep::AbsorbPublicClaim, &[])
     }
 
     /// Binds all component LogUp claims in canonical roster order.

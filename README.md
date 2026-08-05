@@ -150,6 +150,57 @@ let proof = prove_rv32im(run_result, config, &preprocessed);
 verify_rv32im(proof, config, &preprocessed)?;
 ```
 
+### Prover backend selection
+
+SIMD remains the default. Enable `metal` for Apple-GPU participation and
+`parallel` for Rayon intra-proof parallelism; both features forward through the
+benchmark CLI and SDK to the prover.
+
+```bash
+# All three policies; replace the ELF path as needed.
+cargo run --release -p bench-cli --features "metal,parallel" -- \
+  prove --elf guest.elf --backend simd
+cargo run --release -p bench-cli --features "metal,parallel" -- \
+  prove --elf guest.elf --backend metal-prefer
+cargo run --release -p bench-cli --features "metal,parallel" -- \
+  prove --elf guest.elf --backend metal-required
+```
+
+The same flag is available on the CLI's `bench` command. In the SDK:
+
+```rust
+use stark_v_sdk::{ProverBackend, StarkV};
+
+let vm = StarkV::new(program, config)
+    .with_backend(ProverBackend::MetalParticipationRequired);
+```
+
+`MetalPrefer` falls back to SIMD if Metal cannot be admitted before the
+Fiat-Shamir transcript is created. `MetalParticipationRequired` is fail-closed:
+the proof may use the hybrid scalar `CpuBackend` for small or unsupported work,
+but it must record at least one successfully completed checked Metal submission
+and no checked submission failures. It does **not** mean every stage is
+Metal-resident. The report's process-wide counter delta is attributable only
+when all concurrent proving work uses this session API; do not run direct,
+out-of-session `CpuBackend`/Metal work concurrently when relying on that
+telemetry.
+
+#### Current hybrid Metal baseline
+
+Apple M5 Max, release build with `metal,parallel`; every proof verified and SIMD
+and Metal produced identical serialized proof sizes:
+
+| Program | Cycles | SIMD total | SIMD prove | Metal total | Metal prove | Metal success/failure | Exact proof bytes (both) | Verified |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `mul_output` | 61 | 0.98 s | 0.897 s | 68.76 s | 68.673 s | 96 / 0 | 74,081 | Both |
+| `load_merge` | 187 | 0.98 s | 0.898 s | 68.57 s | 68.484 s | 96 / 0 | 74,384 | Both |
+| `max_div` | 147 | 1.00 s | 0.909 s | 72.12 s | 72.021 s | 96 / 0 | 80,152 | Both |
+
+This forwarded hybrid path is functional correctness and telemetry
+infrastructure, not a performance win yet. It is currently much slower than
+SIMD because Stark-V's surrounding scalar `CpuBackend` work dominates. Resident
+SIMD/Metal AIR integration is the follow-up required for competitive latency.
+
 ## Benchmarks
 
 The benchmark measures proving throughput in kHz or MHz (thousands or millions
@@ -297,6 +348,7 @@ fibonacci           fastest       │ slowest       │ median        │ mean  
 ## Features
 
 - `parallel` — Enable Rayon parallelism in the prover
+- `metal` — Enable admitted hybrid Apple Metal participation on macOS
 - `jemalloc` — Use jemalloc allocator
 - `mimalloc` — Use mimalloc allocator
 - `smalloc` — Use smalloc allocator

@@ -5,8 +5,8 @@
 //! - Verifying proofs (in the same process)
 //! - Measuring proof and preprocessing sizes
 
-use clap::{Parser, Subcommand};
-use prover::{PcsConfig, prove_rv32im, verify_rv32im};
+use clap::{Parser, Subcommand, ValueEnum};
+use prover::{prove_rv32im_with_backend, verify_rv32im, BackendReport, PcsConfig, ProverBackend};
 use runner::run_with_input;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -44,6 +44,10 @@ enum Command {
         /// Skip verification after proving
         #[arg(long)]
         skip_verify: bool,
+
+        /// Proving backend policy
+        #[arg(long, value_enum, default_value_t = BackendArg::Simd)]
+        backend: BackendArg,
     },
 
     /// Just run the VM without proving (for timing VM execution separately)
@@ -82,6 +86,10 @@ enum Command {
         /// Output path for metrics JSON
         #[arg(long)]
         metrics_out: Option<PathBuf>,
+
+        /// Proving backend policy
+        #[arg(long, value_enum, default_value_t = BackendArg::Simd)]
+        backend: BackendArg,
     },
 
     /// Measure sizes (ELF as preprocessing size)
@@ -100,15 +108,35 @@ enum Command {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum BackendArg {
+    Simd,
+    MetalPrefer,
+    #[value(name = "metal-required")]
+    MetalRequired,
+}
+
+impl From<BackendArg> for ProverBackend {
+    fn from(backend: BackendArg) -> Self {
+        match backend {
+            BackendArg::Simd => Self::Simd,
+            BackendArg::MetalPrefer => Self::MetalPrefer,
+            BackendArg::MetalRequired => Self::MetalParticipationRequired,
+        }
+    }
+}
+
 /// Metrics collected during proving
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ProveMetrics {
     /// Number of VM cycles executed
     cycles: u64,
-    /// Size of the proof in bytes (estimated)
-    proof_size_estimate: usize,
+    /// Exact postcard-serialized proof size in bytes
+    proof_size_bytes: usize,
     /// Whether verification succeeded
     verified: bool,
+    /// Requested backend and observed dispatch evidence
+    backend: BackendReport,
 }
 
 /// Metrics collected during VM run only
@@ -146,6 +174,7 @@ fn main() {
             max_cycles,
             metrics_out,
             skip_verify,
+            backend,
         } => {
             run_prove(
                 &elf,
@@ -153,6 +182,7 @@ fn main() {
                 max_cycles,
                 metrics_out.as_ref(),
                 skip_verify,
+                backend,
             );
         }
 
@@ -170,6 +200,7 @@ fn main() {
             input,
             max_cycles,
             metrics_out,
+            backend,
         } => {
             run_prove(
                 &elf,
@@ -177,6 +208,7 @@ fn main() {
                 max_cycles,
                 metrics_out.as_ref(),
                 false,
+                backend,
             );
         }
 
@@ -266,6 +298,7 @@ fn run_prove(
     max_cycles: u64,
     metrics_out: Option<&PathBuf>,
     skip_verify: bool,
+    backend: BackendArg,
 ) {
     // Load ELF
     let elf_bytes = match fs::read(elf) {
@@ -308,11 +341,19 @@ fn run_prove(
     let preprocessed = prover::preprocess(config);
 
     info!("Generating proof...");
-    let proof = prove_rv32im(run_result, config, &preprocessed);
-
-    // The proof size estimate is logged by stwo during proving
-    // We'll use 0 as placeholder since we can't easily serialize the proof
-    let proof_size_estimate = 0;
+    let outcome = match prove_rv32im_with_backend(run_result, config, &preprocessed, backend.into())
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            error!("Proof generation failed: {error}");
+            std::process::exit(1);
+        }
+    };
+    let proof_size_bytes = postcard::to_allocvec(&outcome.proof)
+        .expect("postcard proof serialization must succeed")
+        .len();
+    let backend_report = outcome.backend_report;
+    let proof = outcome.proof;
 
     // Verify if not skipped
     let verified = if !skip_verify {
@@ -335,8 +376,9 @@ fn run_prove(
     // Output metrics
     let metrics = ProveMetrics {
         cycles,
-        proof_size_estimate,
+        proof_size_bytes,
         verified,
+        backend: backend_report,
     };
 
     if let Some(metrics_path) = metrics_out {
@@ -345,5 +387,100 @@ fn run_prove(
         info!("Metrics saved to {:?}", metrics_path);
     } else {
         println!("{}", serde_json::to_string_pretty(&metrics).unwrap());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn selected_backend(args: &[&str]) -> BackendArg {
+        let cli = Cli::try_parse_from(args).expect("CLI should parse");
+        match cli.command {
+            Command::Prove { backend, .. } | Command::Bench { backend, .. } => backend,
+            _ => panic!("expected proving command"),
+        }
+    }
+
+    #[test]
+    fn prove_backend_defaults_to_simd() {
+        assert_eq!(
+            selected_backend(&["stark-v-bench", "prove", "--elf", "guest.elf"]),
+            BackendArg::Simd
+        );
+        assert_eq!(
+            selected_backend(&["stark-v-bench", "bench", "--elf", "guest.elf"]),
+            BackendArg::Simd
+        );
+    }
+
+    #[test]
+    fn prove_backend_parses_all_policies() {
+        for (argument, expected) in [
+            ("simd", BackendArg::Simd),
+            ("metal-prefer", BackendArg::MetalPrefer),
+            ("metal-required", BackendArg::MetalRequired),
+        ] {
+            assert_eq!(
+                selected_backend(&[
+                    "stark-v-bench",
+                    "prove",
+                    "--elf",
+                    "guest.elf",
+                    "--backend",
+                    argument,
+                ]),
+                expected
+            );
+            assert_eq!(
+                selected_backend(&[
+                    "stark-v-bench",
+                    "bench",
+                    "--elf",
+                    "guest.elf",
+                    "--backend",
+                    argument,
+                ]),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn backend_arguments_map_to_core_policy() {
+        assert_eq!(ProverBackend::from(BackendArg::Simd), ProverBackend::Simd);
+        assert_eq!(
+            ProverBackend::from(BackendArg::MetalPrefer),
+            ProverBackend::MetalPrefer
+        );
+        assert_eq!(
+            ProverBackend::from(BackendArg::MetalRequired),
+            ProverBackend::MetalParticipationRequired
+        );
+    }
+
+    #[test]
+    fn prove_metrics_serialize_exact_size_and_backend_evidence() {
+        let metrics = ProveMetrics {
+            cycles: 42,
+            proof_size_bytes: 1234,
+            verified: true,
+            backend: BackendReport {
+                requested: ProverBackend::MetalPrefer,
+                actual: prover::ActualProverBackend::CpuHybridMetal,
+                fallback_reason: None,
+                device_name: Some("Test GPU".to_owned()),
+                successful_submissions: 7,
+                failed_submissions: 0,
+            },
+        };
+
+        let json = serde_json::to_value(metrics).expect("metrics should serialize");
+        assert_eq!(json["proof_size_bytes"], 1234);
+        assert_eq!(json["backend"]["requested"], "MetalPrefer");
+        assert_eq!(json["backend"]["actual"], "CpuHybridMetal");
+        assert_eq!(json["backend"]["device_name"], "Test GPU");
+        assert_eq!(json["backend"]["successful_submissions"], 7);
+        assert_eq!(json["backend"]["failed_submissions"], 0);
     }
 }

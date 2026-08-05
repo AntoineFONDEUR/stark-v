@@ -197,6 +197,11 @@ fn test_prove_verify_mul_output() {
     .expect("Verification failed");
 }
 
+/// SHA-256 of the postcard proof bytes for `mul_output` with the default PCS
+/// configuration and clean STWO baseline `52a5d60d2b9b`.
+const CLEAN_52_MUL_OUTPUT_PROOF_SHA256: &str =
+    "4336ca9509a1a702c7bf417459b38839a810bd5d10ded2f8e14448bbc7fc7c84";
+
 /// The scalar backend must produce the same transcript and proof bytes as the
 /// default SIMD backend for an identical deterministic execution.
 #[test_log::test]
@@ -204,6 +209,7 @@ fn test_cpu_backend_proof_matches_simd_and_verifies() {
     use prover::e2e::{ensure_guest_built, guest_bin_dir};
     use prover::{prove_rv32im, prove_rv32im_cpu, verify_rv32im};
     use runner::run;
+    use sha2::{Digest, Sha256};
 
     ensure_guest_built();
 
@@ -220,6 +226,11 @@ fn test_cpu_backend_proof_matches_simd_and_verifies() {
     let simd_bytes = postcard::to_allocvec(&simd_proof).expect("serialize SIMD proof");
     let cpu_bytes = postcard::to_allocvec(&cpu_proof).expect("serialize CPU proof");
     assert_eq!(cpu_bytes, simd_bytes, "backend proof bytes diverged");
+    let proof_digest = Sha256::digest(&simd_bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert_eq!(proof_digest, CLEAN_52_MUL_OUTPUT_PROOF_SHA256);
 
     verify_rv32im(cpu_proof, config, &preprocessing)
         .expect("CPU-backend proof failed the existing verifier");

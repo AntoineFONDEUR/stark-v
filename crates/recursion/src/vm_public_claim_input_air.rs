@@ -389,13 +389,24 @@ pub fn push_vm_public_claim_inputs(
         (false, Some(_)) => return Err(VmPublicClaimInputError::InactiveClaimProvided),
         (false, None) => vec![air::digest::M31Word::ZERO; preprocessed.word_count()],
     };
+    push_vm_public_claim_word_inputs(table, preprocessed, proof_kind, &words)
+}
+
+/// Pushes an already encoded fixed claim, keeping the wire as the sole leaf input.
+pub fn push_vm_public_claim_word_inputs(
+    table: &mut VmPublicClaimInputTable,
+    preprocessed: &VmPublicClaimInputPreprocessed,
+    proof_kind: ProofKind,
+    words: &[air::digest::M31Word],
+) -> Result<(), VmPublicClaimInputError> {
+    let active = proof_kind == ProofKind::SegmentLeaf;
     if words.len() != preprocessed.word_count() {
         return Err(VmPublicClaimInputError::WordCountMismatch {
             expected: preprocessed.word_count(),
             actual: words.len(),
         });
     }
-    for (kind, word) in preprocessed.kinds.iter().zip(words) {
+    for (kind, word) in preprocessed.kinds.iter().zip(words.iter().copied()) {
         if let VmPublicClaimWordKind::Constant(expected) = kind {
             if active && *expected != word {
                 return Err(VmPublicClaimInputError::ConstantMismatch);

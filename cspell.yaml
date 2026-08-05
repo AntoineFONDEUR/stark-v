@@ -167,6 +167,7 @@ words:
   - syscall
   - syscalls
   - subexpression
+  - subspan
   - subi
   - swatinem
   - syms

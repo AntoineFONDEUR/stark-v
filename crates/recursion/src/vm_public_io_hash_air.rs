@@ -26,8 +26,14 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::relation;
 
 use super::vm_public_claim::{
-    VmPublicClaimError, VmPublicClaimShape, canonical_public_input_words,
-    canonical_public_output_words, public_input_digest, public_output_digest,
+    VmPublicClaimError, VmPublicClaimShape, canonical_public_input_words_from_claim,
+    canonical_public_output_words_from_claim, canonical_vm_public_claim_words,
+    public_input_digest_from_claim, public_output_digest_from_claim,
+};
+#[cfg(test)]
+use super::vm_public_claim::{
+    canonical_public_input_words, canonical_public_output_words, public_input_digest,
+    public_output_digest,
 };
 use super::vm_public_claim_input_air::{
     VM_PUBLIC_INPUT_KIND, VM_PUBLIC_OUTPUT_KIND, VmPublicClaimInputRelations,
@@ -542,16 +548,43 @@ pub fn push_vm_public_io_hashes(
     public_data: Option<&PublicData>,
 ) -> Result<(), VmPublicIoHashError> {
     let active = proof_kind == ProofKind::SegmentLeaf;
-    let streams = match (active, public_data) {
-        (true, Some(public_data)) => [
-            canonical_public_input_words(&public_data.io_entries, preprocessed.shape)
-                .map_err(VmPublicIoHashError::Claim)?,
-            canonical_public_output_words(&public_data.io_entries, preprocessed.shape)
-                .map_err(VmPublicIoHashError::Claim)?,
-        ],
+    match (active, public_data) {
+        (true, Some(_)) => {}
         (true, None) => return Err(VmPublicIoHashError::SegmentClaimMissing),
         (false, Some(_)) => return Err(VmPublicIoHashError::InactiveClaimProvided),
-        (false, None) => [Vec::new(), Vec::new()],
+        (false, None) => {}
+    }
+    let claim_words = public_data
+        .map(|public_data| canonical_vm_public_claim_words(public_data, preprocessed.shape))
+        .transpose()
+        .map_err(VmPublicIoHashError::Claim)?;
+    push_vm_public_io_word_hashes(
+        table,
+        poseidon2,
+        preprocessed,
+        proof_kind,
+        claim_words.as_deref().unwrap_or(&[]),
+    )
+}
+
+/// Records both IO hash lanes directly from the fixed VM claim encoding.
+pub fn push_vm_public_io_word_hashes(
+    table: &mut VmPublicIoHashTable,
+    poseidon2: &mut Poseidon2Table,
+    preprocessed: &VmPublicIoHashPreprocessed,
+    proof_kind: ProofKind,
+    claim_words: &[M31Word],
+) -> Result<(), VmPublicIoHashError> {
+    let active = proof_kind == ProofKind::SegmentLeaf;
+    let streams = if active {
+        [
+            canonical_public_input_words_from_claim(claim_words, preprocessed.shape)
+                .map_err(VmPublicIoHashError::Claim)?,
+            canonical_public_output_words_from_claim(claim_words, preprocessed.shape)
+                .map_err(VmPublicIoHashError::Claim)?,
+        ]
+    } else {
+        [Vec::new(), Vec::new()]
     };
     if !active {
         for _ in &preprocessed.rows {
@@ -597,19 +630,9 @@ pub fn push_vm_public_io_hashes(
             state = output;
         }
         let expected = if io_kind == VM_PUBLIC_INPUT_KIND {
-            public_input_digest(
-                &public_data
-                    .expect("active claim was checked above")
-                    .io_entries,
-                preprocessed.shape,
-            )
+            public_input_digest_from_claim(claim_words, preprocessed.shape)
         } else {
-            public_output_digest(
-                &public_data
-                    .expect("active claim was checked above")
-                    .io_entries,
-                preprocessed.shape,
-            )
+            public_output_digest_from_claim(claim_words, preprocessed.shape)
         }
         .map_err(VmPublicIoHashError::Claim)?;
         if state[..RATE] != expected.digest().words().map(M31Word::as_u32) {

@@ -28,7 +28,7 @@ The implemented foundation includes:
 - a canonical protocol manifest and fixed-width proof wire;
 - one frozen protocol profile without a version suffix, derived from both
   generated AIR rosters, with 193 FRI queries, 4 KiB public-input and
-  public-output capacities, and an exact 3,080,316-byte universal proof wire;
+  public-output capacities, and an exact 3,383,748-byte universal proof wire;
 - fixed VM trace generation that pads ordinary instruction and access tables to
   log size 6 and the finalized program, memory, Merkle, and Poseidon2 tables to
   log size 11, rejecting a segment instead of changing verifier-owned geometry;
@@ -36,8 +36,9 @@ The implemented foundation includes:
   including expansion of deduplicated query values, Merkle siblings, and FRI
   cosets from prover-retained authentication data;
 - typed complete-execution, job, slot, executed-span, and empty-span statements;
-- a fixed verifier control plan shared by native transcript execution and AIR
-  tables;
+- a fixed verifier control plan shared by the manifest-bound recursion-targeted
+  prover, fixed verifier execution, and AIR tables; ordinary VM proofs retain
+  the public prover's native transcript;
 - canonical transcript recording, payload ownership, digest-state chaining,
   proof-of-work checks, and relation-challenge binding;
 - VM public-claim decoding and hashing;
@@ -45,15 +46,18 @@ The implemented foundation includes:
 - VM AIR composition evaluation generated from the prover component roster;
 - DEEP quotient, trace-Merkle, FRI-Merkle, FRI-fold, last-layer, and query
   position constraints;
+- deterministic segment-leaf witness assembly across all 36 universal
+  components, including preprocessing, committed traces, interactions, public
+  relation terms, and direct constraint acceptance;
 - an AIR self-program for verifying a recursion child;
 - shared QM31 multiplication, inversion, linear-operation, and Merkle-path trace
   tables;
 - component, malformed-witness, relation-closure, and leaf-binding tests.
 
-The missing integration is substantial: the existing components are not yet
-assembled into a complete universal trace, committed by an outer prover, or
-verified through a public root API. The fixed VM leaf is an input artifact, not
-a recursion proof; a real recursion proof cannot yet be used as a binary child.
+The assembled segment-leaf witness is not yet a recursion proof. Global LogUp
+closure, the empty and binary branches, the outer prover and verifier, recursive
+child replay, tree construction, and the public root API remain unfinished. A
+real recursion proof therefore cannot yet be used as a binary child.
 
 The live universal roster has 36 components. Every recursion-local component is
 authored directly through `define_air_fns!`; Poseidon2 uses the same macro, and
@@ -124,7 +128,7 @@ The finished system must preserve all of these properties:
   fixed-capacity slots are all zero.
 - The transcript absorbs the protocol, statement, PCS parameters, commitments,
   claims, sampled values, FRI data, and proof-of-work nonces in the same order
-  as the native verifier.
+  in the manifest-bound prover, fixed verifier executor, and AIR.
 - Every VM or recursion AIR constraint contributes to the composition value.
 - Every opened value is bound to an authenticated trace or FRI path.
 - Every public LogUp term is accumulated, and the global relation sum is zero.

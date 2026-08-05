@@ -177,8 +177,17 @@ impl PcsDeepProfile {
             nested[coordinate.tree][coordinate.column].push(offset);
             previous = Some(*coordinate);
         }
+        let committed_log_sizes = program
+            .column_log_sizes()
+            .iter()
+            .map(|tree| {
+                tree.iter()
+                    .map(|log_size| log_size + layout.log_blowup_factor())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
         Self::new(
-            program.column_log_sizes().0.clone(),
+            committed_log_sizes,
             nested,
             layout.lifting_log_size(),
             layout.n_queries(),

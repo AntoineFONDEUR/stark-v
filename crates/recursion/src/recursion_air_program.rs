@@ -23,12 +23,17 @@ use stwo::core::Fraction;
 use stwo::core::circle::{CirclePoint, CirclePointIndex};
 use stwo::core::fields::m31::BaseField;
 use stwo::core::fields::qm31::{SECURE_EXTENSION_DEGREE, SecureField};
-use stwo::core::pcs::TreeVec;
+use stwo::core::pcs::{TreeSubspan, TreeVec};
 use stwo::core::poly::circle::{MAX_CIRCLE_DOMAIN_LOG_SIZE, MIN_CIRCLE_DOMAIN_LOG_SIZE};
+use stwo::prover::backend::Column;
+use stwo::prover::backend::simd::SimdBackend;
+use stwo::prover::poly::BitReversedOrder;
+use stwo::prover::poly::circle::CircleEvaluation;
 use stwo_constraint_framework::expr::ExprEvaluator;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{
     EvalAtRow, FrameworkComponent, FrameworkEval, PREPROCESSED_TRACE_IDX, TraceLocationAllocator,
+    assert_constraints_on_trace,
 };
 
 use super::air_expression_circuit::{
@@ -111,6 +116,44 @@ pub fn universal_preprocessed_column_ids(
         &[SecureField::zero(); UNIVERSAL_COMPONENT_COUNT],
     );
     allocator.preprocessed_columns().clone()
+}
+
+/// Evaluates every universal component row against one assembled trace.
+///
+/// This is the direct witness-acceptance gate used before recursive proving:
+/// each macro-generated evaluator receives its allocator-selected columns and
+/// its own claimed sum, including the shared preprocessing registry.
+pub fn assert_universal_constraints(
+    traces: &TreeVec<Vec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>>,
+    preprocessing_ids: &[PreProcessedColumnId],
+    relations: &UniversalRelations,
+    proof_kind: ProofKind,
+    log_sizes: &UniversalComponentLogSizes,
+    claimed_sums: &[SecureField; UNIVERSAL_COMPONENT_COUNT],
+) -> usize {
+    let cpu_traces = TreeVec::new(
+        traces
+            .iter()
+            .map(|tree| {
+                tree.iter()
+                    .map(|column| column.values.to_cpu())
+                    .collect::<Vec<_>>()
+            })
+            .collect(),
+    );
+    let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(preprocessing_ids);
+    let mut collector = RosterCollector::default();
+    collector.push_all(
+        &mut allocator,
+        relations,
+        proof_kind,
+        log_sizes,
+        claimed_sums,
+    );
+    for checker in &collector.constraint_checkers {
+        checker.assert_constraints(&cpu_traces);
+    }
+    collector.constraint_checkers.len()
 }
 
 /// Records the exact mask-consumption order of one component's `evaluate`.
@@ -329,6 +372,7 @@ impl RecursionAirProgram {
         let RosterCollector {
             components,
             component_refs,
+            constraint_checkers: _,
         } = collector;
         if components.len() != UNIVERSAL_COMPONENT_COUNT {
             return Err(RecursionAirProgramError::ComponentCountMismatch {
@@ -584,15 +628,47 @@ impl RecursionComponentProgram {
 struct RosterCollector {
     components: Vec<UnresolvedComponentProgram>,
     component_refs: Vec<Box<dyn stwo::core::air::Component>>,
+    constraint_checkers: Vec<Box<dyn UniversalConstraintChecker>>,
+}
+
+trait UniversalConstraintChecker {
+    fn assert_constraints(&self, trace: &TreeVec<Vec<Vec<BaseField>>>);
+}
+
+struct FrameworkConstraintChecker<E> {
+    eval: E,
+    trace_locations: Vec<TreeSubspan>,
+    preprocessed_column_indices: Vec<usize>,
+    claimed_sum: SecureField,
+}
+
+impl<E: FrameworkEval + Sync> UniversalConstraintChecker for FrameworkConstraintChecker<E> {
+    fn assert_constraints(&self, trace: &TreeVec<Vec<Vec<BaseField>>>) {
+        let mut component_trace = trace.sub_tree(&self.trace_locations);
+        component_trace[PREPROCESSED_TRACE_IDX] = self
+            .preprocessed_column_indices
+            .iter()
+            .map(|index| &trace[PREPROCESSED_TRACE_IDX][*index])
+            .collect();
+        assert_constraints_on_trace(
+            &component_trace,
+            self.eval.log_size(),
+            |evaluator| {
+                self.eval.evaluate(evaluator);
+            },
+            self.claimed_sum,
+        );
+    }
 }
 
 impl RosterCollector {
-    fn compile<E: FrameworkEval + 'static>(
+    fn compile<E: FrameworkEval + Clone + Sync + 'static>(
         &mut self,
         name: &'static str,
         evaluation: ComponentEvaluation,
         component: FrameworkComponent<E>,
         recorder: MaskConsumptionRecorder,
+        checker_eval: E,
     ) {
         let mask_offsets = recorder.mask_offsets();
         let mut sampled_mask = TreeVec::new(vec![Vec::new(); mask_offsets.len().max(1)]);
@@ -652,16 +728,24 @@ impl RosterCollector {
             preprocessed_column_ids: recorder.preprocessed_columns,
             evaluation,
         });
+        self.constraint_checkers
+            .push(Box::new(FrameworkConstraintChecker {
+                eval: checker_eval,
+                trace_locations: component.trace_locations().to_vec(),
+                preprocessed_column_indices: component.preprocessed_column_indices().to_vec(),
+                claimed_sum: component.claimed_sum(),
+            }));
         self.component_refs.push(Box::new(component));
     }
 
-    fn push<E: FrameworkEval + 'static>(
+    fn push<E: FrameworkEval + Clone + Sync + 'static>(
         &mut self,
         allocator: &mut TraceLocationAllocator,
         name: &'static str,
         claimed_sum: SecureField,
         eval: E,
     ) {
+        let checker_eval = eval.clone();
         let component = FrameworkComponent::new(allocator, eval, claimed_sum);
         let recorder = (*component).evaluate(MaskConsumptionRecorder::default());
         let expressions = (*component).evaluate(ExprEvaluator::new());
@@ -680,6 +764,7 @@ impl RosterCollector {
             },
             component,
             recorder,
+            checker_eval,
         );
     }
 
@@ -693,6 +778,7 @@ impl RosterCollector {
         claimed_sum: SecureField,
         eval: air::poseidon2::component::air::Eval,
     ) {
+        let checker_eval = eval.clone();
         let stored_eval = Box::new(eval.clone());
         let component = FrameworkComponent::new(allocator, eval, claimed_sum);
         let recorder = (*component).evaluate(MaskConsumptionRecorder::default());
@@ -701,6 +787,7 @@ impl RosterCollector {
             ComponentEvaluation::Poseidon2(stored_eval),
             component,
             recorder,
+            checker_eval,
         );
     }
 

@@ -28,8 +28,11 @@ use stwo_constraint_framework::relation;
 
 use super::control_air::SEGMENT_VERIFIER_ID;
 use super::transcript_payload_air::{VerifierInputKind, VerifierInputRelations};
+#[cfg(test)]
+use super::vm_public_claim::vm_public_claim_digest;
 use super::vm_public_claim::{
-    VmPublicClaimError, VmPublicClaimShape, canonical_vm_public_claim_words, vm_public_claim_digest,
+    VmPublicClaimError, VmPublicClaimShape, canonical_vm_public_claim_words,
+    vm_public_claim_digest_from_words,
 };
 use super::vm_public_claim_input_air::{VM_CLAIM_HASH_SCOPE, VmPublicClaimInputRelations};
 use super::wire::ProofKind;
@@ -525,6 +528,26 @@ pub fn push_vm_public_claim_hash(
         (false, Some(_)) => return Err(VmPublicClaimHashError::InactiveClaimProvided),
         (false, None) => Vec::new(),
     };
+    push_vm_public_claim_word_hash(table, poseidon2, preprocessed, proof_kind, &words)
+}
+
+/// Records the claim sponge directly from the fixed leaf-wire words.
+pub fn push_vm_public_claim_word_hash(
+    table: &mut VmPublicClaimHashTable,
+    poseidon2: &mut Poseidon2Table,
+    preprocessed: &VmPublicClaimHashPreprocessed,
+    proof_kind: ProofKind,
+    words: &[M31Word],
+) -> Result<(), VmPublicClaimHashError> {
+    let active = proof_kind == ProofKind::SegmentLeaf;
+    if active && words.len() != preprocessed.shape.claim_word_count() {
+        return Err(VmPublicClaimHashError::Claim(
+            VmPublicClaimError::ClaimWordCountMismatch {
+                expected: preprocessed.shape.claim_word_count(),
+                actual: words.len(),
+            },
+        ));
+    }
     if !active {
         for _ in &preprocessed.rows {
             table.push_row_values(&[0; 41]);
@@ -556,11 +579,8 @@ pub fn push_vm_public_claim_hash(
         state = output;
         debug_assert_eq!(row.step as usize, row_index);
     }
-    let expected = vm_public_claim_digest(
-        public_data.expect("active claim was checked above"),
-        preprocessed.shape,
-    )
-    .map_err(VmPublicClaimHashError::Claim)?;
+    let expected = vm_public_claim_digest_from_words(words, preprocessed.shape)
+        .map_err(VmPublicClaimHashError::Claim)?;
     let actual = &state[..RATE];
     if actual != expected.digest().words().map(M31Word::as_u32) {
         return Err(VmPublicClaimHashError::DigestMismatch);

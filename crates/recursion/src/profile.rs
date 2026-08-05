@@ -24,8 +24,8 @@ use crate::protocol::{
     ValidatedProtocolManifest,
 };
 use crate::recursion_air_program::{
-    RecursionAirProgram, UNIVERSAL_COMPONENT_COUNT, UNIVERSAL_COMPONENT_NAMES,
-    UniversalComponentLogSizes, universal_preprocessed_column_ids,
+    RecursionAirProgram, UNIVERSAL_COMPONENT_COUNT, UniversalComponentLogSizes,
+    universal_preprocessed_column_ids,
 };
 use crate::universal_relations::UNIVERSAL_RELATION_COUNT;
 use crate::vm_air_program::{VM_AIR_COMPONENT_COUNT, VmAirProgram};
@@ -55,12 +55,16 @@ pub const FRI_QUERY_COUNT: usize = 193;
 pub const FRI_FOLD_STEP: u16 = 4;
 /// Both fixed proof systems have four commitment rounds.
 pub const COMMITMENT_TREE_COUNT: usize = 4;
-/// A degree-20 trace with fold step four produces five FRI layers.
-pub const FRI_LAYER_COUNT: usize = 5;
+/// The fixed VM degree bound produces five FRI layers.
+pub const VM_FRI_LAYER_COUNT: usize = 5;
+/// The universal arithmetic capacity produces six FRI layers.
+pub const RECURSION_FRI_LAYER_COUNT: usize = 6;
 /// Largest fold subset carried by one fixed FRI query slot.
 pub const MAX_FRI_FOLD_WIDTH: usize = 16;
-/// Largest trace or FRI authentication path in either proof shape.
-pub const MAX_MERKLE_DEPTH: usize = 21;
+/// Exact largest authentication path in the fixed VM proof.
+pub const VM_MAX_MERKLE_DEPTH: usize = 21;
+/// Exact largest authentication path in the universal recursion proof.
+pub const RECURSION_MAX_MERKLE_DEPTH: usize = 23;
 /// Constant final polynomial under a zero last-layer log-degree bound.
 pub const LAST_LAYER_COEFFICIENT_COUNT: usize = 1;
 
@@ -81,9 +85,6 @@ pub const VM_DYNAMIC_COMPONENT_LOG_SIZE: u32 = 6;
 /// Even a short segment finalizes a complete sparse commitment boundary, so
 /// these tables require more rows than its instruction tables.
 pub const VM_COMMITMENT_COMPONENT_LOG_SIZE: u32 = 11;
-/// Maximum rows allocated to every execution-dependent universal component.
-pub const RECURSION_COMPONENT_LOG_SIZE: u32 = 20;
-
 /// VM table count compiled from the checked-in component roster.
 pub const VM_TABLE_COUNT: usize = 1757;
 /// VM OODS samples compiled from the checked-in component roster.
@@ -112,7 +113,7 @@ pub const RECURSION_TRACE_PATH_COUNT: usize = COMMITMENT_TREE_COUNT * FRI_QUERY_
 
 /// Canonical protocol identifier limbs for cross-language conformance.
 pub const PROTOCOL_ID_WORDS: [u32; 8] = [
-    1944644389, 1135441973, 1743486779, 1673021574, 1185365817, 1671132422, 875754423, 1496784385,
+    802324842, 833766223, 1950912128, 622344095, 673876662, 1623355154, 788242498, 1733274698,
 ];
 /// Digest of all ordered VM preprocessing identifiers and log sizes.
 pub const VM_PREPROCESSING_WORDS: [u32; 8] = [
@@ -120,27 +121,27 @@ pub const VM_PREPROCESSING_WORDS: [u32; 8] = [
 ];
 /// Digest of all ordered universal preprocessing identifiers and log sizes.
 pub const RECURSION_PREPROCESSING_WORDS: [u32; 8] = [
-    2615333, 291228193, 573214905, 2019728415, 1541924395, 1653690676, 1032775484, 135252883,
+    761643539, 1287361923, 126329351, 409804155, 2057204636, 1087354608, 810446001, 105446020,
 ];
 
 /// Manifest type whose array dimensions are the actual AIR layouts.
 pub type FrozenProtocolManifest = ProtocolManifest<
     VM_TABLE_COUNT,
     COMMITMENT_TREE_COUNT,
-    FRI_LAYER_COUNT,
+    VM_FRI_LAYER_COUNT,
     RECURSION_TABLE_COUNT,
     COMMITMENT_TREE_COUNT,
-    FRI_LAYER_COUNT,
+    RECURSION_FRI_LAYER_COUNT,
 >;
 
 /// Validated form of [`FrozenProtocolManifest`].
 pub type ValidatedFrozenProtocolManifest = ValidatedProtocolManifest<
     VM_TABLE_COUNT,
     COMMITMENT_TREE_COUNT,
-    FRI_LAYER_COUNT,
+    VM_FRI_LAYER_COUNT,
     RECURSION_TABLE_COUNT,
     COMMITMENT_TREE_COUNT,
-    FRI_LAYER_COUNT,
+    RECURSION_FRI_LAYER_COUNT,
 >;
 
 /// Fixed wire accepted for one authenticated VM proof.
@@ -150,11 +151,11 @@ pub type VmProofWire = FixedStarkProofWire<
     VM_SAMPLED_VALUE_COUNT,
     VM_QUERY_VALUE_COUNT,
     VM_TRACE_PATH_COUNT,
-    FRI_LAYER_COUNT,
+    VM_FRI_LAYER_COUNT,
     FRI_QUERY_COUNT,
     MAX_FRI_FOLD_WIDTH,
     LAST_LAYER_COEFFICIENT_COUNT,
-    MAX_MERKLE_DEPTH,
+    VM_MAX_MERKLE_DEPTH,
 >;
 
 /// Fixed STARK payload produced by the universal recursion AIR.
@@ -164,11 +165,11 @@ pub type RecursionStarkProofWire = FixedStarkProofWire<
     RECURSION_SAMPLED_VALUE_COUNT,
     RECURSION_QUERY_VALUE_COUNT,
     RECURSION_TRACE_PATH_COUNT,
-    FRI_LAYER_COUNT,
+    RECURSION_FRI_LAYER_COUNT,
     FRI_QUERY_COUNT,
     MAX_FRI_FOLD_WIDTH,
     LAST_LAYER_COEFFICIENT_COUNT,
-    MAX_MERKLE_DEPTH,
+    RECURSION_MAX_MERKLE_DEPTH,
 >;
 
 /// One statement and one fixed-size universal recursion proof.
@@ -178,11 +179,11 @@ pub type RootProofWire = RecursiveProofWire<
     RECURSION_SAMPLED_VALUE_COUNT,
     RECURSION_QUERY_VALUE_COUNT,
     RECURSION_TRACE_PATH_COUNT,
-    FRI_LAYER_COUNT,
+    RECURSION_FRI_LAYER_COUNT,
     FRI_QUERY_COUNT,
     MAX_FRI_FOLD_WIDTH,
     LAST_LAYER_COEFFICIENT_COUNT,
-    MAX_MERKLE_DEPTH,
+    RECURSION_MAX_MERKLE_DEPTH,
 >;
 
 /// Exact serialized size of every proof produced by the universal AIR.
@@ -192,11 +193,11 @@ pub const ROOT_PROOF_BYTE_SIZE: usize = recursive_proof_bytes::<
     RECURSION_SAMPLED_VALUE_COUNT,
     RECURSION_QUERY_VALUE_COUNT,
     RECURSION_TRACE_PATH_COUNT,
-    FRI_LAYER_COUNT,
+    RECURSION_FRI_LAYER_COUNT,
     FRI_QUERY_COUNT,
     MAX_FRI_FOLD_WIDTH,
     LAST_LAYER_COEFFICIENT_COUNT,
-    MAX_MERKLE_DEPTH,
+    RECURSION_MAX_MERKLE_DEPTH,
 >();
 
 /// Exact-size byte container for [`RootProofWire`].
@@ -205,10 +206,10 @@ pub type RootProofBytes = RecursiveProofBytes<ROOT_PROOF_BYTE_SIZE>;
 type FrozenVerifierPlans = BoundVerifierPlans<
     VM_TABLE_COUNT,
     COMMITMENT_TREE_COUNT,
-    FRI_LAYER_COUNT,
+    VM_FRI_LAYER_COUNT,
     RECURSION_TABLE_COUNT,
     COMMITMENT_TREE_COUNT,
-    FRI_LAYER_COUNT,
+    RECURSION_FRI_LAYER_COUNT,
 >;
 
 /// Fully checked programs, manifest, layouts, and verifier schedules.
@@ -317,16 +318,17 @@ fn build_frozen_protocol_profile(
     let validated_pcs = pcs
         .validate()
         .map_err(|error| ProfileError::at("PCS parameters", error))?;
-    let vm_proof_shape = derive_proof_shape::<VM_TABLE_COUNT>(
+    let vm_proof_shape = derive_proof_shape::<VM_TABLE_COUNT, VM_FRI_LAYER_COUNT>(
         vm_program.column_log_sizes(),
         VM_AIR_COMPONENT_COUNT,
         VM_SAMPLED_VALUE_COUNT,
     )?;
-    let recursion_proof_shape = derive_proof_shape::<RECURSION_TABLE_COUNT>(
-        recursion_program.column_log_sizes(),
-        UNIVERSAL_COMPONENT_COUNT,
-        RECURSION_SAMPLED_VALUE_COUNT,
-    )?;
+    let recursion_proof_shape =
+        derive_proof_shape::<RECURSION_TABLE_COUNT, RECURSION_FRI_LAYER_COUNT>(
+            recursion_program.column_log_sizes(),
+            UNIVERSAL_COMPONENT_COUNT,
+            RECURSION_SAMPLED_VALUE_COUNT,
+        )?;
 
     let vm_layout = VmPcsLayout::new(&vm_program, validated_pcs, &vm_proof_shape)
         .map_err(|error| ProfileError::at("VM PCS layout", error))?;
@@ -417,11 +419,10 @@ pub fn vm_component_log_sizes() -> [u32; COMPONENT_COUNT] {
 
 /// Returns the fixed universal component capacities in canonical roster order.
 pub fn recursion_component_log_sizes() -> UniversalComponentLogSizes {
-    core::array::from_fn(|index| match UNIVERSAL_COMPONENT_NAMES[index] {
-        // This component consumes the complete 8+8-bit preprocessed table.
-        "range_check_8_8" => 16,
-        _ => RECURSION_COMPONENT_LOG_SIZE,
-    })
+    [
+        14, 13, 13, 9, 16, 15, 4, 4, 7, 7, 11, 11, 14, 11, 11, 17, 15, 12, 13, 10, 10, 14, 5, 18,
+        21, 16, 14, 13, 13, 18, 22, 16, 22, 16, 19, 16,
+    ]
 }
 
 /// Returns every VM preprocessing identifier in commitment-column order.
@@ -446,11 +447,11 @@ fn pcs_parameters() -> Result<PcsParameters, ProfileError> {
     })
 }
 
-fn derive_proof_shape<const N_TABLES: usize>(
+fn derive_proof_shape<const N_TABLES: usize, const N_FRI_LAYERS: usize>(
     column_log_sizes: &[Vec<u32>],
     claimed_sum_count: usize,
     sampled_value_count: usize,
-) -> Result<FixedProofShape<N_TABLES, COMMITMENT_TREE_COUNT, FRI_LAYER_COUNT>, ProfileError> {
+) -> Result<FixedProofShape<N_TABLES, COMMITMENT_TREE_COUNT, N_FRI_LAYERS>, ProfileError> {
     if column_log_sizes.len() != COMMITMENT_TREE_COUNT {
         return Err(ProfileError::mismatch(
             "commitment tree count",
@@ -489,7 +490,8 @@ fn derive_proof_shape<const N_TABLES: usize>(
         .copied()
         .ok_or_else(|| ProfileError::at("FRI geometry", "missing lifting tree"))?
         .as_u32();
-    let (fri_layer_fold_widths, fri_layer_tree_heights) = derive_fri_geometry(lifting_log_size)?;
+    let (fri_layer_fold_widths, fri_layer_tree_heights) =
+        derive_fri_geometry::<N_FRI_LAYERS>(lifting_log_size)?;
     let queried_value_count = N_TABLES
         .checked_mul(FRI_QUERY_COUNT)
         .ok_or_else(|| ProfileError::at("queried value count", "overflow"))?;
@@ -510,25 +512,25 @@ fn derive_proof_shape<const N_TABLES: usize>(
     })
 }
 
-fn derive_fri_geometry(
+fn derive_fri_geometry<const N_FRI_LAYERS: usize>(
     lifting_log_size: u32,
-) -> Result<([M31Word; FRI_LAYER_COUNT], [M31Word; FRI_LAYER_COUNT]), ProfileError> {
+) -> Result<([M31Word; N_FRI_LAYERS], [M31Word; N_FRI_LAYERS]), ProfileError> {
     let column_log_degree = lifting_log_size
         .checked_sub(u32::from(FRI_LOG_BLOWUP_FACTOR))
         .ok_or_else(|| ProfileError::at("FRI geometry", "blowup exceeds lifting domain"))?;
     let layer_count = column_log_degree.div_ceil(u32::from(FRI_FOLD_STEP)) as usize;
-    if layer_count != FRI_LAYER_COUNT {
+    if layer_count != N_FRI_LAYERS {
         return Err(ProfileError::mismatch(
             "FRI layer count",
-            FRI_LAYER_COUNT,
+            N_FRI_LAYERS,
             layer_count,
         ));
     }
-    let mut widths = [M31Word::ZERO; FRI_LAYER_COUNT];
-    let mut heights = [M31Word::ZERO; FRI_LAYER_COUNT];
+    let mut widths = [M31Word::ZERO; N_FRI_LAYERS];
+    let mut heights = [M31Word::ZERO; N_FRI_LAYERS];
     let mut remaining_folds = column_log_degree;
     let mut layer_domain_log_size = lifting_log_size;
-    for layer in 0..FRI_LAYER_COUNT {
+    for layer in 0..N_FRI_LAYERS {
         let layer_fold_step = remaining_folds.min(u32::from(FRI_FOLD_STEP));
         let width = 1_u32
             .checked_shl(layer_fold_step)
@@ -600,7 +602,11 @@ fn validate_recursion_program_constants(
 fn validate_recursion_shape(
     program: &RecursionAirProgram,
     pcs: crate::protocol::ValidatedPcsParameters,
-    shape: &FixedProofShape<RECURSION_TABLE_COUNT, COMMITMENT_TREE_COUNT, FRI_LAYER_COUNT>,
+    shape: &FixedProofShape<
+        RECURSION_TABLE_COUNT,
+        COMMITMENT_TREE_COUNT,
+        RECURSION_FRI_LAYER_COUNT,
+    >,
 ) -> Result<(), ProfileError> {
     let validated = shape
         .validate(pcs)
@@ -750,7 +756,7 @@ mod tests {
         ];
         assert_eq!(
             actual,
-            [1757, 4, 1865, 20, 924, 14, 2100, 4, 2244, 20, 1286, 493, 36]
+            [1757, 4, 1865, 20, 924, 14, 2100, 4, 2244, 22, 1286, 493, 36]
         );
     }
 
@@ -789,8 +795,8 @@ mod tests {
                 2112168674,
             ]),
             digest([
-                536313152, 2087585680, 1313041157, 1291748295, 487230201, 1661880789, 33362580,
-                584686519,
+                1907648559, 196205058, 352011390, 325762365, 1835616284, 2092506603, 1365598535,
+                1331536374,
             ]),
         ];
         assert_eq!(actual, expected);
@@ -798,7 +804,7 @@ mod tests {
 
     #[test]
     fn serialized_root_size_is_derived_from_the_recursion_shape() {
-        assert_eq!(ROOT_PROOF_BYTE_SIZE, 3_080_316);
+        assert_eq!(ROOT_PROOF_BYTE_SIZE, 3_383_748);
     }
 
     #[test]

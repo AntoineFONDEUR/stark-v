@@ -16,8 +16,8 @@ use stwo::core::pcs::utils::prepare_preprocessed_query_positions;
 use stwo::core::vcs_lifted::verifier::LOG_PACKED_LEAF_SIZE;
 
 use crate::profile::{
-    FRI_LAYER_COUNT, FRI_QUERY_COUNT, FrozenProtocolProfile, MAX_FRI_FOLD_WIDTH, MAX_MERKLE_DEPTH,
-    VM_PUBLIC_CLAIM_WORD_COUNT, VmProofWire, vm_component_log_sizes,
+    FRI_QUERY_COUNT, FrozenProtocolProfile, MAX_FRI_FOLD_WIDTH, VM_FRI_LAYER_COUNT,
+    VM_MAX_MERKLE_DEPTH, VM_PUBLIC_CLAIM_WORD_COUNT, VmProofWire, vm_component_log_sizes,
 };
 use crate::statement::{EdgeClaim, ExecutedSpan, JobContext, MachineState, SpanStatement};
 use crate::vm_public_claim::{
@@ -346,12 +346,12 @@ fn validate_proof_topology(
     }
     validate_count(
         "FRI layers",
-        FRI_LAYER_COUNT,
+        VM_FRI_LAYER_COUNT,
         1 + stark.fri_proof.inner_layers.len(),
     )?;
     validate_count(
         "FRI auxiliary layers",
-        FRI_LAYER_COUNT,
+        VM_FRI_LAYER_COUNT,
         1 + aux.fri.inner_layers.len(),
     )?;
     Ok(())
@@ -415,7 +415,7 @@ fn expand_trace_paths(
     raw_queries: &[usize],
     sorted_queries: &[usize],
 ) -> Result<
-    Box<[MerklePathWire<MAX_MERKLE_DEPTH>; crate::profile::VM_TRACE_PATH_COUNT]>,
+    Box<[MerklePathWire<VM_MAX_MERKLE_DEPTH>; crate::profile::VM_TRACE_PATH_COUNT]>,
     SegmentLeafError,
 > {
     let aux = proof
@@ -443,16 +443,15 @@ fn expand_trace_paths(
             )?);
         }
     }
-    paths
-        .into_boxed_slice()
-        .try_into()
-        .map_err(|paths: Box<[MerklePathWire<MAX_MERKLE_DEPTH>]>| {
+    paths.into_boxed_slice().try_into().map_err(
+        |paths: Box<[MerklePathWire<VM_MAX_MERKLE_DEPTH>]>| {
             count_mismatch(
                 "expanded trace paths",
                 crate::profile::VM_TRACE_PATH_COUNT,
                 paths.len(),
             )
-        })
+        },
+    )
 }
 
 #[inline(never)]
@@ -461,7 +460,10 @@ fn expand_fri_layers(
     proof: &Proof<Poseidon2M31MerkleHasher>,
     raw_queries: &[usize],
 ) -> Result<
-    Box<[FriLayerWire<FRI_QUERY_COUNT, MAX_FRI_FOLD_WIDTH, MAX_MERKLE_DEPTH>; FRI_LAYER_COUNT]>,
+    Box<
+        [FriLayerWire<FRI_QUERY_COUNT, MAX_FRI_FOLD_WIDTH, VM_MAX_MERKLE_DEPTH>;
+            VM_FRI_LAYER_COUNT],
+    >,
     SegmentLeafError,
 > {
     let aux = proof
@@ -469,9 +471,9 @@ fn expand_fri_layers(
         .as_ref()
         .ok_or(SegmentLeafError::MissingProverAuxiliaryData)?;
     let shape = &profile.manifest().manifest().vm_proof_shape;
-    let mut layers = Vec::with_capacity(FRI_LAYER_COUNT);
+    let mut layers = Vec::with_capacity(VM_FRI_LAYER_COUNT);
     let mut folded = 0_u32;
-    for layer in 0..FRI_LAYER_COUNT {
+    for layer in 0..VM_FRI_LAYER_COUNT {
         let (layer_proof, layer_aux) = if layer == 0 {
             (
                 &proof.stark_proof.fri_proof.first_layer,
@@ -529,7 +531,7 @@ fn expand_fri_layers(
             .into_boxed_slice()
             .try_into()
             .map_err(
-                |queries: Box<[FriQueryWire<MAX_FRI_FOLD_WIDTH, MAX_MERKLE_DEPTH>]>| {
+                |queries: Box<[FriQueryWire<MAX_FRI_FOLD_WIDTH, VM_MAX_MERKLE_DEPTH>]>| {
                     count_mismatch("FRI queries", FRI_QUERY_COUNT, queries.len())
                 },
             )?;
@@ -542,8 +544,8 @@ fn expand_fri_layers(
             })?;
     }
     layers.into_boxed_slice().try_into().map_err(
-        |layers: Box<[FriLayerWire<FRI_QUERY_COUNT, MAX_FRI_FOLD_WIDTH, MAX_MERKLE_DEPTH>]>| {
-            count_mismatch("expanded FRI layers", FRI_LAYER_COUNT, layers.len())
+        |layers: Box<[FriLayerWire<FRI_QUERY_COUNT, MAX_FRI_FOLD_WIDTH, VM_MAX_MERKLE_DEPTH>]>| {
+            count_mismatch("expanded FRI layers", VM_FRI_LAYER_COUNT, layers.len())
         },
     )
 }
@@ -554,7 +556,7 @@ fn expand_merkle_path(
     mut position: usize,
     skip_layers: u32,
     node_maps: &[hashbrown::HashMap<usize, Poseidon2M31Hash>],
-) -> Result<MerklePathWire<MAX_MERKLE_DEPTH>, SegmentLeafError> {
+) -> Result<MerklePathWire<VM_MAX_MERKLE_DEPTH>, SegmentLeafError> {
     let skip = usize::try_from(skip_layers).map_err(|_| SegmentLeafError::ArithmeticOverflow {
         field: "Merkle local subtree height",
     })?;
@@ -566,14 +568,14 @@ fn expand_merkle_path(
         });
     }
     let active_depth = node_maps.len() - skip;
-    if active_depth > MAX_MERKLE_DEPTH {
+    if active_depth > VM_MAX_MERKLE_DEPTH {
         return Err(SegmentLeafError::CountMismatch {
             field: "Merkle path depth",
-            expected: MAX_MERKLE_DEPTH,
+            expected: VM_MAX_MERKLE_DEPTH,
             actual: active_depth,
         });
     }
-    let mut siblings = [Digest8::ZERO; MAX_MERKLE_DEPTH];
+    let mut siblings = [Digest8::ZERO; VM_MAX_MERKLE_DEPTH];
     for (wire_level, map) in node_maps.iter().enumerate().skip(skip) {
         let sibling_position = position ^ 1;
         let sibling =
@@ -946,16 +948,20 @@ impl From<WireError> for SegmentLeafError {
 
 #[cfg(test)]
 mod tests {
+    use std::hash::{Hash, Hasher};
     use std::sync::OnceLock;
 
     use air::digest::{MemoryDigest, ProgramDigest, ProtocolId};
     use prover::components::COMPONENT_COUNT;
     use prover::e2e::{ensure_guest_built, guest_bin_dir};
     use prover::poseidon2_channel::Poseidon2M31MerkleChannel;
-    use prover::{
-        preprocess_with_channel, prove_rv32im_with_channel_at_log_sizes, verify_rv32im_with_channel,
-    };
+    use prover::{preprocess_with_channel, prove_rv32im_with_channel_at_log_sizes_and_transcript};
+    use stwo::core::air::Components as CoreComponents;
+    use stwo::core::channel::Channel;
     use stwo::core::fields::m31::BaseField;
+    use stwo::core::pcs::CommitmentSchemeVerifier;
+    use stwo::core::verifier::verify;
+    use stwo_constraint_framework::TraceLocationAllocator;
 
     use super::*;
 
@@ -965,6 +971,8 @@ mod tests {
         metadata: SegmentRunMetadata,
         job: JobContext,
         wire: Box<VmSegmentLeafWire>,
+        prover_draws: Vec<(crate::kernel::VerifierStep, [M31Word; 8])>,
+        preprocessing: prover::Preprocessing<Poseidon2M31MerkleHasher>,
     }
 
     fn real_fixture() -> &'static RealFixture {
@@ -996,21 +1004,38 @@ mod tests {
         let first = segments.remove(0);
         let metadata = SegmentRunMetadata::from_run_result(0, 0, &first)
             .expect("runner metadata is representable");
+        let statement = segment_statement(&profile, &segment_public_data[0], &metadata, job)
+            .expect("fixture statement is canonical");
+        let claim_digest = crate::vm_public_claim::vm_public_claim_digest(
+            &segment_public_data[0],
+            profile.public_claim_shape(),
+        )
+        .expect("fixture public claim fits the frozen profile");
         let config = profile.manifest().vm_pcs().config();
         let preprocessing = preprocess_with_channel::<Poseidon2M31MerkleChannel>(config);
-        let proof = prove_rv32im_with_channel_at_log_sizes::<Poseidon2M31MerkleChannel>(
+        let channel = crate::profiled_channel::ProfiledPoseidon2M31Channel::for_vm_proof(
+            profile.vm_plan(),
+            profile.manifest().protocol_id(),
+            &statement,
+        )
+        .expect("fixture transcript prefix is valid");
+        let transcript = crate::profiled_channel::RecursionVmClaimTranscript::new(claim_digest);
+        let (proof, channel) = prove_rv32im_with_channel_at_log_sizes_and_transcript::<
+            crate::profiled_channel::ProfiledPoseidon2M31MerkleChannel,
+            _,
+        >(
             first,
             config,
             &preprocessing,
             vm_component_log_sizes(),
+            channel,
+            &transcript,
         )
         .expect("capacity-bounded segment fits the frozen VM layout");
-        verify_rv32im_with_channel::<Poseidon2M31MerkleChannel>(
-            proof.clone(),
-            config,
-            &preprocessing,
-        )
-        .expect("the real fixed-layout VM proof verifies natively");
+        channel
+            .finish()
+            .expect("the VM prover consumes the complete verifier transcript");
+        let prover_draws = channel.draws().to_vec();
         let wire = adapt_vm_segment_leaf(&profile, &proof, &metadata, job)
             .expect("the real proof adapts to one fixed leaf");
         Box::new(RealFixture {
@@ -1019,6 +1044,8 @@ mod tests {
             metadata,
             job,
             wire,
+            prover_draws,
+            preprocessing,
         })
     }
 
@@ -1098,6 +1125,203 @@ mod tests {
                 .validate_against_shape(&fixture.profile.manifest().manifest().vm_proof_shape),
             Ok(())
         );
+    }
+
+    #[test]
+    fn profiled_prover_and_fixed_executor_draw_identical_randomness() {
+        let fixture = real_fixture();
+        let claim_digest = crate::vm_public_claim::vm_public_claim_digest_from_words(
+            fixture.wire.public_claim_words(),
+            fixture.profile.public_claim_shape(),
+        )
+        .expect("fixed claim digest is canonical");
+        let execution = crate::transcript_program::execute_fixed_transcript(
+            crate::transcript::RecordingTranscriptBackend::default(),
+            fixture.profile.vm_plan(),
+            fixture.profile.manifest().protocol_id(),
+            fixture.wire.statement(),
+            crate::transcript_program::VerifierPublicClaim::Vm(claim_digest),
+            fixture.wire.proof(),
+        )
+        .expect("fixed transcript accepts its produced proof");
+        let verifier_draws = execution
+            .operations()
+            .iter()
+            .filter_map(|operation| operation.draw().map(|draw| (operation.step(), draw)))
+            .collect::<Vec<_>>();
+        assert_eq!(fixture.prover_draws, verifier_draws);
+    }
+
+    #[test]
+    fn profiled_vm_proof_is_accepted_by_the_native_stwo_verifier() {
+        let fixture = real_fixture();
+        let claim_digest = crate::vm_public_claim::vm_public_claim_digest_from_words(
+            fixture.wire.public_claim_words(),
+            fixture.profile.public_claim_shape(),
+        )
+        .expect("fixed claim digest is canonical");
+        let mut channel = crate::profiled_channel::ProfiledPoseidon2M31Channel::for_vm_proof(
+            fixture.profile.vm_plan(),
+            fixture.profile.manifest().protocol_id(),
+            fixture.wire.statement(),
+        )
+        .expect("fixture transcript prefix is valid");
+        let config = fixture.profile.manifest().vm_pcs().config();
+        let mut commitment_scheme = CommitmentSchemeVerifier::<
+            crate::profiled_channel::ProfiledPoseidon2M31MerkleChannel,
+        >::new(config);
+        commitment_scheme.commit(
+            fixture
+                .preprocessing
+                .commitment_root()
+                .expect("preprocessing has one root"),
+            &fixture.preprocessing.log_sizes,
+            &mut channel,
+        );
+        commitment_scheme.commit(
+            fixture.proof.stark_proof.commitments[1],
+            &fixture.proof.claim.main_trace_log_sizes(),
+            &mut channel,
+        );
+        channel
+            .absorb_vm_public_claim(claim_digest)
+            .expect("public claim follows the main root");
+        let interaction_pow_valid = channel.verify_pow_nonce(
+            prover::relations::INTERACTION_POW_BITS,
+            fixture.proof.interaction_pow,
+        );
+        channel.mix_u64(fixture.proof.interaction_pow);
+        let relations = prover::relations::Relations::draw(&mut channel);
+        channel
+            .absorb_claimed_sums(
+                &fixture
+                    .proof
+                    .interaction_claim
+                    .claimed_sum
+                    .component_values(),
+            )
+            .expect("claimed sums precede the interaction root");
+        commitment_scheme.commit(
+            fixture.proof.stark_proof.commitments[2],
+            &fixture.proof.interaction_claim.log_sizes,
+            &mut channel,
+        );
+        let ids = fixture.preprocessing.column_ids();
+        let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
+        let components = prover::components::Components::new(
+            &fixture.proof.claim,
+            &mut allocator,
+            relations,
+            &fixture.proof.interaction_claim.claimed_sum,
+        );
+        let core_components = CoreComponents {
+            components: components.verifiers(),
+            n_preprocessed_columns: ids.len(),
+        };
+        let max_log_degree_bound = core_components.composition_log_degree_bound() - 1;
+        let mut compiled_log_sizes = core_components.column_log_sizes();
+        compiled_log_sizes.push(vec![max_log_degree_bound; 8]);
+        let committed_log_sizes = vec![
+            fixture.preprocessing.log_sizes.clone(),
+            fixture.proof.claim.main_trace_log_sizes(),
+            fixture.proof.interaction_claim.log_sizes.clone(),
+            vec![max_log_degree_bound; 8],
+        ];
+        let log_sizes_match = compiled_log_sizes.0 == committed_log_sizes;
+        let verification = verify(
+            &components.verifiers(),
+            &mut channel,
+            &mut commitment_scheme,
+            fixture.proof.stark_proof.clone(),
+        );
+        assert_eq!(
+            (
+                interaction_pow_valid,
+                log_sizes_match,
+                format!("{verification:?}"),
+                channel.finish(),
+            ),
+            (true, true, "Ok(())".to_owned(), Ok(()))
+        );
+    }
+
+    #[test]
+    fn real_poseidon_leaf_materializes_the_universal_witness() {
+        let fixture = real_fixture();
+        let mut channel = prover::poseidon2_channel::Poseidon2M31Channel::default();
+        let relations = crate::universal_relations::UniversalRelations::draw(&mut channel);
+        let witness = crate::universal_witness::assemble_segment_leaf(
+            &fixture.profile,
+            &fixture.wire,
+            &relations,
+        )
+        .expect("the real VM leaf fills every universal component");
+        let accepted_components = crate::recursion_air_program::assert_universal_constraints(
+            witness.traces(),
+            witness.preprocessing_ids(),
+            &relations,
+            witness.proof_kind(),
+            witness.component_log_sizes(),
+            witness.claimed_sums(),
+        );
+        let first_fingerprint = universal_witness_fingerprint(&witness);
+        let first_shape = (
+            witness.proof_kind(),
+            witness.traces().len(),
+            witness.claimed_sums().len(),
+            witness.preprocessing_ids().len(),
+            accepted_components,
+        );
+        drop(witness);
+        let second = crate::universal_witness::assemble_segment_leaf(
+            &fixture.profile,
+            &fixture.wire,
+            &relations,
+        )
+        .expect("repeated assembly accepts the same verifier input");
+        assert_eq!(
+            (first_shape, first_fingerprint),
+            (
+                (
+                    crate::wire::ProofKind::SegmentLeaf,
+                    3,
+                    crate::recursion_air_program::UNIVERSAL_COMPONENT_COUNT,
+                    493,
+                    crate::recursion_air_program::UNIVERSAL_COMPONENT_COUNT,
+                ),
+                universal_witness_fingerprint(&second),
+            )
+        );
+    }
+
+    fn universal_witness_fingerprint(witness: &crate::universal_witness::UniversalWitness) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        witness.proof_kind().hash(&mut hasher);
+        witness.component_log_sizes().hash(&mut hasher);
+        for id in witness.preprocessing_ids() {
+            id.id.hash(&mut hasher);
+        }
+        for sum in witness.claimed_sums() {
+            sum.to_m31_array().map(|word| word.0).hash(&mut hasher);
+        }
+        witness
+            .public_relation_sum()
+            .to_m31_array()
+            .map(|word| word.0)
+            .hash(&mut hasher);
+        for tree in witness.traces().iter() {
+            tree.len().hash(&mut hasher);
+            for column in tree {
+                column.domain.log_size().hash(&mut hasher);
+                column
+                    .values
+                    .as_slice()
+                    .iter()
+                    .map(|word| word.0)
+                    .for_each(|word| word.hash(&mut hasher));
+            }
+        }
+        hasher.finish()
     }
 
     #[test]

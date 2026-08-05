@@ -588,6 +588,120 @@ pub fn build_fri_verifier_circuit(
     Ok(builder.finish(profile.clone()))
 }
 
+/// Restores the query slots that a FRI proof derives from the preceding layer.
+///
+/// STWO's FRI witness contains only values the verifier cannot derive. The
+/// selected value in the first layer is the PCS DEEP answer, and each later
+/// selected value is the preceding fold output. A complete authenticated
+/// subset used by the Merkle and folding AIRs must therefore insert those
+/// derived values, including every queried position in a shared fold subset.
+pub(crate) fn restore_authenticated_query_values(
+    profile: &FriVerifierProfile,
+    deep_answers: &[SecureField],
+    authenticated_values: &mut [Vec<SecureField>],
+    fri_alphas: &[SecureField],
+    raw_queries: &[M31Word],
+) -> Result<(), FriVerifierCircuitError> {
+    require_count("DEEP answers", profile.query_count, deep_answers.len())?;
+    require_count(
+        "authenticated FRI layers",
+        profile.layer_count(),
+        authenticated_values.len(),
+    )?;
+    require_count("FRI alphas", profile.layer_count(), fri_alphas.len())?;
+    require_count("raw queries", profile.query_count, raw_queries.len())?;
+    for (layer, (&width, values)) in profile
+        .fold_widths
+        .iter()
+        .zip(authenticated_values.iter())
+        .enumerate()
+    {
+        let expected = profile.query_count.checked_mul(width).ok_or(
+            FriVerifierCircuitError::CountOverflow {
+                field: "authenticated FRI values",
+            },
+        )?;
+        if values.len() != expected {
+            return Err(FriVerifierCircuitError::LayerValueCountMismatch {
+                layer,
+                expected,
+                actual: values.len(),
+            });
+        }
+    }
+
+    let mut previous = deep_answers.to_vec();
+    let mut folded_bits = 0_u32;
+    let mut current_log_size = profile.lifting_log_size;
+    for layer in 0..profile.layer_count() {
+        let fold_step = profile.fold_steps[layer];
+        let width = profile.fold_widths[layer];
+        let width_u32 = checked_u32("FRI fold width", width)?;
+        let mask = (1_u32 << current_log_size) - 1;
+        let positions = raw_queries
+            .iter()
+            .map(|query| (query.as_u32() >> folded_bits) & mask)
+            .collect::<Vec<_>>();
+
+        for query in 0..profile.query_count {
+            let subset_start = positions[query] & !(width_u32 - 1);
+            for candidate in 0..profile.query_count {
+                let candidate_position = positions[candidate];
+                if candidate_position >= subset_start
+                    && candidate_position < subset_start + width_u32
+                {
+                    let offset = usize::try_from(candidate_position - subset_start)
+                        .expect("validated FRI offset fits usize");
+                    authenticated_values[layer][query * width + offset] = previous[candidate];
+                }
+            }
+        }
+
+        for query in 0..profile.query_count {
+            for candidate in 0..query {
+                if positions[candidate] == positions[query]
+                    && previous[candidate] != previous[query]
+                {
+                    return Err(FriVerifierCircuitError::QueryValueConflict {
+                        layer,
+                        position: positions[query],
+                    });
+                }
+            }
+        }
+
+        let next = (0..profile.query_count)
+            .map(|query| {
+                let subset_start = positions[query] & !(width_u32 - 1);
+                let bits = (0..current_log_size)
+                    .map(|bit| Rec::from(BaseField::from((subset_start >> bit) & 1)))
+                    .collect::<Vec<_>>();
+                let values = authenticated_values[layer][query * width..(query + 1) * width]
+                    .iter()
+                    .copied()
+                    .map(Rec::from)
+                    .collect::<Vec<_>>();
+                let initial = if layer == 0 {
+                    circle_domain_point(&bits, current_log_size)
+                } else {
+                    line_domain_point(&bits, current_log_size)
+                };
+                if layer == 0 {
+                    fold_circle_subset(&values, initial, fold_step, Rec::from(fri_alphas[layer]))
+                        .value()
+                } else {
+                    fold_line_subset(&values, initial, fold_step, Rec::from(fri_alphas[layer]))
+                        .value()
+                }
+            })
+            .collect::<Vec<_>>();
+        previous = next;
+        folded_bits += fold_step;
+        current_log_size -= fold_step;
+    }
+    Ok(())
+}
+
 fn validate_witness(
     profile: &FriVerifierProfile,
     witness: &FriVerifierWitness<'_>,
@@ -907,6 +1021,10 @@ pub enum FriVerifierCircuitError {
         expected: usize,
         actual: usize,
     },
+    QueryValueConflict {
+        layer: usize,
+        position: u32,
+    },
     Shape(ProofShapeError),
 }
 
@@ -1086,6 +1204,55 @@ mod tests {
     #[rstest]
     fn circuit_matches_stwo_folds_and_last_layer() {
         assert_eq!(fixture().circuit().nonzero_output_count(), 0);
+    }
+
+    #[rstest]
+    fn omitted_query_slots_are_restored_from_the_fold_chain() {
+        let mut fixture = fixture();
+        let expected = fixture.values.clone();
+        let mut folded_bits = 0_u32;
+        for (layer, &fold_step) in fixture.profile.fold_steps().iter().enumerate() {
+            let position = fixture.raw_queries[0].as_u32() >> folded_bits;
+            let offset = usize::try_from(position & ((1_u32 << fold_step) - 1))
+                .expect("FRI offset fits usize");
+            // These are precisely the values omitted from STWO's proof because
+            // the verifier derives them from the DEEP answer and prior folds.
+            fixture.values[layer][offset] = secure(701 + layer as u32);
+            folded_bits += fold_step;
+        }
+        let restored = restore_authenticated_query_values(
+            &fixture.profile,
+            &fixture.deep_answers,
+            &mut fixture.values,
+            &fixture.alphas,
+            &fixture.raw_queries,
+        );
+        assert_eq!((restored, fixture.values), (Ok(()), expected));
+    }
+
+    #[rstest]
+    fn duplicate_query_with_distinct_derived_value_is_rejected() {
+        let profile = FriVerifierProfile::new(8, 1, 2, vec![4, 4, 2], 2)
+            .expect("duplicate-query profile is valid");
+        let mut values = profile
+            .fold_widths()
+            .iter()
+            .map(|width| vec![SecureField::zero(); profile.query_count() * width])
+            .collect::<Vec<_>>();
+        let query = M31Word::try_from(93_u32).expect("query is canonical");
+        assert_eq!(
+            restore_authenticated_query_values(
+                &profile,
+                &[secure(101), secure(103)],
+                &mut values,
+                &[secure(131), secure(151), secure(173)],
+                &[query, query],
+            ),
+            Err(FriVerifierCircuitError::QueryValueConflict {
+                layer: 0,
+                position: 93,
+            })
+        );
     }
 
     #[rstest]

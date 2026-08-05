@@ -32,7 +32,11 @@ pub mod verifier;
 
 pub use errors::VerificationError;
 pub use preprocessed::{Preprocessing, preprocess, preprocess_with_channel};
-pub use prover::{prove_rv32im, prove_rv32im_with_channel, prove_rv32im_with_channel_at_log_sizes};
+pub use prover::{
+    NativeVmClaimTranscript, VmClaimTranscript, VmTranscriptProofResult, VmTranscriptProvingError,
+    prove_rv32im, prove_rv32im_with_channel, prove_rv32im_with_channel_at_log_sizes,
+    prove_rv32im_with_channel_at_log_sizes_and_transcript,
+};
 pub use public_data::PublicData;
 pub use verifier::{verify_rv32im, verify_rv32im_with_channel};
 

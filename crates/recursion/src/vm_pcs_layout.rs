@@ -23,6 +23,7 @@ pub struct VmPcsLayout {
     tree_column_offsets: Vec<usize>,
     tree_heights: Vec<u32>,
     lifting_log_size: u32,
+    log_blowup_factor: u32,
     n_queries: usize,
 }
 
@@ -90,6 +91,7 @@ impl VmPcsLayout {
             tree_column_offsets,
             tree_heights,
             lifting_log_size: validated_shape.lifting_log_size(),
+            log_blowup_factor: pcs.config().fri_config.log_blowup_factor,
             n_queries: pcs.config().fri_config.n_queries,
         })
     }
@@ -104,6 +106,11 @@ impl VmPcsLayout {
 
     pub const fn lifting_log_size(&self) -> u32 {
         self.lifting_log_size
+    }
+
+    /// Extension applied to every committed trace column before Merkle commitment.
+    pub const fn log_blowup_factor(&self) -> u32 {
+        self.log_blowup_factor
     }
 
     pub const fn n_queries(&self) -> usize {

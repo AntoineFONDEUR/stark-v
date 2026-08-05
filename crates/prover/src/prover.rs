@@ -1,5 +1,8 @@
 //! Main proving function for RV32IM execution traces.
 
+use core::convert::Infallible;
+use core::fmt;
+
 #[cfg(feature = "track-relations")]
 use crate::relations::PreProcessedTrace;
 #[cfg(feature = "track-relations")]
@@ -22,6 +25,91 @@ use crate::components::{
 use crate::public_data::PublicData;
 use crate::relations::{INTERACTION_POW_BITS, Relations};
 use crate::{InteractionClaim, Preprocessing, Proof};
+
+/// Claim-phase transcript policy used before STWO proves the committed traces.
+///
+/// STWO owns the composition, OODS, PCS, and FRI suffix. The VM prover owns the
+/// preceding public-data and LogUp claim phase, so recursion profiles can bind
+/// that phase without duplicating trace generation or the STWO prover.
+pub trait VmClaimTranscript<C: Channel> {
+    type Error;
+
+    fn bind_before_commitments(
+        &self,
+        channel: &mut C,
+        public_data: &PublicData,
+    ) -> Result<(), Self::Error>;
+
+    fn bind_after_main_commitment(
+        &self,
+        channel: &mut C,
+        public_data: &PublicData,
+        claim: &crate::components::Claim,
+    ) -> Result<(), Self::Error>;
+
+    fn bind_interaction_claim(
+        &self,
+        channel: &mut C,
+        interaction_claim: &InteractionClaim,
+    ) -> Result<(), Self::Error>;
+}
+
+/// Ordinary stark-v transcript policy used by the public VM prover API.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NativeVmClaimTranscript;
+
+impl<C: Channel> VmClaimTranscript<C> for NativeVmClaimTranscript {
+    type Error = Infallible;
+
+    fn bind_before_commitments(
+        &self,
+        channel: &mut C,
+        public_data: &PublicData,
+    ) -> Result<(), Self::Error> {
+        public_data.mix_into(channel);
+        Ok(())
+    }
+
+    fn bind_after_main_commitment(
+        &self,
+        channel: &mut C,
+        _public_data: &PublicData,
+        claim: &crate::components::Claim,
+    ) -> Result<(), Self::Error> {
+        claim.mix_into(channel);
+        Ok(())
+    }
+
+    fn bind_interaction_claim(
+        &self,
+        channel: &mut C,
+        interaction_claim: &InteractionClaim,
+    ) -> Result<(), Self::Error> {
+        interaction_claim.mix_into(channel);
+        Ok(())
+    }
+}
+
+/// Failure while preparing a fixed VM proof under a caller-owned transcript.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VmTranscriptProvingError<E> {
+    FixedTrace(FixedTraceError),
+    Transcript(E),
+}
+
+impl<E: fmt::Display> fmt::Display for VmTranscriptProvingError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FixedTrace(error) => write!(formatter, "fixed trace generation failed: {error}"),
+            Self::Transcript(error) => write!(formatter, "VM transcript binding failed: {error}"),
+        }
+    }
+}
+
+impl<E: fmt::Debug + fmt::Display> std::error::Error for VmTranscriptProvingError<E> {}
+
+/// Proof and fully advanced channel returned by a caller-owned VM transcript.
+pub type VmTranscriptProofResult<H, C, E> = Result<(Proof<H>, C), VmTranscriptProvingError<E>>;
 
 /// Prove execution of an RV32IM program.
 ///
@@ -57,8 +145,16 @@ where
             >,
         >,
 {
-    prove_rv32im_with_channel_inner::<MC>(run_result, config, preprocessing, None)
-        .expect("dynamic trace generation has no fixed capacity")
+    let (proof, _) = prove_rv32im_with_channel_inner::<MC, _>(
+        run_result,
+        config,
+        preprocessing,
+        None,
+        MC::C::default(),
+        &NativeVmClaimTranscript,
+    )
+    .expect("dynamic trace generation has no fixed capacity or transcript failure");
+    proof
 }
 
 /// Proves one execution against verifier-owned component log sizes.
@@ -81,21 +177,65 @@ where
             >,
         >,
 {
-    prove_rv32im_with_channel_inner::<MC>(
+    prove_rv32im_with_channel_inner::<MC, _>(
         run_result,
         config,
         preprocessing,
         Some(component_log_sizes),
+        MC::C::default(),
+        &NativeVmClaimTranscript,
+    )
+    .map(|(proof, _)| proof)
+    .map_err(|error| match error {
+        VmTranscriptProvingError::FixedTrace(error) => error,
+        VmTranscriptProvingError::Transcript(never) => match never {},
+    })
+}
+
+/// Proves a fixed-layout VM trace with a caller-owned claim transcript.
+///
+/// The returned channel is advanced past the complete STWO proof so the
+/// caller can require that its trusted transcript plan was consumed exactly.
+pub fn prove_rv32im_with_channel_at_log_sizes_and_transcript<MC, T>(
+    run_result: runner::RunResult,
+    config: PcsConfig,
+    preprocessing: &Preprocessing<MC::H>,
+    component_log_sizes: [u32; COMPONENT_COUNT],
+    channel: MC::C,
+    transcript: &T,
+) -> VmTranscriptProofResult<MC::H, MC::C, T::Error>
+where
+    MC: MerkleChannel,
+    T: VmClaimTranscript<MC::C>,
+    SimdBackend: stwo::prover::backend::BackendForChannel<MC>
+        + stwo::prover::backend::ColumnOps<
+            <MC::H as stwo::core::vcs_lifted::merkle_hasher::MerkleHasherLifted>::Hash,
+            Column = Vec<
+                <MC::H as stwo::core::vcs_lifted::merkle_hasher::MerkleHasherLifted>::Hash,
+            >,
+        >,
+{
+    prove_rv32im_with_channel_inner::<MC, T>(
+        run_result,
+        config,
+        preprocessing,
+        Some(component_log_sizes),
+        channel,
+        transcript,
     )
 }
 
-fn prove_rv32im_with_channel_inner<MC: MerkleChannel>(
+fn prove_rv32im_with_channel_inner<MC, T>(
     run_result: runner::RunResult,
     config: PcsConfig,
     preprocessing: &Preprocessing<MC::H>,
     component_log_sizes: Option<[u32; COMPONENT_COUNT]>,
-) -> Result<Proof<MC::H>, FixedTraceError>
+    mut channel: MC::C,
+    transcript: &T,
+) -> VmTranscriptProofResult<MC::H, MC::C, T::Error>
 where
+    MC: MerkleChannel,
+    T: VmClaimTranscript<MC::C>,
     SimdBackend: stwo::prover::backend::BackendForChannel<MC>
         + stwo::prover::backend::ColumnOps<
             <MC::H as stwo::core::vcs_lifted::merkle_hasher::MerkleHasherLifted>::Hash,
@@ -112,7 +252,8 @@ where
     let tracer = run_result.tracer;
     info!("Tracer total_traces: {}", tracer.total_traces());
     let traces = match component_log_sizes {
-        Some(log_sizes) => gen_trace_at_log_sizes(tracer, log_sizes)?,
+        Some(log_sizes) => gen_trace_at_log_sizes(tracer, log_sizes)
+            .map_err(VmTranscriptProvingError::FixedTrace)?,
         None => gen_trace(tracer),
     };
     let log_size = traces.max_log_size();
@@ -137,11 +278,13 @@ where
     span.exit();
 
     // 3. Setup protocol
-    let channel = &mut <MC::C as Default>::default();
+    let channel = &mut channel;
     let mut commitment_scheme = CommitmentSchemeProver::<_, MC>::new(config, &twiddles);
 
     // 4. Public data
-    public_data.mix_into(channel);
+    transcript
+        .bind_before_commitments(channel, &public_data)
+        .map_err(VmTranscriptProvingError::Transcript)?;
 
     // 5. Load preprocessed trace — reconstruct from cached data and inject directly
     //    (skips interpolation, extension, and Merkle tree building)
@@ -172,7 +315,9 @@ where
     span.exit();
 
     // 7. Mix claim into channel
-    claim.mix_into(channel);
+    transcript
+        .bind_after_main_commitment(channel, &public_data, &claim)
+        .map_err(VmTranscriptProvingError::Transcript)?;
 
     // 8. Proof of work before drawing lookup elements
     info!("proof of work with {} bits", INTERACTION_POW_BITS);
@@ -195,7 +340,9 @@ where
         claimed_sum,
         log_sizes: interaction_log_sizes,
     };
-    interaction_claim.mix_into(channel);
+    transcript
+        .bind_interaction_claim(channel, &interaction_claim)
+        .map_err(VmTranscriptProvingError::Transcript)?;
     if !interaction_trace.is_empty() {
         let mut tree_builder = commitment_scheme.tree_builder();
         tree_builder.extend_evals(interaction_trace);
@@ -252,12 +399,16 @@ where
     };
     span.exit();
 
-    Ok(Proof {
-        claim,
-        interaction_claim,
-        public_data,
-        stark_proof,
-        stark_aux,
-        interaction_pow,
-    })
+    let final_channel = (*channel).clone();
+    Ok((
+        Proof {
+            claim,
+            interaction_claim,
+            public_data,
+            stark_proof,
+            stark_aux,
+            interaction_pow,
+        },
+        final_channel,
+    ))
 }

@@ -74,6 +74,20 @@ impl VmPublicClaimSemanticsCircuit {
             .filter(|output| !arena.nodes[**output].value.is_zero())
             .count()
     }
+
+    /// Returns the first violated zero-output constraint for diagnostics.
+    pub fn first_nonzero_output(&self) -> Option<(usize, usize, SecureField)> {
+        let arena = self.circuit.arena();
+        self.circuit
+            .outputs()
+            .iter()
+            .copied()
+            .enumerate()
+            .find_map(|(ordinal, node_id)| {
+                let value = arena.nodes[node_id].value;
+                (!value.is_zero()).then_some((ordinal, node_id, value))
+            })
+    }
 }
 
 /// Values for one universal claim-to-statement circuit instance.
@@ -526,12 +540,13 @@ fn constrain_output_header_and_addresses(
     );
     let first_address_start = claim_layout::output_slot_address_start(shape, 0);
     let first_address_bits = u32_bits(builder, gate, claim, first_address_start);
-    constrain_zero(builder, gate, first_address_bits[0].clone());
-    constrain_zero(builder, gate, first_address_bits[1].clone());
+    let first_output_gate = gate.clone() * flags[0].clone();
+    constrain_zero(builder, &first_output_gate, first_address_bits[0].clone());
+    constrain_zero(builder, &first_output_gate, first_address_bits[1].clone());
     for bit in 2..32 {
         constrain_equal(
             builder,
-            gate,
+            &first_output_gate,
             first_address_bits[bit].clone(),
             header_len_bits[bit].clone(),
         );
@@ -1107,6 +1122,23 @@ pub(crate) mod tests {
         let (mut claim, statement) = valid_words();
         claim[claim_layout::OUTPUT_LENGTH_START] = M31Word::from(8);
         assert_ne!(circuit(&claim, &statement).nonzero_output_count(), 0);
+    }
+
+    #[rstest]
+    fn absent_output_allows_runner_header_addresses_without_output_slots() {
+        let (mut claim, mut statement) = valid_words();
+        claim[claim_layout::OUTPUT_LENGTH_START] = M31Word::ZERO;
+        claim[claim_layout::OUTPUT_LENGTH_START + 1] = M31Word::ZERO;
+        claim[claim_layout::HEADER_OUTPUT_WORD_COUNT_START] = M31Word::ZERO;
+        claim[claim_layout::HEADER_OUTPUT_WORD_COUNT_START + 1] = M31Word::ZERO;
+        let output_count = claim_layout::output_word_count_start(shape());
+        claim[output_count] = M31Word::ZERO;
+        claim[output_count + 1] = M31Word::ZERO;
+        let output_slots = claim_layout::output_slots_start(shape());
+        claim[output_slots..].fill(M31Word::ZERO);
+        statement[statement_layout::OUTPUT_EDGE_TAG] = CanonicalTag::AbsentEdge.word();
+        statement[statement_layout::OUTPUT_EDGE_DIGEST_START..][..8].fill(M31Word::ZERO);
+        assert_eq!(circuit(&claim, &statement).nonzero_output_count(), 0);
     }
 
     #[rstest]

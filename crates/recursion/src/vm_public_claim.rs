@@ -320,8 +320,17 @@ pub fn vm_public_claim_digest(
     shape: VmPublicClaimShape,
 ) -> Result<VmPublicClaimDigest, VmPublicClaimError> {
     let words = canonical_vm_public_claim_words(public_data, shape)?;
+    vm_public_claim_digest_from_words(&words, shape)
+}
+
+/// Commits an already encoded fixed VM claim without reconstructing host data.
+pub fn vm_public_claim_digest_from_words(
+    words: &[M31Word],
+    shape: VmPublicClaimShape,
+) -> Result<VmPublicClaimDigest, VmPublicClaimError> {
+    validate_claim_word_count(words, shape)?;
     Ok(VmPublicClaimDigest::from(poseidon2_hash_m31_words(
-        &words,
+        words,
         M31Word::from(VM_PUBLIC_CLAIM_HASH_DOMAIN),
     )))
 }
@@ -355,6 +364,24 @@ pub fn canonical_public_input_words(
         words.push(M31Word::from(u16::from(value.is_some())));
         append_u32(&mut words, value.unwrap_or(0));
     }
+    Ok(words)
+}
+
+/// Derives the public-input hash stream from the fixed VM claim encoding.
+pub fn canonical_public_input_words_from_claim(
+    claim: &[M31Word],
+    shape: VmPublicClaimShape,
+) -> Result<Vec<M31Word>, VmPublicClaimError> {
+    validate_claim_word_count(claim, shape)?;
+    let mut words = Vec::with_capacity(6 + INPUT_SLOT_WORDS * shape.max_input_words as usize);
+    words.push(ClaimTag::PublicInput.word());
+    words.extend_from_slice(&claim[canonical_layout::MAX_INPUT_WORDS_START..][..2]);
+    words.extend_from_slice(&claim[canonical_layout::INPUT_START_START..][..2]);
+    words.extend_from_slice(&claim[canonical_layout::INPUT_LENGTH_START..][..2]);
+    words.extend_from_slice(&claim[canonical_layout::INPUT_WORD_COUNT_START..][..2]);
+    words.extend_from_slice(
+        &claim[canonical_layout::INPUT_SLOTS_START..canonical_layout::output_words_tag(shape)],
+    );
     Ok(words)
 }
 
@@ -394,6 +421,65 @@ pub fn canonical_public_output_words(
         append_u32(&mut words, word.map_or(0, |word| word.value));
     }
     Ok(words)
+}
+
+/// Derives the public-output hash stream from the fixed VM claim encoding.
+pub fn canonical_public_output_words_from_claim(
+    claim: &[M31Word],
+    shape: VmPublicClaimShape,
+) -> Result<Vec<M31Word>, VmPublicClaimError> {
+    validate_claim_word_count(claim, shape)?;
+    let mut words = Vec::with_capacity(10 + 5 * shape.max_output_words as usize);
+    words.push(ClaimTag::PublicOutput.word());
+    words.extend_from_slice(&claim[canonical_layout::MAX_OUTPUT_WORDS_START..][..2]);
+    words.extend_from_slice(&claim[canonical_layout::OUTPUT_LENGTH_ADDRESS_START..][..2]);
+    words.extend_from_slice(&claim[canonical_layout::OUTPUT_DATA_ADDRESS_START..][..2]);
+    words.extend_from_slice(&claim[canonical_layout::OUTPUT_LENGTH_START..][..2]);
+    words.extend_from_slice(&claim[canonical_layout::output_word_count_start(shape)..][..2]);
+    for index in 0..shape.max_output_words as usize {
+        let start = canonical_layout::output_slot_present(shape, index);
+        words.extend_from_slice(&claim[start..][..5]);
+    }
+    Ok(words)
+}
+
+/// Commits the public input directly from the fixed VM claim encoding.
+pub fn public_input_digest_from_claim(
+    claim: &[M31Word],
+    shape: VmPublicClaimShape,
+) -> Result<IoDigest, VmPublicClaimError> {
+    let words = canonical_public_input_words_from_claim(claim, shape)?;
+    Ok(IoDigest::from(poseidon2_hash_m31_words(
+        &words,
+        M31Word::from(PUBLIC_INPUT_HASH_DOMAIN),
+    )))
+}
+
+/// Commits the public output directly from the fixed VM claim encoding.
+pub fn public_output_digest_from_claim(
+    claim: &[M31Word],
+    shape: VmPublicClaimShape,
+) -> Result<IoDigest, VmPublicClaimError> {
+    let words = canonical_public_output_words_from_claim(claim, shape)?;
+    Ok(IoDigest::from(poseidon2_hash_m31_words(
+        &words,
+        M31Word::from(PUBLIC_OUTPUT_HASH_DOMAIN),
+    )))
+}
+
+fn validate_claim_word_count(
+    claim: &[M31Word],
+    shape: VmPublicClaimShape,
+) -> Result<(), VmPublicClaimError> {
+    let expected = shape.claim_word_count();
+    if claim.len() == expected {
+        Ok(())
+    } else {
+        Err(VmPublicClaimError::ClaimWordCountMismatch {
+            expected,
+            actual: claim.len(),
+        })
+    }
 }
 
 fn append_shape(words: &mut Vec<M31Word>, shape: VmPublicClaimShape) {
@@ -530,6 +616,10 @@ fn validate_vector_capacity(
 /// A VM claim that cannot enter the canonical digest input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VmPublicClaimError {
+    ClaimWordCountMismatch {
+        expected: usize,
+        actual: usize,
+    },
     LengthOutOfRange {
         field: &'static str,
         length: usize,
@@ -557,6 +647,10 @@ pub enum VmPublicClaimError {
 impl fmt::Display for VmPublicClaimError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ClaimWordCountMismatch { expected, actual } => write!(
+                formatter,
+                "VM public claim has {actual} words, expected {expected}"
+            ),
             Self::LengthOutOfRange { field, length } => {
                 write!(
                     formatter,

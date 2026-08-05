@@ -154,13 +154,14 @@ set.
     verifier plans, preprocessing registries, exact wire types, and the protocol
     identifier from one profile constructor.
   - The profile fixes 193 FRI queries, 4 KiB public-input and public-output
-    capacities, and a 3,080,316-byte universal proof wire.
+    capacities, and a 3,383,748-byte universal proof wire.
   - Evidence: commit `b0a3f2ae`; focused profile, manifest mutation, macro,
     recursion, full release workspace, and repository hook suites passed.
 - `[done] REC-001` Adapt a real VM proof to the recursive leaf wire.
-  - The fixed-layout Poseidon prover retains STWO's authenticated expansion maps
-    long enough to materialize all 193 independent raw-query slots, while the
-    ordinary prover keeps its compact in-memory behavior.
+  - The recursion-targeted fixed-layout Poseidon prover uses the manifest-bound
+    verifier transcript and retains STWO's authenticated expansion maps long
+    enough to materialize all 193 independent raw-query slots. The ordinary
+    prover keeps its native transcript and compact in-memory behavior.
   - The adapter checks the frozen geometry, canonical public claim, runner
     boundary, job identity, segment slot, cycle interval, and every trace and
     FRI opening before producing the fixed leaf input.
@@ -245,12 +246,14 @@ Required work:
 
 1. Generate transcript payload ownership, state transitions, word framing,
    challenge draws, and proof-of-work constraints from macro definitions.
-2. Preserve exact native-verifier absorption order and domain separation.
+2. Preserve the exact trusted-control-plan absorption order and domain
+   separation across the recursion-targeted prover, fixed verifier executor, and
+   AIR.
 3. Test changed, missing, duplicated, and reordered payloads independently.
 
-Done when all nine components are macro-generated, native and AIR transcript
-vectors agree, the manual inventory is 18, and the milestone is tested,
-committed, and pushed.
+Done when all nine components are macro-generated, manifest-bound prover,
+executor, and AIR transcript vectors agree, the manual inventory is 18, and the
+milestone is tested, committed, and pushed.
 
 ### `[done] AIR-004` Statement and VM adapters
 
@@ -757,8 +760,6 @@ commands run, observed test counts or measurements, and the pushed commit.
   passed.
 - `cargo test --release --workspace`: passed in 271.02 seconds.
 - `prek run --all-files`: passed.
-- Protocol identifier limbs:
-  `[1944644389, 1135441973, 1743486779, 1673021574, 1185365817, 1671132422, 875754423, 1496784385]`.
 - Commit `93dc88b3` pushed to `origin/chore/scratchpad-cleanups`.
 
 ## Project finish line

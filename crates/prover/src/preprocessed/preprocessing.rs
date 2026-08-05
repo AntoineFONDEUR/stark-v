@@ -108,7 +108,10 @@ impl<H: MerkleHasherLifted> Preprocessing<H> {
     ) -> (
         Vec<stwo::prover::Poly<stwo::prover::backend::CpuBackend>>,
         stwo::prover::vcs_lifted::prover::MerkleProverLifted<stwo::prover::backend::CpuBackend, H>,
-    ) {
+    )
+    where
+        H: Send + Sync,
+    {
         use stwo::core::poly::circle::CanonicCoset;
         use stwo::prover::Poly;
         use stwo::prover::backend::CpuBackend;

@@ -209,8 +209,22 @@ set.
     tests, the 635-test recursion suite, all 5 DSL guards, the full release
     workspace suite, release clippy for the recursion crate, and repository
     hooks passed.
-- `[active] REC-005` Implement the outer recursion prover and verifier.
-- `[pending] REC-006` Verify a real recursion proof as a child.
+- `[done] REC-005` Implement the outer recursion prover and verifier.
+  - Segment and empty witnesses now produce one native STWO proof over the
+    complete 36-component universal roster and one fixed preprocessing
+    commitment.
+  - Verification binds the expected protocol, expected statement, proof kind,
+    component geometry, claimed sums, public relation sum, PCS parameters,
+    interaction proof of work, and every proof commitment and opening.
+  - The existing `define_air_fns!` DSL supports selectively unbatched LogUp tail
+    entries, keeping the two quadratic FRI endpoint relations inside the
+    declared cubic constraint domain without any standalone compatibility macro
+    or handwritten evaluator.
+  - Evidence: commit `396f6ade`; focused outer-proof, FRI-degree, native-STWO,
+    profile, macro, mutation, DSL-guard, and release-clippy tests, the 640-test
+    recursion suite, the full release workspace suite, and repository hooks
+    passed.
+- `[active] REC-006` Verify a real recursion proof as a child.
 - `[pending] REC-007` Prove the two-child binary branch.
 - `[pending] REC-008` Build the recursive tree driver.
 - `[pending] REC-009` Expose and bind the application root API.
@@ -437,7 +451,7 @@ Required work:
 Done when canonical padding verifies and executed-slot empties, out-of-capacity
 slots, and non-zero inactive wires fail.
 
-### `[active] REC-005` Outer prover and verifier
+### `[done] REC-005` Outer prover and verifier
 
 Dependencies: `REC-004`.
 
@@ -452,7 +466,7 @@ Required work:
 Done when real segment and empty leaves produce valid recursion proofs and each
 public claim or proof mutation is rejected.
 
-### `[pending] REC-006` Recursion-child closure
+### `[active] REC-006` Recursion-child closure
 
 Dependencies: `REC-005`.
 
@@ -856,6 +870,43 @@ commands run, observed test counts or measurements, and the pushed commit.
 - `/usr/bin/time -p cargo test --release --workspace`: passed in 261.83 seconds.
 - `prek run --all-files`: passed.
 - Commit `4374b123` pushed to `origin/chore/scratchpad-cleanups`.
+
+### `REC-005` — 2026-08-05
+
+- `cargo test --release -p stwo-macros --test air_fns -- --nocapture`: all 26
+  existing-DSL integration tests passed, including the selective unbatched LogUp
+  tail layout.
+- `cargo test --release -p recursion fri_merkle_air::tests::leaf_component_degree_includes_preprocessed_endpoint_products -- --exact --nocapture`:
+  the measured FRI-leaf maximum constraint degree is three when trusted
+  preprocessing columns are treated as degree-one expressions.
+- `cargo test --release -p recursion fri_merkle_air::tests::leaf_component_proves_at_the_declared_constraint_degree_bound -- --exact --nocapture`:
+  the isolated macro-generated FRI-leaf component produced and verified a native
+  STWO proof at its declared degree bound.
+- `cargo test --release -p recursion recursive_proof::tests::real_segment_leaf_produces_a_valid_recursion_proof -- --exact --nocapture`:
+  one real VM segment produced and verified a universal recursion proof in
+  432.09 seconds; measured wall time was 432.27 seconds.
+- `cargo test --release -p recursion recursive_proof::tests::empty_proof_binds_every_public_claim_and_stark_region -- --exact --nocapture`:
+  one valid empty proof verified and all 18 independent protocol, statement,
+  kind, geometry, sum, PCS, proof-of-work, commitment, and sampled-value
+  mutations were rejected in 396.06 seconds; measured wall time was 397.06
+  seconds.
+- `cargo test --release -p recursion profile::tests -- --nocapture`: all 7
+  active profile and conformance tests passed. The frozen universal geometry is
+  2,104 table columns, 2,248 sampled values, 1,287 AIR instructions, 493
+  preprocessing columns, and a 3,386,900-byte fixed proof wire.
+- `cargo test --release -p recursion --test air_dsl_guard -- --nocapture`: all 5
+  structural DSL guards passed; no recursion-reachable owner contains a
+  handwritten evaluator, standalone table macro, wrapper macro, or unapproved
+  component route.
+- `cargo clippy --release -p stwo-macros -p prover -p recursion --all-targets --features recursion/parallel,prover/parallel --no-deps -- -D warnings`:
+  passed in 11.33 seconds.
+- `/usr/bin/time -p cargo test --release -p recursion --features parallel`: 640
+  unit tests and 5 structural integration tests passed in 827.24 seconds.
+- `/usr/bin/time -p cargo test --release --workspace --features recursion/parallel,prover/parallel`:
+  the full release workspace passed in 1,015.40 seconds.
+- `prek run --all-files`: passed after formatter output was applied and checked
+  explicitly.
+- Commit `396f6ade` pushed to `origin/chore/scratchpad-cleanups`.
 
 ## Project finish line
 

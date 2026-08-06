@@ -619,7 +619,7 @@ completed `PRO-001` profile silently: any changed roster, public claim, or proof
 artifact receives a new manifest identity and repeats affected recursion
 conformance tests.
 
-### `[pending] PRE-001` Hash precompile
+### `[active] PRE-001` Hash precompile
 
 Dependencies: `REC-010`.
 

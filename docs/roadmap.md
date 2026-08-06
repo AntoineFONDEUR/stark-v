@@ -266,8 +266,18 @@ set.
   - Evidence: commit `c212200d`; release E2Es produced and verified roots for 1,
     2, 3, 4, and 8 executed segments, the full recursion and direct-DSL suites
     passed, release checks and clippy passed, and repository hooks passed.
-- `[active] REC-009` Expose and bind the application root API.
-- `[pending] REC-010` Demonstrate constant root-proof size.
+- `[done] REC-009` Expose and bind the application root API.
+  - `root::verify_recursive_root` accepts one segmentation-free
+    `CompleteExecutionStatement` and one recursion proof, requires canonical
+    root geometry, compares every application-owned field, and then runs the
+    manifest-bound recursion verifier.
+  - Host continuation remains isolated in `continuation`; no multi-proof API was
+    added to `recursion`.
+  - Evidence: commit `8c36c61e`; all 7 independent expected-field mutations were
+    rejected, one real segment root passed the application verifier, the full
+    recursion and direct-DSL suites passed, release checks and clippy passed,
+    and repository hooks passed.
+- `[active] REC-010` Demonstrate constant root-proof size.
 - `[pending] PRE-001` Prepare the hash-precompile proof split for production.
 - `[pending] SYS-001` Implement proof-bound syscalls and output journal.
 - `[pending] FELT-001` Complete witness-side felt-function VM access.
@@ -551,7 +561,7 @@ Required work:
 Done when runs with 1, 2, 3, 4, and 8 executed segments each produce one valid
 root proof with the expected span.
 
-### `[active] REC-009` Application root API
+### `[done] REC-009` Application root API
 
 Dependencies: `REC-008`.
 
@@ -566,7 +576,7 @@ Required work:
 Done when the expected statement verifies and one focused test rejects each
 independently changed statement field.
 
-### `[pending] REC-010` Constant-size demonstration
+### `[active] REC-010` Constant-size demonstration
 
 Dependencies: `REC-009`.
 
@@ -1037,6 +1047,34 @@ the recorded command without committing a machine-specific path.
   zero matches.
 - `prek run --all-files`: passed.
 - Commit `c212200d` pushed to `origin/chore/scratchpad-cleanups`.
+
+### `REC-009` — 2026-08-06
+
+- `cargo test --release -p recursion root::tests -- --nocapture`: all 7
+  independent protocol, program, initial-state, final-state, public-input,
+  public-output, and total-cycle mutations were rejected, and the unchanged
+  complete execution was accepted; all 8 tests passed.
+- `/usr/bin/time -l cargo test --release -p recursion tree::tests::one_executed_recursion_leaf_is_the_complete_root -- --exact --nocapture`:
+  one real segment produced a recursive root that passed
+  `root::verify_recursive_root` in 667.46 seconds with 18.99 GB maximum RSS and
+  zero swaps.
+- `cargo test --release -p recursion --test air_dsl_guard -- --nocapture`: all 5
+  universal and inner-VM direct-DSL structural guards passed.
+- `cargo check --release -p recursion`,
+  `cargo check --release -p recursion --features parallel`,
+  `cargo test --release -p recursion --features parallel --no-run`, and
+  `cargo clippy --release -p recursion --all-targets --features parallel --no-deps -- -D warnings`:
+  passed.
+- `/usr/bin/time -l cargo test --release -p recursion --features parallel -- --test-threads=1`:
+  673 unit tests and 5 structural integration tests passed, 4 explicit tree
+  conformance tests remained ignored, and the suite finished in 3,991.63 seconds
+  with 20.56 GB maximum RSS and zero swaps.
+- `sg -p 'impl FrameworkEval for $TYPE { $$$BODY }' -l rust --json=compact crates/recursion/src crates/air/src/schema.rs crates/air/src/poseidon2.rs`:
+  zero matches.
+- `rg -n 'define_component_tables!|define_component_tables' crates/recursion/src crates/air/src/schema.rs crates/air/src/poseidon2.rs`:
+  zero matches.
+- `prek run --all-files`: passed.
+- Commit `8c36c61e` pushed to `origin/chore/scratchpad-cleanups`.
 
 ## Project finish line
 

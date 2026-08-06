@@ -325,6 +325,8 @@ set.
     split verification passed in 67.38 seconds with 2.15 GB peak RSS. One real
     split-proof root passed in 554.23 seconds with 19.34 GB peak RSS and zero
     swaps. Workspace release check and clippy with warnings denied passed.
+  - Implementation slice: commit `d80b2d97` pushed to
+    `origin/chore/scratchpad-cleanups`.
   - Next slice: add forged, missing, extra, and reordered tuple-pairing tests at
     both host-continuation and recursive-root boundaries, then rerun current
     binary and padded-root conformance before benchmarking the split.

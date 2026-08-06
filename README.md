@@ -195,14 +195,14 @@ Metal produced identical serialized proof sizes, and every Metal run recorded
 
 | Program | Cycles | SIMD total | SIMD prove | SIMD RSS | Metal total | Metal prove | Metal RSS | Metal prove gap | Metal success/failure | Exact proof bytes (both) |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `mul_output` | 61 | 1.14 s | 1.038 s | 1.543 GiB | 1.19 s | 1.096 s | 1.526 GiB | +5.6% | 36 / 0 | 74,081 |
-| `load_merge` | 187 | 1.14 s | 1.049 s | 1.544 GiB | 1.18 s | 1.094 s | 1.528 GiB | +4.3% | 36 / 0 | 74,384 |
-| `max_div` | 147 | 1.17 s | 1.077 s | 1.584 GiB | 1.22 s | 1.119 s | 1.543 GiB | +4.0% | 36 / 0 | 80,152 |
+| `mul_output` | 61 | 1.07 s | 0.970 s | 1.546 GiB | 1.13 s | 1.045 s | 1.530 GiB | +7.7% | 36 / 0 | 74,081 |
+| `load_merge` | 187 | 1.06 s | 0.978 s | 1.549 GiB | 1.12 s | 1.031 s | 1.530 GiB | +5.4% | 36 / 0 | 74,384 |
+| `max_div` | 147 | 1.09 s | 1.000 s | 1.583 GiB | 1.18 s | 1.089 s | 1.552 GiB | +8.8% | 36 / 0 | 80,152 |
 
 The previous roughly 69-second Metal result hit a scalar barycentric-weight
 cliff in `CpuBackend`: at log 20 it performed a QM31 division for every point.
 Exact SIMD dispatch now handles that work. Metal proving latency is consequently
-4–6% above SIMD rather than roughly 70x slower.
+5–9% above SIMD rather than roughly 70x slower.
 
 The latest pass applies the same data-oriented rules used by the Zig backend:
 heterogeneous commitments are partitioned by their scalar/SIMD/Metal crossover,
@@ -210,14 +210,15 @@ twiddle initialization is single-flight, IFFT/LDE/Merkle work shares one ordered
 command buffer, completed Objective-C temporaries are drained promptly, and
 short-lived OOD bases plus redundant backend-bridge copies are released. Against
 the preceding five-run Metal baseline this reduced submissions from 96 to 36
-(-62.5%), reduced peak RSS by 42.1–42.4%, and improved Metal prove time by
-2.6–3.6%.
+(-62.5%) and reduced peak RSS by 41.8–42.4%. Metal FRI folds also reuse the
+existing inverse-twiddle tree instead of regenerating each domain point and
+performing a Fermat inversion per GPU thread; a separate nine-pair old/new run
+measured a further 0.3% median whole-proof improvement on `mul_output`.
 
 SIMD remains the default because this is still a hybrid `CpuBackend`, not a fully
-resident Metal prover. The next performance boundary is FRI: port the Zig
-backend's cached/batched coordinate inversions and ping-pong fold storage, then
-measure whether eliminating per-thread Fermat inversions and retained fold
-buffers pays for the additional residency machinery.
+resident Metal prover. The next performance boundary is proof-scoped resident
+storage: reuse the packed inverse-twiddle buffer by offset, bound retained scratch,
+and keep quotient/FRI columns in a ping-pong arena across transcript epochs.
 
 ## Benchmarks
 

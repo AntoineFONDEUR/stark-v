@@ -336,6 +336,8 @@ set.
     output rejection passed in 6.70 seconds with 2.06 GB peak RSS; the shared
     real-proof recursive matrix passed all 25 cases in 121.08 seconds with 4.24
     GB peak RSS. Every run reported zero swaps.
+  - Adversarial slice: commit `51aeb2f1` pushed to
+    `origin/chore/scratchpad-cleanups`.
   - Next slice: rerun current binary and padded-root conformance before
     benchmarking the split.
 - `[pending] SYS-001` Implement proof-bound syscalls and output journal.

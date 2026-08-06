@@ -21,14 +21,13 @@ pub(crate) fn checked_m31_from_raw(raw: u32) -> BaseField {
 pub(crate) fn simd_circle_evaluation_to_cpu<EvalOrder>(
     evaluation: CircleEvaluation<SimdBackend, BaseField, EvalOrder>,
 ) -> CircleEvaluation<CpuBackend, BaseField, EvalOrder> {
-    let values = evaluation
-        .values
-        .as_slice()
-        .iter()
-        .map(|value| checked_m31_from_raw(value.0))
-        .collect();
+    let domain = evaluation.domain;
+    let values = evaluation.values.into_cpu_vec();
+    for value in &values {
+        checked_m31_from_raw(value.0);
+    }
 
-    CircleEvaluation::new(evaluation.domain, values)
+    CircleEvaluation::new(domain, values)
 }
 
 pub(crate) fn simd_circle_evaluations_to_cpu<EvalOrder>(
@@ -59,10 +58,12 @@ mod tests {
             .collect();
         let evaluation =
             CircleEvaluation::<SimdBackend, BaseField, BitReversedOrder>::new(domain, values);
+        let input_ptr = evaluation.values.as_slice().as_ptr();
 
         let converted = simd_circle_evaluation_to_cpu(evaluation);
 
         assert_eq!(converted.domain, domain);
+        assert_eq!(converted.values.as_ptr(), input_ptr);
         assert_eq!(
             converted
                 .values

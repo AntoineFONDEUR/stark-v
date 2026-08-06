@@ -190,23 +190,34 @@ telemetry.
 Apple M5 Max, release build with `metal,parallel`; values are five-run medians
 from interleaved fresh-process SIMD/Metal runs. Every proof verified, SIMD and
 Metal produced identical serialized proof sizes, and every Metal run recorded
-96 checked successes and zero failures:
+36 checked successes and zero failures. RSS is the process maximum reported by
+`/usr/bin/time -l`:
 
-| Program | Cycles | SIMD total | SIMD prove | Metal total | Metal prove | Metal success/failure | Exact proof bytes (both) | Verified |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| `mul_output` | 61 | 1.05 s | 0.960 s | 1.16 s | 1.072 s | 96 / 0 | 74,081 | Both |
-| `load_merge` | 187 | 1.05 s | 0.960 s | 1.15 s | 1.057 s | 96 / 0 | 74,384 | Both |
-| `max_div` | 147 | 1.08 s | 0.989 s | 1.16 s | 1.076 s | 96 / 0 | 80,152 | Both |
+| Program | Cycles | SIMD total | SIMD prove | SIMD RSS | Metal total | Metal prove | Metal RSS | Metal prove gap | Metal success/failure | Exact proof bytes (both) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `mul_output` | 61 | 1.14 s | 1.038 s | 1.543 GiB | 1.19 s | 1.096 s | 1.526 GiB | +5.6% | 36 / 0 | 74,081 |
+| `load_merge` | 187 | 1.14 s | 1.049 s | 1.544 GiB | 1.18 s | 1.094 s | 1.528 GiB | +4.3% | 36 / 0 | 74,384 |
+| `max_div` | 147 | 1.17 s | 1.077 s | 1.584 GiB | 1.22 s | 1.119 s | 1.543 GiB | +4.0% | 36 / 0 | 80,152 |
 
 The previous roughly 69-second Metal result hit a scalar barycentric-weight
 cliff in `CpuBackend`: at log 20 it performed a QM31 division for every point.
 Exact SIMD dispatch now handles that work. Metal proving latency is consequently
-9–12% above SIMD rather than roughly 70x slower.
+4–6% above SIMD rather than roughly 70x slower.
 
-The forwarded hybrid path remains correctness and telemetry infrastructure, not
-a performance win yet, so SIMD remains the default. Resident SIMD/Metal AIR
-integration and further profiling are the follow-up work needed for competitive
-Metal latency.
+The latest pass applies the same data-oriented rules used by the Zig backend:
+heterogeneous commitments are partitioned by their scalar/SIMD/Metal crossover,
+twiddle initialization is single-flight, IFFT/LDE/Merkle work shares one ordered
+command buffer, completed Objective-C temporaries are drained promptly, and
+short-lived OOD bases plus redundant backend-bridge copies are released. Against
+the preceding five-run Metal baseline this reduced submissions from 96 to 36
+(-62.5%), reduced peak RSS by 42.1–42.4%, and improved Metal prove time by
+2.6–3.6%.
+
+SIMD remains the default because this is still a hybrid `CpuBackend`, not a fully
+resident Metal prover. The next performance boundary is FRI: port the Zig
+backend's cached/batched coordinate inversions and ping-pong fold storage, then
+measure whether eliminating per-thread Fermat inversions and retained fold
+buffers pays for the additional residency machinery.
 
 ## Benchmarks
 

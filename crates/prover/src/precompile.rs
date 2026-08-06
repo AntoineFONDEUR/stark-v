@@ -128,7 +128,7 @@ pub struct SystemProof {
 }
 
 /// One proof of work over both committed main traces.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct JointInteractionProof {
     pub pow_nonce: u64,
 }
@@ -142,26 +142,36 @@ pub struct PrecompileBindingProof {
 }
 
 /// Starts the ordered transcript shared by both proof instances.
-fn joint_interaction_channel(seeds: [SecureField; 2]) -> Blake2sChannel {
-    let mut channel = Blake2sChannel::default();
+pub(crate) fn joint_interaction_channel<C>(seeds: [SecureField; 2]) -> C
+where
+    C: Channel + Default,
+{
+    let mut channel = C::default();
     channel.mix_felts(&seeds);
     channel
 }
 
 /// Grinds once over both post-commitment seeds and advances the joint transcript.
-fn prove_joint_interaction(seeds: [SecureField; 2]) -> (JointInteractionProof, Blake2sChannel) {
-    let mut channel = joint_interaction_channel(seeds);
+pub(crate) fn prove_joint_interaction<C>(seeds: [SecureField; 2]) -> (JointInteractionProof, C)
+where
+    C: Channel + Default,
+    SimdBackend: GrindOps<C>,
+{
+    let mut channel = joint_interaction_channel::<C>(seeds);
     let pow_nonce = SimdBackend::grind(&channel, INTERACTION_POW_BITS);
     channel.mix_u64(pow_nonce);
     (JointInteractionProof { pow_nonce }, channel)
 }
 
 /// Checks the shared grind before any cross-proof relation challenge is drawn.
-fn verify_joint_interaction(
+pub(crate) fn verify_joint_interaction<C>(
     seeds: [SecureField; 2],
     proof: JointInteractionProof,
-) -> Result<Blake2sChannel, VerificationError> {
-    let mut channel = joint_interaction_channel(seeds);
+) -> Result<C, VerificationError>
+where
+    C: Channel + Default,
+{
+    let mut channel = joint_interaction_channel::<C>(seeds);
     if !channel.verify_pow_nonce(INTERACTION_POW_BITS, proof.pow_nonce) {
         return Err(VerificationError::InvalidStructure(
             "precompile binding: invalid joint interaction proof of work".to_string(),
@@ -172,8 +182,8 @@ fn verify_joint_interaction(
 }
 
 /// Binds the ordered joint transcript prefix into one constituent proof.
-fn bind_joint_interaction(
-    channel: &mut Blake2sChannel,
+pub(crate) fn bind_joint_interaction<C: Channel>(
+    channel: &mut C,
     seeds: [SecureField; 2],
     proof: JointInteractionProof,
 ) {
@@ -307,7 +317,7 @@ pub fn prove_binding_sides(
     let seed_host = host_channel.draw_secure_felt();
     let seed_precompile = precompile_channel.draw_secure_felt();
     let seeds = [seed_host, seed_precompile];
-    let (joint_interaction, mut joint_channel) = prove_joint_interaction(seeds);
+    let (joint_interaction, mut joint_channel) = prove_joint_interaction::<Blake2sChannel>(seeds);
     let value = ValueRelation::draw(&mut joint_channel);
 
     bind_joint_interaction(&mut host_channel, seeds, joint_interaction);
@@ -436,7 +446,7 @@ pub fn verify_binding(
     let seed_host = host_channel.draw_secure_felt();
     let seed_precompile = precompile_channel.draw_secure_felt();
     let seeds = [seed_host, seed_precompile];
-    let mut joint_channel = verify_joint_interaction(seeds, joint_interaction)?;
+    let mut joint_channel = verify_joint_interaction::<Blake2sChannel>(seeds, joint_interaction)?;
     let value = ValueRelation::draw(&mut joint_channel);
 
     // The cross-proof binding check.
@@ -595,7 +605,7 @@ pub fn prove_hash_binding_sides(
     let seed_host = host_channel.draw_secure_felt();
     let seed_precompile = precompile_channel.draw_secure_felt();
     let seeds = [seed_host, seed_precompile];
-    let (joint_interaction, mut joint_channel) = prove_joint_interaction(seeds);
+    let (joint_interaction, mut joint_channel) = prove_joint_interaction::<Blake2sChannel>(seeds);
     let relations = draw_shared_relations(&mut joint_channel);
     bind_joint_interaction(&mut host_channel, seeds, joint_interaction);
     bind_joint_interaction(&mut precompile_channel, seeds, joint_interaction);
@@ -682,7 +692,7 @@ pub fn verify_hash_binding(
     let seed_host = host_channel.draw_secure_felt();
     let seed_precompile = precompile_channel.draw_secure_felt();
     let seeds = [seed_host, seed_precompile];
-    let mut joint_channel = verify_joint_interaction(seeds, joint_interaction)?;
+    let mut joint_channel = verify_joint_interaction::<Blake2sChannel>(seeds, joint_interaction)?;
     let relations = draw_shared_relations(&mut joint_channel);
 
     // The cross-proof binding check.
@@ -899,7 +909,7 @@ mod tests {
             host_channel.draw_secure_felt(),
             precompile_channel.draw_secure_felt(),
         ];
-        let channel = joint_interaction_channel(seeds);
+        let channel = joint_interaction_channel::<Blake2sChannel>(seeds);
         (0_u64..)
             .find(|nonce| !channel.verify_pow_nonce(INTERACTION_POW_BITS, *nonce))
             .expect("the PoW predicate rejects at least one nonce")

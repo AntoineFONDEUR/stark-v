@@ -1,15 +1,21 @@
 # Hash precompiles: proving Poseidon2 outside the RV32IM prover
 
-> **Status: planned feature with a tested binding prototype.**
-> `crates/prover/src/precompile.rs` proves the central cross-proof mechanism:
-> two independent STWO proofs share a LogUp relation drawn from both committed
-> traces, and their claimed sums must cancel. It includes a square exemplar and
-> a Poseidon2 exemplar over the 32-word `poseidon2_io` tuple. The VM prover does
-> not yet offload Poseidon2, segment artifacts do not contain a precompile
-> proof, and recursion does not yet verify the pair. All three prototype binding
-> components are expressed directly through `define_air_fns!`. The prototype
-> commits both main traces, grinds one joint interaction PoW over their ordered
-> post-commitment seeds, and only then draws the shared relations.
+> **Status: production split in progress.** `crates/prover/src/precompile.rs`
+> proves the central cross-proof mechanism: two independent STWO proofs share a
+> LogUp relation drawn from both committed traces, and their claimed sums must
+> cancel. It includes a square exemplar and a Poseidon2 exemplar over the
+> 32-word `poseidon2_io` tuple. The VM prover does not yet offload Poseidon2,
+> segment artifacts do not contain a precompile proof, and recursion does not
+> yet verify the pair. All three prototype binding components are expressed
+> directly through `define_air_fns!`. The prototype commits both main traces,
+> grinds one joint interaction PoW over their ordered post-commitment seeds, and
+> only then draws the shared relations.
+> `crates/prover/src/poseidon2_precompile.rs` now provides the production
+> standalone Poseidon2 instance: its fixed main trace is committed before its
+> seed is exposed, its proof carries the shared claimed sum and exact trace
+> shapes, and verification works with both Blake2s and the recursion profile's
+> Poseidon2-M31 channel. The VM proof still contains Poseidon2, so segment
+> artifacts and recursion do not yet consume this instance.
 
 Goal: take the Poseidon2 table out of the rv32im stwo instance and prove it in
 its own instance, binding the two proofs through their shared LogUp relation.
@@ -75,11 +81,11 @@ before deriving the segment statement.
    The prototype's square emit, square consume, and 32-word host binding tables
    already use `define_air_fns!`; production adapters must preserve that direct
    DSL ownership.
-2. **hash prover**: extract a production STWO instance over `Poseidon2Table`.
-   `define_air_fns!` already generates standalone `prove_air_fns` /
-   `verify_air_fns` for its tables (see `stwo-macros/tests/air_fns.rs`); this
-   needs the channel-handshake variant of that path plus a public claim carrying
-   the relation's claimed sum.
+2. **hash prover**: `poseidon2_precompile` stages the production STWO instance
+   over `Poseidon2Table` around the joint channel handshake. It directly reuses
+   the `define_air_fns!`-generated Poseidon2 component, retains raw query
+   expansion for recursion, and publishes the aggregate shared-relation sum
+   without requiring that standalone sum to be zero.
 3. **rv32im prover**: drop the poseidon2 component from `components!` (or its
    successor); its `poseidon2`/`poseidon2_io` relation deficit becomes a public
    claim instead of an in-proof cancellation. `InteractionClaim` gains the

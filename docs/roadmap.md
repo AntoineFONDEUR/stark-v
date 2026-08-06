@@ -303,8 +303,15 @@ set.
   - Completed slice: both prototype main commitments feed one ordered joint
     interaction PoW; relation challenges are drawn afterward and the same joint
     prefix is bound into both proof transcripts.
-  - Next slice: produce the standalone Poseidon2 proof and public
-    shared-relation claim used by the production segment artifact.
+  - Completed slice: `poseidon2_precompile` commits a fixed DSL-generated hash
+    trace before the joint draw, produces a standalone STARK carrying its
+    nonzero shared-relation sum and exact trace shapes, retains recursion query
+    expansion, and verifies under both Blake2s and Poseidon2-M31 channels.
+  - Focused release evidence: all 5 standalone round-trip, recursion-channel,
+    nonzero-sum, forged-sum, and fixed-capacity tests passed; all 13 binding
+    prototype regressions passed; prover clippy passed with warnings denied.
+  - Next slice: remove Poseidon2 from the VM proof roster and expose the VM
+    proof's matching shared-relation deficit.
 - `[pending] SYS-001` Implement proof-bound syscalls and output journal.
 - `[pending] FELT-001` Complete witness-side felt-function VM access.
 - `[pending] FELT-002` Migrate opcode execution and retire duplicate semantics.

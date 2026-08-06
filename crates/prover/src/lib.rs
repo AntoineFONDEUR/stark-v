@@ -23,6 +23,7 @@ pub fn print_enabled_features() {
 pub mod components;
 pub mod errors;
 pub mod poseidon2_channel;
+pub mod poseidon2_precompile;
 pub mod precompile;
 pub mod preprocessed;
 pub mod prover;

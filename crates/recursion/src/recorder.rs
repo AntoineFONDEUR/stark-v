@@ -6,9 +6,9 @@
 //! prover and verifier execute — records the composition-polynomial
 //! computation as explicit QM31 operations over mask inputs. The arena is the
 //! circuit the composition-check component lowers into recursion-AIR rows
-//! (mul/inv via the existing components, wiring via relations); an edit to
-//! `define_trace_tables!` changes the recorded circuit in the same
-//! compilation, with no constraint copy.
+//! (mul/inv via the existing components, wiring via relations); an edit to an
+//! owning `define_air!` or `define_air_fns!` constraint changes the recorded
+//! circuit in the same compilation, with no constraint copy.
 
 use core::cell::RefCell;
 use core::ops::{Add, AddAssign, Mul, Neg, Sub};

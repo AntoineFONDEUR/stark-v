@@ -27,7 +27,8 @@ The main workspace boundaries are:
   count;
 - `recursion`: the universal recursive-verifier AIR plus manifest-bound outer
   proving and verification for segment leaves, empty leaves, and two-child
-  binary parents; tree construction and the application root API remain
+  binary parents, with a level-ordered driver that reduces a segmented run to
+  one root statement and proof; the application root-verification API remains
   unfinished;
 - `sdk` and `guest-lib`: host and guest interfaces.
 
@@ -53,7 +54,7 @@ Address Range           Region          Size
 - [RV32IM AIR architecture](docs/airs.md) describes the active system and points
   to source truth.
 - [Recursive proving](docs/recursion.md) distinguishes current components from
-  the remaining tree and constant-size root API work.
+  the remaining application root API and constant-size conformance work.
 - [Project roadmap](docs/roadmap.md) is the dependency-ordered finish-line task
   list and classifies current versus planned documents.
 - [Felt AIR compiler](docs/felt-air-compiler.md),
@@ -113,8 +114,9 @@ Two approaches are used to maximize throughput:
 2. **Multiple non-parallel proofs** — Run multiple single-threaded provers in
    parallel. Based on findings from
    [rookie-numbers](https://github.com/clementwalter/rookie-numbers/), this can
-   achieve higher aggregate throughput for continuation segments and, once
-   recursive proving exists, independent leaves or nodes at the same tree level.
+   achieve higher aggregate throughput for continuation segments. With the
+   `parallel` feature, the recursion tree driver runs up to two independent leaf
+   or parent proofs within one level, each with worker-owned preprocessing.
 
 ### Running Benchmarks
 

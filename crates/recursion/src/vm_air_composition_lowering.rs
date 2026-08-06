@@ -7,17 +7,10 @@
 
 use core::fmt;
 
-use air::digest::M31Word;
-use num_traits::Zero;
-use stwo::core::fields::FieldExpOps;
-use stwo::core::fields::m31::M31;
-use stwo::core::fields::qm31::SecureField;
-use stwo_constraint_framework::Relation;
-
 use crate::circuit::CircuitTraces;
-use crate::circuit::{limbs, lower_arena_operations, use_counts_for_outputs};
+use crate::circuit::lower_arena_operations;
 use crate::recorder::Op;
-use crate::relations::RecursionRelations;
+use air::digest::M31Word;
 
 use super::vm_air_composition_circuit::VmAirCompositionCircuit;
 
@@ -36,43 +29,6 @@ pub fn lower_vm_air_composition_circuit(
     let arena = witness.circuit().arena();
     lower_arena_operations(traces, circuit_id, &arena, witness.circuit().outputs());
     Ok(())
-}
-
-/// Verifier contribution for constants and the zero output.
-pub fn public_vm_air_composition_terms(
-    circuit_id: u32,
-    reference: &VmAirCompositionCircuit,
-    relations: &RecursionRelations,
-) -> Result<SecureField, VmAirCompositionLoweringError> {
-    validate_circuit_id(circuit_id)?;
-    if reference.nonzero_output_count() != 0 {
-        return Err(VmAirCompositionLoweringError::ReferenceOutputIsNonzero);
-    }
-    let arena = reference.circuit().arena();
-    let uses = use_counts_for_outputs(&arena, reference.circuit().outputs());
-    let mut total = SecureField::zero();
-    for (node_index, node) in arena.nodes.iter().enumerate() {
-        let node_id = checked_node_id(node_index)?;
-        match node.op {
-            Op::Input => {}
-            Op::Const => {
-                if uses[node_index] != 0 {
-                    total += wire_term(circuit_id, node_id, node.value, relations)
-                        * SecureField::from(M31::from(uses[node_index]));
-                }
-            }
-            Op::Add(_, _) | Op::Sub(_, _) | Op::Mul(_, _) | Op::Neg(_) | Op::Inverse(_) => {}
-        }
-    }
-    for output in reference.circuit().outputs() {
-        total -= wire_term(
-            circuit_id,
-            checked_node_id(*output)?,
-            SecureField::zero(),
-            relations,
-        );
-    }
-    Ok(total)
 }
 
 fn validate_circuit_id(circuit_id: u32) -> Result<(), VmAirCompositionLoweringError> {
@@ -117,28 +73,6 @@ fn validate_structure(
     Ok(())
 }
 
-fn checked_node_id(node_id: usize) -> Result<u32, VmAirCompositionLoweringError> {
-    u32::try_from(node_id).map_err(|_| VmAirCompositionLoweringError::NodeIdOutOfRange { node_id })
-}
-
-fn wire_term(
-    circuit_id: u32,
-    node_id: u32,
-    value: SecureField,
-    relations: &RecursionRelations,
-) -> SecureField {
-    let value = limbs(value);
-    let denominator: SecureField = relations.wire.combine(&[
-        M31::from(circuit_id),
-        M31::from(node_id),
-        M31::from(value[0]),
-        M31::from(value[1]),
-        M31::from(value[2]),
-        M31::from(value[3]),
-    ]);
-    denominator.inverse()
-}
-
 /// Invalid circuit identity, structure, or composition-equality witness.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VmAirCompositionLoweringError {
@@ -148,9 +82,7 @@ pub enum VmAirCompositionLoweringError {
     OutputLayoutMismatch,
     NodeCountMismatch { expected: usize, actual: usize },
     NodeStructureMismatch { node_id: usize },
-    NodeIdOutOfRange { node_id: usize },
     NonzeroCompositionEquality,
-    ReferenceOutputIsNonzero,
 }
 
 impl fmt::Display for VmAirCompositionLoweringError {
@@ -164,11 +96,15 @@ impl std::error::Error for VmAirCompositionLoweringError {}
 #[cfg(test)]
 mod tests {
     use air::digest::M31Word;
+    use num_traits::Zero;
     use prover::components::{COMPONENT_COUNT, COMPONENT_NAMES};
     use prover::poseidon2_channel::Poseidon2M31Channel;
     use prover::relations::Relations;
     use stwo::core::channel::Channel;
+    use stwo::core::fields::FieldExpOps;
     use stwo::core::fields::m31::{BaseField, M31};
+    use stwo::core::fields::qm31::SecureField;
+    use stwo_constraint_framework::Relation;
 
     use super::*;
     use crate::air_relation_parameters::{
@@ -180,6 +116,7 @@ mod tests {
     use crate::relation_challenge_air::{
         AIR_EVALUATION_CHALLENGE_SCOPE, RelationChallengeRelations,
     };
+    use crate::relations::RecursionRelations;
     use crate::statement_input_air::StatementInputRelations;
     use crate::transcript_payload_air::{VerifierInputKind, VerifierInputRelations};
     use crate::verifier_randomness_air::{VerifierRandomnessKind, VerifierRandomnessRelations};
@@ -350,10 +287,9 @@ mod tests {
             ProofKind::SegmentLeaf,
             &circuit_relations,
         );
-        let public_sum =
-            public_vm_air_composition_terms(CIRCUIT_ID, &reference, &circuit_relations)
-                .expect("reference has a zero composition output");
-        input_sum + source_sum + mul_sum + inv_sum + linear_sum + public_sum
+        // The composition-input AIR owns the fixed constants and zero output,
+        // so its interaction sum already includes every public graph anchor.
+        input_sum + source_sum + mul_sum + inv_sum + linear_sum
     }
 
     fn input_source_terms(

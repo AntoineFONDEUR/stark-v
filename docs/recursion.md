@@ -9,9 +9,9 @@
   states match. A run with `n` segments produces `n` proofs, and both proof
   bytes and verification work grow with `n`. This is not recursion.
 - `recursion` defines a universal AIR with a segment-leaf branch and a binary
-  node branch. A completed binary tree will replace two child proofs with one
-  proof of the same protocol and shape. Only this path can produce one
-  constant-size root proof.
+  node branch. Its tree driver repeatedly replaces two child proofs with one
+  proof of the same protocol and shape until only the root remains. Only this
+  path can produce one constant-size root proof.
 
 The recursion crate has no version suffix. Its root modules are the only active
 recursion design.
@@ -20,9 +20,11 @@ recursion design.
 
 The recursion crate exposes a manifest-bound outer prover and verifier for
 segment leaves, canonical empty leaves, and binary parents that verify two
-recursion proofs. The repository does not yet expose the tree builder or
-application root-proof API, so no code should describe the project as already
-producing a constant-size root proof for a complete run.
+recursion proofs. Its level-ordered tree driver proves finalized VM segments,
+adds canonical padding, and returns only one root statement and root proof. The
+repository does not yet expose the application root-verification API or checked
+constant-size conformance, so no code should describe those properties as
+finished.
 
 The implemented foundation includes:
 
@@ -64,6 +66,10 @@ The implemented foundation includes:
 - two independent recursion-child verifier lanes whose transcript, claimed sums,
   composition, openings, DEEP quotient, FRI, and final polynomial checks close
   inside one binary-parent witness;
+- a level-ordered tree driver that derives the complete execution job, proves
+  executed and canonical empty leaves, reduces adjacent children in bounded
+  same-level waves with worker-owned preprocessing, and discards descendants
+  after each level;
 - shared QM31 multiplication, inversion, linear-operation, and Merkle-path trace
   tables;
 - component, malformed-witness, relation-closure, and leaf-binding tests.
@@ -72,8 +78,10 @@ Segment, empty, and binary witnesses produce recursion proofs that bind the
 expected protocol, statement, component claims, interaction claims, and STWO
 proof. A real recursion proof can be encoded and verified as either binary
 child. Swapped, duplicated, gapped, overlapping, and job-mismatched child pairs
-are rejected at the unique fold boundary. Tree construction and the public root
-API remain unfinished.
+are rejected at the unique fold boundary. Release-mode end-to-end tests have
+produced and verified roots for runs with 1, 2, 3, 4, and 8 executed segments,
+including canonical padding for the three-segment tree. The public application
+root-verification API and constant-size conformance remain unfinished.
 
 The live universal roster has 36 components. Every recursion-local component is
 authored directly through `define_air_fns!`; Poseidon2 uses the same macro, and

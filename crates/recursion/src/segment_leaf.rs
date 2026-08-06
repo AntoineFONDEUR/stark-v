@@ -129,7 +129,7 @@ pub fn adapt_vm_segment_leaf(
     }))
 }
 
-fn segment_statement(
+pub(crate) fn segment_statement(
     profile: &FrozenProtocolProfile,
     public_data: &PublicData,
     metadata: &SegmentRunMetadata,
@@ -1296,7 +1296,7 @@ pub(crate) mod tests {
                     crate::wire::ProofKind::SegmentLeaf,
                     3,
                     crate::recursion_air_program::UNIVERSAL_COMPONENT_COUNT,
-                    493,
+                    crate::profile::RECURSION_PREPROCESSED_COLUMN_COUNT,
                     crate::recursion_air_program::UNIVERSAL_COMPONENT_COUNT,
                     true,
                 ),

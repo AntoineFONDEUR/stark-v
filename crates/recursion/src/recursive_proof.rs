@@ -6,6 +6,7 @@
 //! materializes the interaction trace under those challenges.
 
 use core::fmt;
+use std::sync::Arc;
 
 use air::digest::ProtocolId;
 use num_traits::Zero;
@@ -43,8 +44,56 @@ pub struct RecursionPreprocessing {
     component_log_sizes: UniversalComponentLogSizes,
     column_log_sizes: TreeVec<Vec<u32>>,
     ids: Vec<PreProcessedColumnId>,
-    cached: prover::Preprocessing<Poseidon2M31MerkleHasher>,
+    cached: Arc<prover::Preprocessing<Poseidon2M31MerkleHasher>>,
     universal: UniversalPreprocessing,
+}
+
+/// Shareable fixed data for constructing worker-local proving contexts.
+#[cfg(feature = "parallel")]
+pub(crate) struct ParallelRecursionPreprocessing {
+    protocol: ProtocolId,
+    component_log_sizes: UniversalComponentLogSizes,
+    column_log_sizes: TreeVec<Vec<u32>>,
+    ids: Vec<PreProcessedColumnId>,
+    cached: Arc<prover::Preprocessing<Poseidon2M31MerkleHasher>>,
+}
+
+#[cfg(feature = "parallel")]
+impl ParallelRecursionPreprocessing {
+    /// Builds only the recorder-backed state that cannot cross worker threads.
+    pub(crate) fn worker_local(
+        &self,
+        profile: &FrozenProtocolProfile,
+    ) -> Result<RecursionPreprocessing, RecursionProofError> {
+        let universal =
+            UniversalPreprocessing::new(profile).map_err(RecursionProofError::Witness)?;
+        Ok(RecursionPreprocessing {
+            protocol: self.protocol,
+            component_log_sizes: self.component_log_sizes,
+            column_log_sizes: self.column_log_sizes.clone(),
+            ids: self.ids.clone(),
+            cached: Arc::clone(&self.cached),
+            universal,
+        })
+    }
+}
+
+#[cfg(feature = "parallel")]
+impl RecursionPreprocessing {
+    /// Retains the expensive immutable commitment while isolating recorder arenas.
+    pub(crate) fn parallel_template(
+        &self,
+        profile: &FrozenProtocolProfile,
+    ) -> Result<ParallelRecursionPreprocessing, RecursionProofError> {
+        validate_preprocessing(profile, self)?;
+        Ok(ParallelRecursionPreprocessing {
+            protocol: self.protocol,
+            component_log_sizes: self.component_log_sizes,
+            column_log_sizes: self.column_log_sizes.clone(),
+            ids: self.ids.clone(),
+            cached: Arc::clone(&self.cached),
+        })
+    }
 }
 
 /// Public component geometry selecting one universal predicate branch.
@@ -102,7 +151,7 @@ pub fn preprocess_recursion(
         component_log_sizes,
         column_log_sizes,
         ids,
-        cached,
+        cached: Arc::new(cached),
         universal,
     })
 }
@@ -543,6 +592,18 @@ mod tests {
     use super::*;
     use crate::statement::{CompleteExecutionStatement, EdgeClaim, ExecutedSpan, JobContext};
     use crate::test_fixtures::{digest, state};
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_workers_reuse_the_fixed_preprocessing_commitment() {
+        let profile = crate::profile::frozen_protocol_profile().expect("frozen profile is valid");
+        let preprocessing =
+            preprocess_recursion(&profile).expect("universal preprocessing is valid");
+        let parallel = preprocessing
+            .parallel_template(&profile)
+            .expect("the trusted preprocessing has the frozen geometry");
+        assert!(Arc::ptr_eq(&preprocessing.cached, &parallel.cached));
+    }
 
     fn empty_statement(profile: &FrozenProtocolProfile, program_seed: u16) -> SpanStatement {
         let complete = CompleteExecutionStatement::new(

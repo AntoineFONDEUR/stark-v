@@ -59,6 +59,7 @@ pub mod transcript_payload_air;
 pub mod transcript_program;
 pub mod transcript_state_air;
 pub mod transcript_word_air;
+pub mod tree;
 pub mod universal_relations;
 pub mod universal_witness;
 pub mod verifier_randomness_air;

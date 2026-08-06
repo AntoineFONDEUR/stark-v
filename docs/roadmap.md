@@ -39,6 +39,15 @@ two-worker driver measured up to 36.01 GB maximum RSS in one process. Do not use
 process-level test parallelism for these gates until a checked-in lower-memory
 measurement replaces this limit.
 
+Scope recursive proof tests by the boundary being changed. Fast statement,
+planner, wire, profile, and malformed-witness tests cover every supported count
+and boundary first. Real proof E2Es cover the three distinct root constructions:
+one segment for a segment-leaf root, two segments for a binary root, and three
+segments for a padded binary tree. Repeat the 4- and 8-segment E2Es only when
+tree reduction, padding, or protocol geometry changes; fixed root encoding and
+profile-owned verifier scheduling do not gain coverage from repeating the same
+binary shape at larger counts.
+
 ## Non-negotiable architecture gates
 
 - Host continuation and recursive proving remain separate crates and APIs.
@@ -277,8 +286,17 @@ set.
     rejected, one real segment root passed the application verifier, the full
     recursion and direct-DSL suites passed, release checks and clippy passed,
     and repository hooks passed.
-- `[active] REC-010` Demonstrate constant root-proof size.
-- `[pending] PRE-001` Prepare the hash-precompile proof split for production.
+- `[done] REC-010` Demonstrate constant root-proof size.
+  - Every successfully produced canonical root encodes as the profile-owned
+    3,459,396-byte `RootProofBytes` type and uses the same 4,937-step verifier
+    plan with one checked digest.
+  - Real release roots cover the segment-leaf, binary, and padded-binary root
+    constructions. REC-008 separately establishes valid 4- and 8-segment roots;
+    their root wire and verifier plan are the same profile-owned types.
+  - Evidence: real 1-, 2-, and 3-segment roots encoded and verified, fixed wire
+    and verifier-shape vectors passed, and outer-only proof parallelism was
+    measured and rejected as slower than the retained shared-pool strategy.
+- `[active] PRE-001` Prepare the hash-precompile proof split for production.
 - `[pending] SYS-001` Implement proof-bound syscalls and output journal.
 - `[pending] FELT-001` Complete witness-side felt-function VM access.
 - `[pending] FELT-002` Migrate opcode execution and retire duplicate semantics.
@@ -576,20 +594,23 @@ Required work:
 Done when the expected statement verifies and one focused test rejects each
 independently changed statement field.
 
-### `[active] REC-010` Constant-size demonstration
+### `[done] REC-010` Constant-size demonstration
 
 Dependencies: `REC-009`.
 
 Required work:
 
-1. Serialize roots for every supported segment count under `PRO-001`.
+1. Serialize actual roots for the segment-leaf, binary-root, and padded-binary
+   root constructions under `PRO-001`; combine this with REC-008 validity for
+   the larger supported binary trees.
 2. Record root proof bytes and root-verifier operation shape independently from
    total tree-prover work.
-3. Add a checked-in conformance test for equal serialized sizes and verifier
-   shapes.
+3. Add checked-in conformance vectors for the exact serialized size and trusted
+   verifier shape shared by all roots in the profile.
 
-Done when every supported count yields exactly one root proof with identical
-serialized size and root-verifier shape.
+Done when every supported count yields exactly one root proof through the same
+fixed-size wire type and profile-owned verifier plan, with actual serialization
+covering every distinct root construction.
 
 ## Planned VM capabilities
 
@@ -1075,6 +1096,45 @@ the recorded command without committing a machine-specific path.
   zero matches.
 - `prek run --all-files`: passed.
 - Commit `8c36c61e` pushed to `origin/chore/scratchpad-cleanups`.
+
+### `REC-010` — 2026-08-06
+
+- `cargo test --release -p recursion --features parallel root::tests -- --nocapture`:
+  all 7 application-field mutations, the unchanged execution, and the frozen
+  4,937-step verifier-plan digest passed; all 9 tests passed.
+- `cargo test --release -p recursion --features parallel tree_plan -- --nocapture`:
+  all 6 empty-run and minimal-capacity planner tests passed for 1, 2, 3, 4, and
+  8 segment counts.
+- `cargo test --release -p recursion --features parallel profile::tests::serialized_root_size_is_derived_from_the_recursion_shape -- --exact --nocapture`:
+  the frozen profile's derived `ROOT_PROOF_BYTE_SIZE` matched the checked
+  3,459,396-byte conformance value.
+- `/usr/bin/time -l cargo test --release -p recursion --features parallel tree::tests::one_executed_recursion_leaf_is_the_complete_root -- --exact --nocapture`:
+  one real segment-leaf root encoded to the frozen size and passed the
+  application verifier in 666.93 seconds with 19.30 GB maximum RSS and zero
+  swaps.
+- The same release command selected
+  `tree::tests::capacity_segmented_guest_produces_a_two_leaf_root` and
+  `tree::tests::cycle_segmented_guest_produces_the_expected_root::case_1_three`
+  independently. The real binary and padded-binary roots encoded to the same
+  frozen size, matched the same verifier plan, and verified in 940.10 and
+  2,091.22 seconds with 33.04 and 36.33 GB maximum RSS respectively and zero
+  swaps.
+- A temporary outer-only Rayon feature composition ran the two-segment command
+  in 1,132.14 seconds with 34.54 GB maximum RSS and zero swaps. It was 20.4%
+  slower and used more peak memory than the 940.10-second shared-pool run, so
+  the checked-in feature retains STWO proof-kernel parallelism alongside the
+  bounded outer proof waves. Source inspection found no separate Rayon pool.
+- `cargo test --release -p recursion --features parallel --test air_dsl_guard -- --nocapture`:
+  all 5 roster, owner-policy, direct-DSL, and component-route guards passed.
+- `cargo check --release -p recursion --features parallel`,
+  `cargo test --release -p recursion --features parallel --no-run`, and
+  `cargo clippy --release -p recursion --all-targets --features parallel --no-deps -- -D warnings`:
+  passed.
+- `sg -p 'impl FrameworkEval for $TYPE { $$$BODY }' -l rust --json=compact crates/recursion/src crates/air/src/schema.rs crates/air/src/poseidon2.rs`:
+  zero matches.
+- `rg -n 'define_component_tables!|define_component_tables' crates/recursion/src crates/air/src/schema.rs crates/air/src/poseidon2.rs`:
+  zero matches.
+- `prek run --all-files`: passed.
 
 ## Project finish line
 

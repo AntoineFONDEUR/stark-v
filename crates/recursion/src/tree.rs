@@ -675,16 +675,12 @@ mod tests {
             vec![run_result],
         )
         .expect("the one-segment guest produces a complete recursion tree");
-        let (root_statement, proof) = tree.into_parts();
-        assert!(
-            crate::root::verify_recursive_root(
-                &profile,
-                &preprocessing,
-                root_statement.complete_execution(),
-                proof,
-            )
-            .is_ok()
-        );
+        assert!(verified_tree_has_segment_count(
+            &profile,
+            &preprocessing,
+            tree,
+            1,
+        ));
     }
 
     #[test]
@@ -769,12 +765,13 @@ mod tests {
                     && span.first_cycle() == 0
                     && span.cycle_count() == statement.job().total_cycles()
             });
+        let conformance = crate::root::recursive_root_conformance(profile, &proof);
         expected_span
-            && crate::recursive_proof::verify_recursion_proof(
+            && conformance.is_ok_and(crate::root::tests::matches_frozen_root_conformance)
+            && crate::root::verify_recursive_root(
                 profile,
                 preprocessing,
-                profile.manifest().protocol_id(),
-                statement,
+                root_statement.complete_execution(),
                 proof,
             )
             .is_ok()

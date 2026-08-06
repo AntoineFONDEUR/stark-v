@@ -23,8 +23,9 @@ segment leaves, canonical empty leaves, and binary parents that verify two
 recursion proofs. Its level-ordered tree driver proves finalized VM segments,
 adds canonical padding, and returns only one root statement and root proof. The
 application root verifier binds that proof to a caller-supplied complete
-execution. Checked constant-size conformance remains unfinished, so no code
-should describe that property as finished.
+execution. Every successfully produced canonical root proof encodes through the
+frozen 3,459,396-byte proof wire and uses the same profile-owned 4,937-step
+verifier plan.
 
 The implemented foundation includes:
 
@@ -87,7 +88,10 @@ including canonical padding for the three-segment tree.
 proof statement to be the canonical complete root, compares the expected
 protocol, program, initial and final machine states, public input, public
 output, and total cycles, then runs the manifest-bound recursion verifier.
-Constant-size conformance remains unfinished.
+Release conformance tests encode and verify actual segment-leaf, binary, and
+padded-binary roots. The fixed wire type and verifier-plan digest are
+independent of the executed segment count; REC-008 separately verifies the
+larger supported 4- and 8-segment trees.
 
 The live universal roster has 36 components. Every recursion-local component is
 authored directly through `define_air_fns!`; Poseidon2 uses the same macro, and

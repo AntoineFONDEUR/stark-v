@@ -29,8 +29,8 @@ The main workspace boundaries are:
   proving and verification for segment leaves, empty leaves, and two-child
   binary parents, with a level-ordered driver that reduces a segmented run to
   one root statement and proof and an application verifier that binds that sole
-  proof to the expected complete execution; checked constant-size conformance
-  remains unfinished;
+  proof to the expected complete execution; the frozen profile encodes each
+  produced root in an exact 3,459,396-byte wire with one verifier schedule;
 - `sdk` and `guest-lib`: host and guest interfaces.
 
 ### Memory Layout
@@ -54,8 +54,8 @@ Address Range           Region          Size
 
 - [RV32IM AIR architecture](docs/airs.md) describes the active system and points
   to source truth.
-- [Recursive proving](docs/recursion.md) distinguishes current components from
-  the remaining constant-size conformance work.
+- [Recursive proving](docs/recursion.md) describes the current root API,
+  constant-size conformance, and soundness invariants.
 - [Project roadmap](docs/roadmap.md) is the dependency-ordered finish-line task
   list and classifies current versus planned documents.
 - [Felt AIR compiler](docs/felt-air-compiler.md),

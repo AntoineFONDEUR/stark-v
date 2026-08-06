@@ -3,7 +3,8 @@
 //! Each trusted relation-challenge operation consumes its complete eight-word
 //! transcript draw atomically. The same words are then copied into distinct
 //! verifier-owned scopes for public LogUp arithmetic and AIR evaluation, so a
-//! downstream circuit cannot reuse one scope twice or exchange child lanes.
+//! downstream circuit cannot exchange child lanes. Segment AIR challenges own
+//! one VM-composition use and one Poseidon-composition use.
 
 use core::fmt;
 
@@ -291,6 +292,8 @@ stwo_macros::define_air_fns! {
     ) {
         let mode_active =
             row_mask * (segment_mask * segment_active + binary_mask * binary_active);
+        // Segment challenges feed both constituent AIR-composition circuits.
+        let air_uses = enabler * (1 + segment_mask);
         let inactive = 1 - enabler;
 
         constrain enabler - mode_active;
@@ -308,35 +311,35 @@ stwo_macros::define_air_fns! {
             output_0, output_1, output_2, output_3,
             output_4, output_5, output_6, output_7,
         );
-        emit(enabler) word(verifier_id, air_scope, challenge, 0, output_0);
+        emit(air_uses) word(verifier_id, air_scope, challenge, 0, output_0);
         emit(enabler * public_logup_mask) word(
             verifier_id, public_scope, challenge, 0, output_0,
         );
-        emit(enabler) word(verifier_id, air_scope, challenge, 1, output_1);
+        emit(air_uses) word(verifier_id, air_scope, challenge, 1, output_1);
         emit(enabler * public_logup_mask) word(
             verifier_id, public_scope, challenge, 1, output_1,
         );
-        emit(enabler) word(verifier_id, air_scope, challenge, 2, output_2);
+        emit(air_uses) word(verifier_id, air_scope, challenge, 2, output_2);
         emit(enabler * public_logup_mask) word(
             verifier_id, public_scope, challenge, 2, output_2,
         );
-        emit(enabler) word(verifier_id, air_scope, challenge, 3, output_3);
+        emit(air_uses) word(verifier_id, air_scope, challenge, 3, output_3);
         emit(enabler * public_logup_mask) word(
             verifier_id, public_scope, challenge, 3, output_3,
         );
-        emit(enabler) word(verifier_id, air_scope, challenge, 4, output_4);
+        emit(air_uses) word(verifier_id, air_scope, challenge, 4, output_4);
         emit(enabler * public_logup_mask) word(
             verifier_id, public_scope, challenge, 4, output_4,
         );
-        emit(enabler) word(verifier_id, air_scope, challenge, 5, output_5);
+        emit(air_uses) word(verifier_id, air_scope, challenge, 5, output_5);
         emit(enabler * public_logup_mask) word(
             verifier_id, public_scope, challenge, 5, output_5,
         );
-        emit(enabler) word(verifier_id, air_scope, challenge, 6, output_6);
+        emit(air_uses) word(verifier_id, air_scope, challenge, 6, output_6);
         emit(enabler * public_logup_mask) word(
             verifier_id, public_scope, challenge, 6, output_6,
         );
-        emit(enabler) word(verifier_id, air_scope, challenge, 7, output_7);
+        emit(air_uses) word(verifier_id, air_scope, challenge, 7, output_7);
         emit(enabler * public_logup_mask) word(
             verifier_id, public_scope, challenge, 7, output_7,
         );
@@ -396,7 +399,7 @@ pub fn push_relation_challenges(
     witness: UniversalTranscriptWitness<'_>,
 ) -> Result<(), RelationChallengeError> {
     let (segment, left, right) = match witness {
-        UniversalTranscriptWitness::Segment(execution) => (Some(execution), None, None),
+        UniversalTranscriptWitness::Segment { vm, .. } => (Some(vm), None, None),
         UniversalTranscriptWitness::Binary { left, right } => (None, Some(left), Some(right)),
         UniversalTranscriptWitness::Empty => (None, None, None),
     };
@@ -534,13 +537,18 @@ mod tests {
 
     fn assert_constraints(kind: ProofKind, tamper_inactive: bool) {
         let (vm, recursion) = plans();
+        let poseidon2 = plan_for_schema(VerifierSchema::Poseidon2, 1);
         let preprocessing = RelationChallengePreprocessed::new(&vm, &recursion)
             .expect("fixture plans have canonical relation draws");
         let segment = recording_execution_for(&vm, 1);
+        let poseidon2_segment = recording_execution_for(&poseidon2, 1);
         let left = recording_execution_for(&recursion, 1);
         let right = recording_execution_for(&recursion, 2);
         let witness = match kind {
-            ProofKind::SegmentLeaf => UniversalTranscriptWitness::Segment(&segment),
+            ProofKind::SegmentLeaf => UniversalTranscriptWitness::Segment {
+                vm: &segment,
+                poseidon2: &poseidon2_segment,
+            },
             ProofKind::BinaryNode => UniversalTranscriptWitness::Binary {
                 left: &left,
                 right: &right,
@@ -584,14 +592,19 @@ mod tests {
 
     fn bridge_sum(swap_verifier: bool) -> QM31 {
         let (vm, recursion) = plans();
+        let poseidon2 = plan_for_schema(VerifierSchema::Poseidon2, 1);
         let preprocessing = RelationChallengePreprocessed::new(&vm, &recursion)
             .expect("fixture plans have canonical relation draws");
         let execution = recording_execution_for(&vm, 1);
+        let poseidon2_execution = recording_execution_for(&poseidon2, 1);
         let mut table = RelationChallengeTable::new();
         push_relation_challenges(
             &mut table,
             &preprocessing,
-            UniversalTranscriptWitness::Segment(&execution),
+            UniversalTranscriptWitness::Segment {
+                vm: &execution,
+                poseidon2: &poseidon2_execution,
+            },
         )
         .expect("fixture challenge draws materialize");
 
@@ -663,10 +676,15 @@ mod tests {
                 let scopes = if row.public_logup_mask == 1 {
                     [
                         Some(AIR_EVALUATION_CHALLENGE_SCOPE),
+                        Some(AIR_EVALUATION_CHALLENGE_SCOPE),
                         Some(VM_PUBLIC_LOGUP_CHALLENGE_SCOPE),
                     ]
                 } else {
-                    [Some(AIR_EVALUATION_CHALLENGE_SCOPE), None]
+                    [
+                        Some(AIR_EVALUATION_CHALLENGE_SCOPE),
+                        Some(AIR_EVALUATION_CHALLENGE_SCOPE),
+                        None,
+                    ]
                 };
                 scopes
                     .into_iter()
@@ -705,7 +723,7 @@ mod tests {
     }
 
     #[rstest]
-    fn transcript_draws_close_into_both_challenge_scopes() {
+    fn transcript_draws_close_into_all_segment_challenge_consumers() {
         assert!(bridge_sum(false).is_zero());
     }
 

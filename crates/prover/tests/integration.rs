@@ -160,7 +160,7 @@ fn test_verify_rejects_mismatched_preprocessing_commitment() {
     let proof = prove_rv32im(run_result, config, &preprocessing);
 
     let mut supplied_preprocessing = preprocessing.clone();
-    let mut mismatched_root = proof.stark_proof.commitments[0];
+    let mut mismatched_root = proof.vm.stark_proof.commitments[0];
     mismatched_root.0[0] ^= 1;
     supplied_preprocessing.merkle_layers[0][0] = mismatched_root;
 
@@ -188,6 +188,7 @@ fn test_verify_rejects_tampered_program_root_tail() {
     let preprocessing = prover::preprocess(config);
     let mut proof = prove_rv32im(run_result, config, &preprocessing);
     proof
+        .vm
         .public_data
         .program_root
         .as_mut()
@@ -1128,7 +1129,7 @@ fn test_prove_verify_poseidon2_channel() {
         PcsConfig::default(),
         &preprocessing,
     );
-    assert!(proof.stark_aux.is_none());
+    assert!(proof.vm.stark_aux.is_none() && proof.poseidon2.stark_aux.is_none());
     verify_rv32im_with_channel::<Poseidon2M31MerkleChannel>(
         proof,
         PcsConfig::default(),

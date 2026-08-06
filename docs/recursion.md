@@ -24,39 +24,45 @@ recursion proofs. Its level-ordered tree driver proves finalized VM segments,
 adds canonical padding, and returns only one root statement and root proof. The
 application root verifier binds that proof to a caller-supplied complete
 execution. Every successfully produced canonical root proof encodes through the
-frozen 3,459,396-byte proof wire and uses the same profile-owned 4,937-step
+frozen 3,479,096-byte proof wire and uses the same profile-owned 4,943-step
 verifier plan.
 
 The implemented foundation includes:
 
 - a canonical protocol manifest and fixed-width proof wire;
-- one frozen protocol profile without a version suffix, derived from both
-  generated AIR rosters, with 193 FRI queries, 4 KiB public-input and
-  public-output capacities, and an exact 3,459,396-byte universal proof wire;
-- fixed VM trace generation that pads ordinary instruction and access tables to
-  log size 6 and the finalized program, memory, Merkle, and Poseidon2 tables to
-  log size 11, rejecting a segment instead of changing verifier-owned geometry;
-- checked adaptation of an in-memory Poseidon VM proof into the fixed leaf wire,
-  including expansion of deduplicated query values, Merkle siblings, and FRI
-  cosets from prover-retained authentication data;
+- one frozen protocol profile without a version suffix, derived from the VM,
+  detached Poseidon2, and universal generated AIR programs, with 193 FRI
+  queries, 4 KiB public-input and public-output capacities, and an exact
+  3,479,096-byte universal proof wire;
+- fixed segment trace generation that pads ordinary VM instruction and access
+  tables to log size 6, the finalized program, memory, and Merkle tables to log
+  size 11, and the detached Poseidon2 table to its independent fixed geometry,
+  rejecting a segment instead of changing verifier-owned geometry;
+- checked adaptation of one complete in-memory `SegmentProof` into the fixed
+  leaf wire, including separate VM and Poseidon2 proof lanes, their joint
+  interaction nonce and shared-relation sum, and expansion of deduplicated query
+  values, Merkle siblings, and FRI cosets from prover-retained authentication
+  data;
 - typed complete-execution, job, slot, executed-span, and empty-span statements;
 - a fixed verifier control plan shared by the manifest-bound recursion-targeted
-  prover, fixed verifier execution, and AIR tables; ordinary VM proofs retain
-  the public prover's native transcript;
+  prover, fixed verifier execution, and AIR tables; ordinary segment proving
+  retains the public prover's native constituent transcripts;
 - canonical transcript recording, payload ownership, digest-state chaining,
   proof-of-work checks, and relation-challenge binding;
 - VM public-claim decoding and hashing;
 - statement semantics for segment leaves, empty leaves, and binary folds;
-- VM AIR composition evaluation generated from the prover component roster;
+- VM AIR composition evaluation generated from the prover component roster and
+  independent composition evaluation for the detached DSL-owned Poseidon2 AIR;
 - DEEP quotient, trace-Merkle, FRI-Merkle, FRI-fold, last-layer, and query
   position constraints;
 - deterministic segment-leaf and canonical empty-leaf witness assembly across
   all 36 universal components, including preprocessing, committed traces,
   interactions, public relation terms, exact global LogUp closure, and direct
   constraint acceptance;
-- complete segment-leaf replay through VM claim semantics, AIR composition,
-  trace and FRI authentication, DEEP quotient evaluation, both proofs of work,
-  and the last-layer polynomial check;
+- complete segment-leaf replay of both constituent proofs through VM claim
+  semantics, both AIR compositions, the joint relation draw and exact shared-sum
+  cancellation, trace and FRI authentication, DEEP quotient evaluation, proofs
+  of work, and the last-layer polynomial checks;
 - proof-free empty-leaf assembly that binds one checked height-zero padding
   statement and materializes every inactive verifier lane as zero;
 - manifest-bound outer preprocessing, proving, and verification for segment,
@@ -79,19 +85,20 @@ Segment, empty, and binary witnesses produce recursion proofs that bind the
 expected protocol, statement, component claims, interaction claims, and STWO
 proof. A real recursion proof can be encoded and verified as either binary
 child. Swapped, duplicated, gapped, overlapping, and job-mismatched child pairs
-are rejected at the unique fold boundary. Release-mode end-to-end tests have
-produced and verified roots for runs with 1, 2, 3, 4, and 8 executed segments,
-including canonical padding for the three-segment tree.
+are rejected at the unique fold boundary. The earlier integrated-Poseidon
+profile produced and verified roots for runs with 1, 2, 3, 4, and 8 executed
+segments. The active split-proof profile has revalidated a real one-segment
+root; its binary, padded, and larger-tree reruns remain PRE-001 work.
 
 `root::verify_recursive_root` accepts a segmentation-free
 `CompleteExecutionStatement` and exactly one `RecursionProof`. It requires the
 proof statement to be the canonical complete root, compares the expected
 protocol, program, initial and final machine states, public input, public
-output, and total cycles, then runs the manifest-bound recursion verifier.
-Release conformance tests encode and verify actual segment-leaf, binary, and
-padded-binary roots. The fixed wire type and verifier-plan digest are
-independent of the executed segment count; REC-008 separately verifies the
-larger supported 4- and 8-segment trees.
+output, and total cycles, then runs the manifest-bound recursion verifier. The
+active split-proof profile encodes and verifies an actual segment-leaf root. Its
+fixed wire type and verifier-plan digest are independent of the executed segment
+count by construction; PRE-001 still requires real binary and padded root
+conformance before that profile is complete.
 
 The live universal roster has 36 components. Every recursion-local component is
 authored directly through `define_air_fns!`; Poseidon2 uses the same macro, and
@@ -134,8 +141,9 @@ tree shapes.
 
 The proof kind selects one of three branches:
 
-- `SegmentLeaf`: verify one stark-v VM proof and derive its height-zero
-  statement;
+- `SegmentLeaf`: verify one segment artifact containing separate VM and
+  Poseidon2 STARK proofs, require their joint transcript and shared-relation
+  sums to match, and derive its height-zero statement;
 - `BinaryNode`: verify two proofs produced by this recursion AIR and fold their
   statements;
 - `EmptyLeaf`: prove the canonical unused slot required to complete the tree.

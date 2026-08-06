@@ -21,7 +21,9 @@ The main workspace boundaries are:
 - `air`: canonical field words, instruction decoding, VM AIR schema,
   preprocessed tables, and Poseidon2;
 - `runner`: RV32IM execution, memory layout, trace filling, and segmentation;
-- `prover`: preprocessing and single-segment STARK proving and verification;
+- `prover`: preprocessing plus proving and verification of each complete segment
+  artifact, containing separate VM and Poseidon2 STARK proofs bound by one joint
+  interaction transcript;
 - `continuation`: host-side verification of a non-empty chain containing one
   proof per segment; proof size and verification work are linear in segment
   count;
@@ -30,7 +32,7 @@ The main workspace boundaries are:
   binary parents, with a level-ordered driver that reduces a segmented run to
   one root statement and proof and an application verifier that binds that sole
   proof to the expected complete execution; the frozen profile encodes each
-  produced root in an exact 3,459,396-byte wire with one verifier schedule;
+  produced root in an exact 3,479,096-byte wire with one verifier schedule;
 - `sdk` and `guest-lib`: host and guest interfaces.
 
 ### Memory Layout
@@ -60,8 +62,8 @@ Address Range           Region          Size
   list and classifies current versus planned documents.
 - [Felt AIR compiler](docs/felt-air-compiler.md),
   [hash precompiles](docs/precompiles.md), and
-  [syscalls/output journal](docs/syscalls.md) are forward designs with explicit
-  implementation status.
+  [syscalls/output journal](docs/syscalls.md) describe active or planned
+  capabilities with explicit implementation status.
 
 ## Usage
 

@@ -320,7 +320,7 @@ mod tests {
                         word_index,
                     } => verifier_input_relations.input_word.combine(&[
                         M31::from(SEGMENT_VERIFIER_ID),
-                        M31::from(VerifierInputKind::VmAirClaimedSum.as_u32()),
+                        M31::from(VerifierInputKind::AirClaimedSum.as_u32()),
                         M31::from(item_index),
                         M31::from(word_index),
                         value,

@@ -537,7 +537,9 @@ mod tests {
             super::super::vm_public_logup_control_air::eval_for_proof_kind(
                 LOG_SIZE,
                 KIND,
-                relations.control.clone(),
+                &relations.control,
+                &relations.verifier_input,
+                &relations.verifier_randomness,
             ),
         );
         usage_of(

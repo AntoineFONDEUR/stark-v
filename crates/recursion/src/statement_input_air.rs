@@ -26,7 +26,8 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::{Relation, relation};
 
 use super::control_air::{
-    LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
+    LEFT_RECURSION_VERIFIER_ID, POSEIDON2_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID,
+    SEGMENT_VERIFIER_ID,
 };
 use super::kernel::VerifierStep;
 use super::protocol::CanonicalWords;
@@ -45,7 +46,9 @@ const BINARY_MASK_COLUMN: usize = 2;
 const VERIFIER_ID_COLUMN: usize = 3;
 const STATEMENT_SCOPE_COLUMN: usize = 4;
 const WORD_INDEX_COLUMN: usize = 5;
-const PREPROCESSED_COLUMN_COUNT: usize = 6;
+const STATEMENT_USE_COUNT_COLUMN: usize = 6;
+const VM_CLAIM_MASK_COLUMN: usize = 7;
+const PREPROCESSED_COLUMN_COUNT: usize = 8;
 
 pub const SEGMENT_STATEMENT_SCOPE: u32 = 0;
 pub const LEFT_STATEMENT_SCOPE: u32 = 1;
@@ -83,9 +86,11 @@ struct PreprocessedRow {
     verifier_id: u32,
     statement_scope: u32,
     word_index: u32,
+    statement_use_count: u32,
+    vm_claim_mask: u32,
 }
 
-/// Fixed statement-word routing for one VM lane and two recursion lanes.
+/// Fixed statement-word routing for two segment lanes and two recursion lanes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StatementInputPreprocessed {
     log_size: u32,
@@ -95,10 +100,11 @@ pub struct StatementInputPreprocessed {
 impl StatementInputPreprocessed {
     pub fn new(calls: &TranscriptCallPreprocessed) -> Result<Self, StatementInputError> {
         validate_statement_layout("VM", calls.vm_layout())?;
+        validate_statement_layout("Poseidon2", calls.poseidon2_layout())?;
         validate_statement_layout("recursion", calls.recursion_layout())?;
 
         let row_count = SPAN_STATEMENT_CANONICAL_WORDS
-            .checked_mul(3)
+            .checked_mul(4)
             .ok_or(StatementInputError::RowCountOverflow)?;
         let padded_rows = row_count
             .checked_next_power_of_two()
@@ -116,6 +122,17 @@ impl StatementInputPreprocessed {
             SEGMENT_STATEMENT_SCOPE,
             1,
             0,
+            1,
+            1,
+        )?;
+        append_lane_rows(
+            &mut rows,
+            POSEIDON2_VERIFIER_ID,
+            SEGMENT_STATEMENT_SCOPE,
+            1,
+            0,
+            0,
+            0,
         )?;
         append_lane_rows(
             &mut rows,
@@ -123,6 +140,8 @@ impl StatementInputPreprocessed {
             LEFT_STATEMENT_SCOPE,
             0,
             1,
+            2,
+            0,
         )?;
         append_lane_rows(
             &mut rows,
@@ -130,6 +149,8 @@ impl StatementInputPreprocessed {
             RIGHT_STATEMENT_SCOPE,
             0,
             1,
+            2,
+            0,
         )?;
         Ok(Self { log_size, rows })
     }
@@ -140,7 +161,7 @@ impl StatementInputPreprocessed {
 
     pub const fn active_word_count(kind: ProofKind) -> usize {
         match kind {
-            ProofKind::SegmentLeaf => SPAN_STATEMENT_CANONICAL_WORDS,
+            ProofKind::SegmentLeaf => 2 * SPAN_STATEMENT_CANONICAL_WORDS,
             ProofKind::BinaryNode => 2 * SPAN_STATEMENT_CANONICAL_WORDS,
             ProofKind::EmptyLeaf => 0,
         }
@@ -168,6 +189,8 @@ impl StatementInputPreprocessed {
             columns[VERIFIER_ID_COLUMN][index] = row.verifier_id;
             columns[STATEMENT_SCOPE_COLUMN][index] = row.statement_scope;
             columns[WORD_INDEX_COLUMN][index] = row.word_index;
+            columns[STATEMENT_USE_COUNT_COLUMN][index] = row.statement_use_count;
+            columns[VM_CLAIM_MASK_COLUMN][index] = row.vm_claim_mask;
         }
         let domain = CanonicCoset::new(self.log_size).circle_domain();
         columns
@@ -209,6 +232,8 @@ fn append_lane_rows(
     statement_scope: u32,
     segment_mask: u32,
     binary_mask: u32,
+    statement_use_count: u32,
+    vm_claim_mask: u32,
 ) -> Result<(), StatementInputError> {
     for word_index in 0..SPAN_STATEMENT_CANONICAL_WORDS {
         rows.push(PreprocessedRow {
@@ -218,6 +243,8 @@ fn append_lane_rows(
             statement_scope,
             word_index: u32::try_from(word_index)
                 .map_err(|_| StatementInputError::WordIndexOutOfRange { word_index })?,
+            statement_use_count,
+            vm_claim_mask,
         });
     }
     Ok(())
@@ -257,6 +284,8 @@ stwo_macros::define_air_fns! {
         verifier_id: "recursion_statement_input_verifier_id",
         statement_scope: "recursion_statement_input_scope",
         word_index: "recursion_statement_input_word_index",
+        statement_use_count: "recursion_statement_input_statement_use_count",
+        vm_claim_mask: "recursion_statement_input_vm_claim_mask",
     },
     embedded_params: [
         segment_active, binary_active, statement_input_kind, input_item, vm_claim_scope,
@@ -268,6 +297,7 @@ stwo_macros::define_air_fns! {
     fn statement_input(
         value,
         row_mask, segment_mask, binary_mask, verifier_id, statement_scope, word_index,
+        statement_use_count, vm_claim_mask,
         segment_active, binary_active, statement_input_kind, input_item, vm_claim_scope,
     ) {
         let active = segment_mask * segment_active + binary_mask * binary_active;
@@ -278,10 +308,10 @@ stwo_macros::define_air_fns! {
         consume(active) input_word(
             verifier_id, statement_input_kind, input_item, word_index, value,
         );
-        emit(active + binary_mask * binary_active) statement_word(
+        emit(active * statement_use_count) statement_word(
             statement_scope, word_index, value,
         );
-        emit(segment_mask * segment_active) statement_word(
+        emit(active * vm_claim_mask) statement_word(
             vm_claim_scope, word_index, value,
         );
 
@@ -360,21 +390,24 @@ pub fn push_statement_inputs(
     preprocessed: &StatementInputPreprocessed,
     witness: StatementInputWitness<'_>,
 ) -> Result<(), StatementInputError> {
-    let (segment, left, right) = match witness {
+    let (segment, poseidon2, left, right) = match witness {
         StatementInputWitness::Segment(statement) => {
-            (Some(canonical_words(statement)?), None, None)
+            let words = canonical_words(statement)?;
+            (Some(words), Some(words), None, None)
         }
         StatementInputWitness::Binary { left, right } => (
+            None,
             None,
             Some(canonical_words(left)?),
             Some(canonical_words(right)?),
         ),
-        StatementInputWitness::Empty => (None, None, None),
+        StatementInputWitness::Empty => (None, None, None, None),
     };
 
     for row in &preprocessed.rows {
         let words = match row.verifier_id {
             SEGMENT_VERIFIER_ID => segment.as_ref(),
+            POSEIDON2_VERIFIER_ID => poseidon2.as_ref(),
             LEFT_RECURSION_VERIFIER_ID => left.as_ref(),
             RIGHT_RECURSION_VERIFIER_ID => right.as_ref(),
             verifier_id => return Err(StatementInputError::UnknownVerifierId { verifier_id }),
@@ -588,6 +621,7 @@ mod tests {
     fn preprocessing() -> StatementInputPreprocessed {
         let calls = TranscriptCallPreprocessed::new(
             &plan(VerifierSchema::Vm),
+            &plan(VerifierSchema::Poseidon2),
             &plan(VerifierSchema::Recursion),
         )
         .expect("fixture plans occupy their canonical transcript lanes");

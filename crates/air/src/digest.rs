@@ -181,6 +181,10 @@ semantic_digest!(
     "Commitment to the fixed VM AIR evaluation program."
 );
 semantic_digest!(
+    Poseidon2AirProgramDigest,
+    "Commitment to the detached Poseidon2 AIR evaluation program."
+);
+semantic_digest!(
     RecursionAirProgramDigest,
     "Commitment to the fixed recursion AIR evaluation program."
 );

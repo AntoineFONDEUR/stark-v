@@ -19,6 +19,7 @@ use super::protocol::{
 
 const VM_PLAN_HASH_DOMAIN: u16 = 0x564d;
 const RECURSION_PLAN_HASH_DOMAIN: u16 = 0x5243;
+const POSEIDON2_PLAN_HASH_DOMAIN: u16 = 0x5032;
 const PLAN_ENCODING_TAG: u16 = 0x5001;
 const QUERY_WORDS_PER_DRAW: usize = 8;
 const COMMITMENT_TREE_COUNT: usize = 4;
@@ -30,6 +31,7 @@ const MAX_PROGRAM_PHASE_COUNT: u32 = 1_000_000;
 pub enum VerifierSchema {
     Vm = 1,
     Recursion = 2,
+    Poseidon2 = 3,
 }
 
 impl VerifierSchema {
@@ -37,6 +39,7 @@ impl VerifierSchema {
         match self {
             Self::Vm => VM_PLAN_HASH_DOMAIN,
             Self::Recursion => RECURSION_PLAN_HASH_DOMAIN,
+            Self::Poseidon2 => POSEIDON2_PLAN_HASH_DOMAIN,
         }
     }
 }
@@ -118,6 +121,11 @@ pub enum VerifierStep {
         height: u32,
     },
     AbsorbPublicClaim,
+    DrawInteractionSeed,
+    AbsorbJointInteractionSeeds,
+    AbsorbJointInteractionNonce {
+        bits: u32,
+    },
     VerifyAndAbsorbInteractionPow {
         bits: u32,
     },
@@ -132,6 +140,9 @@ pub enum VerifierStep {
     AccumulatePublicLogupTerm {
         term: u32,
     },
+    AssertVmSharedRelation,
+    AssertSegmentSharedRelationZero,
+    AbsorbSharedRelationSum,
     AssertGlobalLogupZero,
     EvaluateAirInstruction {
         instruction: u32,
@@ -304,6 +315,12 @@ impl VerifierStep {
             Self::VerifyLastLayer { query } => step!(26, query),
             Self::CloseRelation { relation } => step!(27, relation),
             Self::Complete => step!(28),
+            Self::DrawInteractionSeed => step!(29),
+            Self::AbsorbJointInteractionSeeds => step!(30),
+            Self::AbsorbJointInteractionNonce { bits } => step!(31, bits),
+            Self::AssertVmSharedRelation => step!(32),
+            Self::AssertSegmentSharedRelationZero => step!(33),
+            Self::AbsorbSharedRelationSum => step!(34),
         }
     }
 }
@@ -346,21 +363,51 @@ impl VerifierControlPlan {
             commitment_step(shape, CommitmentRound::Preprocessed, 0),
             commitment_step(shape, CommitmentRound::Main, 1),
             VerifierStep::AbsorbPublicClaim,
-            VerifierStep::VerifyAndAbsorbInteractionPow {
-                bits: validated_pcs.interaction_pow_bits(),
-            },
         ]);
-        for challenge in 0..spec.relation_challenge_count {
-            steps.push(VerifierStep::DrawRelationChallenge { challenge });
+        match spec.schema {
+            VerifierSchema::Vm => steps.extend([
+                VerifierStep::DrawInteractionSeed,
+                VerifierStep::AbsorbJointInteractionSeeds,
+                VerifierStep::VerifyAndAbsorbInteractionPow {
+                    bits: validated_pcs.interaction_pow_bits(),
+                },
+            ]),
+            VerifierSchema::Poseidon2 => steps.extend([
+                VerifierStep::DrawInteractionSeed,
+                VerifierStep::AbsorbJointInteractionSeeds,
+                VerifierStep::AbsorbJointInteractionNonce {
+                    bits: validated_pcs.interaction_pow_bits(),
+                },
+            ]),
+            VerifierSchema::Recursion => {
+                steps.push(VerifierStep::VerifyAndAbsorbInteractionPow {
+                    bits: validated_pcs.interaction_pow_bits(),
+                });
+            }
+        }
+        if spec.schema != VerifierSchema::Poseidon2 {
+            for challenge in 0..spec.relation_challenge_count {
+                steps.push(VerifierStep::DrawRelationChallenge { challenge });
+            }
         }
         for term in 0..spec.public_logup_term_count {
             steps.push(VerifierStep::AccumulatePublicLogupTerm { term });
         }
-        steps.push(VerifierStep::AssertGlobalLogupZero);
+        match spec.schema {
+            VerifierSchema::Vm => steps.extend([
+                VerifierStep::AssertVmSharedRelation,
+                VerifierStep::AssertSegmentSharedRelationZero,
+            ]),
+            VerifierSchema::Recursion => steps.push(VerifierStep::AssertGlobalLogupZero),
+            VerifierSchema::Poseidon2 => {}
+        }
+        steps.push(VerifierStep::AbsorbClaimedSums {
+            count: shape.claimed_sum_count.as_u32(),
+        });
+        if spec.schema == VerifierSchema::Vm {
+            steps.push(VerifierStep::AbsorbSharedRelationSum);
+        }
         steps.extend([
-            VerifierStep::AbsorbClaimedSums {
-                count: shape.claimed_sum_count.as_u32(),
-            },
             commitment_step(shape, CommitmentRound::Interaction, 2),
             VerifierStep::DrawCompositionRandomness,
             commitment_step(shape, CommitmentRound::Composition, 3),
@@ -505,6 +552,7 @@ pub struct BoundVerifierPlans<
         RECURSION_FRI_LAYERS,
     >,
     vm: VerifierControlPlan,
+    poseidon2: VerifierControlPlan,
     recursion: VerifierControlPlan,
 }
 
@@ -535,6 +583,7 @@ impl<
             RECURSION_FRI_LAYERS,
         >,
         vm: VerifierControlPlan,
+        poseidon2: VerifierControlPlan,
         recursion: VerifierControlPlan,
     ) -> Result<Self, PlanBindingError> {
         if vm.schema() != VerifierSchema::Vm {
@@ -547,6 +596,12 @@ impl<
             return Err(PlanBindingError::SchemaMismatch {
                 slot: VerifierSchema::Recursion,
                 actual: recursion.schema(),
+            });
+        }
+        if poseidon2.schema() != VerifierSchema::Poseidon2 {
+            return Err(PlanBindingError::SchemaMismatch {
+                slot: VerifierSchema::Poseidon2,
+                actual: poseidon2.schema(),
             });
         }
         if !vm.matches_profile(
@@ -586,9 +641,19 @@ impl<
                 actual: actual_recursion,
             });
         }
+        let expected_poseidon2 = manifest.manifest().poseidon2_air_program.into_digest();
+        let actual_poseidon2 = poseidon2.digest();
+        if actual_poseidon2 != expected_poseidon2 {
+            return Err(PlanBindingError::AirProgramDigestMismatch {
+                schema: VerifierSchema::Poseidon2,
+                expected: expected_poseidon2,
+                actual: actual_poseidon2,
+            });
+        }
         Ok(Self {
             manifest,
             vm,
+            poseidon2,
             recursion,
         })
     }
@@ -612,6 +677,10 @@ impl<
 
     pub const fn recursion(&self) -> &VerifierControlPlan {
         &self.recursion
+    }
+
+    pub const fn poseidon2(&self) -> &VerifierControlPlan {
+        &self.poseidon2
     }
 }
 
@@ -666,6 +735,9 @@ fn append_trace_openings<const N_TABLES: usize, const N_TREES: usize, const N_FR
     n_queries: usize,
 ) -> Result<(), VerifierPlanError> {
     for tree in 0..N_TREES {
+        if shape.tree_heights[tree] == M31Word::ZERO {
+            continue;
+        }
         for query in 0..n_queries {
             steps.push(VerifierStep::VerifyTraceMerklePath {
                 tree: index_u32("commitment tree", tree)?,
@@ -869,8 +941,8 @@ impl std::error::Error for PlanBindingError {}
 #[cfg(test)]
 mod tests {
     use air::digest::{
-        HashSuiteDigest, RecursionAirProgramDigest, RecursionPreprocessingDigest,
-        VmAirProgramDigest, VmPreprocessingDigest,
+        HashSuiteDigest, Poseidon2AirProgramDigest, RecursionAirProgramDigest,
+        RecursionPreprocessingDigest, VmAirProgramDigest, VmPreprocessingDigest,
     };
     use rstest::rstest;
 
@@ -936,6 +1008,7 @@ mod tests {
 
     fn manifest(
         vm: &VerifierControlPlan,
+        poseidon2: &VerifierControlPlan,
         recursion: &VerifierControlPlan,
     ) -> ProtocolManifest<2, 4, 4, 2, 4, 4> {
         ProtocolManifest {
@@ -944,6 +1017,7 @@ mod tests {
             vm_preprocessing: VmPreprocessingDigest::from(digest(20)),
             recursion_preprocessing: RecursionPreprocessingDigest::from(digest(30)),
             vm_air_program: VmAirProgramDigest::from(vm.digest()),
+            poseidon2_air_program: Poseidon2AirProgramDigest::from(poseidon2.digest()),
             recursion_air_program: RecursionAirProgramDigest::from(recursion.digest()),
             vm_pcs: pcs(),
             recursion_pcs: pcs(),
@@ -1062,8 +1136,9 @@ mod tests {
     #[rstest]
     fn plan_digests_bind_to_the_validated_manifest() {
         let vm = plan(VerifierSchema::Vm);
+        let poseidon2 = plan(VerifierSchema::Poseidon2);
         let recursion = plan(VerifierSchema::Recursion);
-        let manifest = manifest(&vm, &recursion);
+        let manifest = manifest(&vm, &poseidon2, &recursion);
         let protocol_id = manifest.protocol_id();
         assert_eq!(
             TestBoundPlans::new(
@@ -1071,6 +1146,7 @@ mod tests {
                     .validate()
                     .expect("the fixture manifest has valid PCS shapes"),
                 vm,
+                poseidon2,
                 recursion,
             )
             .map(|bound| bound.manifest().protocol_id()),
@@ -1081,10 +1157,11 @@ mod tests {
     #[rstest]
     fn substituted_air_program_digest_is_rejected() {
         let vm = plan(VerifierSchema::Vm);
+        let poseidon2 = plan(VerifierSchema::Poseidon2);
         let recursion = plan(VerifierSchema::Recursion);
         let actual = vm.digest();
         let expected = digest(200);
-        let mut manifest = manifest(&vm, &recursion);
+        let mut manifest = manifest(&vm, &poseidon2, &recursion);
         manifest.vm_air_program = VmAirProgramDigest::from(expected);
         assert_eq!(
             TestBoundPlans::new(
@@ -1092,6 +1169,7 @@ mod tests {
                     .validate()
                     .expect("the substituted digest does not change PCS geometry"),
                 vm,
+                poseidon2,
                 recursion,
             ),
             Err(PlanBindingError::AirProgramDigestMismatch {
@@ -1105,14 +1183,16 @@ mod tests {
     #[rstest]
     fn swapped_schema_plans_are_rejected() {
         let vm = plan(VerifierSchema::Vm);
+        let poseidon2 = plan(VerifierSchema::Poseidon2);
         let recursion = plan(VerifierSchema::Recursion);
-        let manifest = manifest(&vm, &recursion);
+        let manifest = manifest(&vm, &poseidon2, &recursion);
         assert_eq!(
             TestBoundPlans::new(
                 manifest
                     .validate()
                     .expect("the fixture manifest has valid PCS shapes"),
                 recursion,
+                poseidon2,
                 vm,
             ),
             Err(PlanBindingError::SchemaMismatch {
@@ -1127,14 +1207,16 @@ mod tests {
         let mut alternative_pcs = pcs();
         alternative_pcs.pow_bits = word(11);
         let vm = plan_with_pcs(VerifierSchema::Vm, alternative_pcs);
+        let poseidon2 = plan(VerifierSchema::Poseidon2);
         let recursion = plan(VerifierSchema::Recursion);
-        let manifest = manifest(&vm, &recursion);
+        let manifest = manifest(&vm, &poseidon2, &recursion);
         assert_eq!(
             TestBoundPlans::new(
                 manifest
                     .validate()
                     .expect("both individual PCS profiles are valid"),
                 vm,
+                poseidon2,
                 recursion,
             ),
             Err(PlanBindingError::ProfileMismatch {

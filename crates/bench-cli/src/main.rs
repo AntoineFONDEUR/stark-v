@@ -312,7 +312,8 @@ fn run_prove(
     info!("Generating proof...");
     let proof = prove_rv32im(run_result, config, &preprocessed);
 
-    let proof_size_estimate = proof.stark_proof.size_estimate();
+    let proof_size_estimate =
+        proof.vm.stark_proof.size_estimate() + proof.poseidon2.stark_proof.size_estimate();
 
     // Verify if not skipped
     let verified = if !skip_verify {

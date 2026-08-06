@@ -1,4 +1,4 @@
-//! Checked adaptation of an in-memory Poseidon VM proof into one fixed leaf.
+//! Checked adaptation of one split VM and Poseidon2 segment proof into a leaf.
 //!
 //! STWO compresses duplicate query positions, shared Merkle siblings, and FRI
 //! coset values in its ordinary proof. The prover auxiliary data retains the
@@ -9,15 +9,20 @@ use core::fmt;
 use std::collections::BTreeSet;
 
 use air::digest::{Digest8, IoDigest, M31Word, MemoryDigest, ProgramDigest};
-use prover::Proof;
+use num_traits::Zero;
 use prover::poseidon2_channel::{Poseidon2M31Hash, Poseidon2M31MerkleHasher};
+use prover::poseidon2_precompile::Poseidon2PrecompileProof;
 use prover::public_data::PublicData;
+use prover::{Proof, SegmentProof};
 use stwo::core::pcs::utils::prepare_preprocessed_query_positions;
 use stwo::core::vcs_lifted::verifier::LOG_PACKED_LEAF_SIZE;
 
 use crate::profile::{
-    FRI_QUERY_COUNT, FrozenProtocolProfile, MAX_FRI_FOLD_WIDTH, VM_FRI_LAYER_COUNT,
-    VM_MAX_MERKLE_DEPTH, VM_PUBLIC_CLAIM_WORD_COUNT, VmProofWire, vm_component_log_sizes,
+    FRI_QUERY_COUNT, FrozenProtocolProfile, MAX_FRI_FOLD_WIDTH, POSEIDON2_COMPONENT_LOG_SIZE,
+    POSEIDON2_FRI_LAYER_COUNT, POSEIDON2_MAX_MERKLE_DEPTH, POSEIDON2_QUERY_VALUE_COUNT,
+    POSEIDON2_SAMPLED_VALUE_COUNT, POSEIDON2_TRACE_PATH_COUNT, Poseidon2ProofWire,
+    VM_FRI_LAYER_COUNT, VM_MAX_MERKLE_DEPTH, VM_PUBLIC_CLAIM_WORD_COUNT, VmProofWire,
+    vm_component_log_sizes,
 };
 use crate::statement::{EdgeClaim, ExecutedSpan, JobContext, MachineState, SpanStatement};
 use crate::vm_public_claim::{
@@ -81,6 +86,8 @@ pub struct VmSegmentLeafWire {
     statement: SpanStatement,
     public_claim_words: [M31Word; VM_PUBLIC_CLAIM_WORD_COUNT],
     proof: Box<VmProofWire>,
+    poseidon2_proof: Box<Poseidon2ProofWire>,
+    shared_relation_sum: Qm31Wire,
 }
 
 impl VmSegmentLeafWire {
@@ -95,37 +102,54 @@ impl VmSegmentLeafWire {
     pub const fn proof(&self) -> &VmProofWire {
         &self.proof
     }
+
+    pub const fn poseidon2_proof(&self) -> &Poseidon2ProofWire {
+        &self.poseidon2_proof
+    }
+
+    pub const fn shared_relation_sum(&self) -> Qm31Wire {
+        self.shared_relation_sum
+    }
 }
 
-/// Adapts one real Poseidon VM proof to the frozen segment-leaf representation.
+/// Adapts one real split segment proof to the frozen leaf representation.
 pub fn adapt_vm_segment_leaf(
     profile: &FrozenProtocolProfile,
-    proof: &Proof<Poseidon2M31MerkleHasher>,
+    proof: &SegmentProof<Poseidon2M31MerkleHasher>,
     metadata: &SegmentRunMetadata,
     job: JobContext,
 ) -> Result<Box<VmSegmentLeafWire>, SegmentLeafError> {
-    validate_runner_metadata(&proof.public_data, metadata)?;
+    validate_runner_metadata(&proof.vm.public_data, metadata)?;
     if job.complete().protocol() != profile.manifest().protocol_id() {
         return Err(SegmentLeafError::ProtocolMismatch);
     }
 
     let public_claim_words =
-        canonical_vm_public_claim_words(&proof.public_data, profile.public_claim_shape())?
+        canonical_vm_public_claim_words(&proof.vm.public_data, profile.public_claim_shape())?
             .try_into()
             .map_err(|words: Vec<M31Word>| SegmentLeafError::CountMismatch {
                 field: "VM public-claim words",
                 expected: VM_PUBLIC_CLAIM_WORD_COUNT,
                 actual: words.len(),
             })?;
-    let statement = segment_statement(profile, &proof.public_data, metadata, job)?;
-    let fixed_proof = adapt_vm_stark_proof(profile, proof)?;
+    let statement = segment_statement(profile, &proof.vm.public_data, metadata, job)?;
+    let fixed_proof = adapt_vm_stark_proof(profile, &proof.vm, proof.joint_interaction.pow_nonce)?;
     let shape = &profile.manifest().manifest().vm_proof_shape;
     fixed_proof.validate_against_shape(shape)?;
+    let poseidon2_proof =
+        adapt_poseidon2_stark_proof(profile, &proof.poseidon2, proof.joint_interaction.pow_nonce)?;
+    poseidon2_proof.validate_against_shape(profile.poseidon2_proof_shape())?;
+    let shared_relation_sum = proof.vm.interaction_claim.shared_relation_sum;
+    if !(shared_relation_sum + proof.poseidon2.interaction_claim.claimed_sum).is_zero() {
+        return Err(SegmentLeafError::SharedRelationMismatch);
+    }
 
     Ok(Box::new(VmSegmentLeafWire {
         statement,
         public_claim_words,
         proof: fixed_proof,
+        poseidon2_proof,
+        shared_relation_sum: Qm31Wire::from(shared_relation_sum),
     }))
 }
 
@@ -197,6 +221,7 @@ pub(crate) fn segment_statement(
 fn adapt_vm_stark_proof(
     profile: &FrozenProtocolProfile,
     proof: &Proof<Poseidon2M31MerkleHasher>,
+    interaction_pow: u64,
 ) -> Result<Box<VmProofWire>, SegmentLeafError> {
     let stark = &proof.stark_proof;
     let aux = proof
@@ -271,9 +296,199 @@ fn adapt_vm_stark_proof(
         trace_paths,
         fri_layers,
         last_layer_coefficients,
-        interaction_pow: proof.interaction_pow,
+        interaction_pow,
         pcs_pow: stark.proof_of_work,
     }))
+}
+
+#[inline(never)]
+fn adapt_poseidon2_stark_proof(
+    profile: &FrozenProtocolProfile,
+    proof: &Poseidon2PrecompileProof<Poseidon2M31MerkleHasher>,
+    interaction_pow: u64,
+) -> Result<Box<Poseidon2ProofWire>, SegmentLeafError> {
+    let stark = &proof.stark_proof;
+    let aux = proof
+        .stark_aux
+        .as_ref()
+        .ok_or(SegmentLeafError::MissingProverAuxiliaryData)?;
+    if stark.config != profile.manifest().vm_pcs().config() {
+        return Err(SegmentLeafError::PcsConfigMismatch);
+    }
+    if proof.claim.log_size != POSEIDON2_COMPONENT_LOG_SIZE {
+        return Err(SegmentLeafError::ComponentLogSizeMismatch);
+    }
+    validate_poseidon2_proof_topology(profile, proof)?;
+
+    let commitments = stark
+        .commitments
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, hash)| proof_digest("Poseidon2 trace commitment", index, hash))
+        .collect::<Result<Vec<_>, _>>()?
+        .try_into()
+        .map_err(|values: Vec<Digest8>| count_mismatch("trace commitments", 4, values.len()))?;
+    let claimed_sums = [Qm31Wire::from(proof.interaction_claim.claimed_sum)];
+    let sampled_values = stark
+        .sampled_values
+        .iter()
+        .flatten()
+        .flatten()
+        .copied()
+        .map(Qm31Wire::from)
+        .collect::<Vec<_>>()
+        .try_into()
+        .map_err(|values: Vec<Qm31Wire>| {
+            count_mismatch(
+                "Poseidon2 sampled values",
+                POSEIDON2_SAMPLED_VALUE_COUNT,
+                values.len(),
+            )
+        })?;
+
+    let raw_queries = &aux.unsorted_query_locations;
+    let sorted_queries = BTreeSet::from_iter(raw_queries.iter().copied())
+        .into_iter()
+        .collect::<Vec<_>>();
+    let queried_values = expand_poseidon2_queried_values(proof, raw_queries, &sorted_queries)?;
+    let trace_paths = expand_poseidon2_trace_paths(profile, proof, raw_queries, &sorted_queries)?;
+    let fri_layers = expand_poseidon2_fri_layers(profile, proof, raw_queries)?;
+    let last_layer_coefficients = stark
+        .fri_proof
+        .last_layer_poly
+        .iter()
+        .copied()
+        .map(Qm31Wire::from)
+        .collect::<Vec<_>>()
+        .try_into()
+        .map_err(|values: Vec<Qm31Wire>| {
+            count_mismatch("Poseidon2 last-layer coefficients", 1, values.len())
+        })?;
+
+    Ok(Box::new(Poseidon2ProofWire {
+        commitments,
+        claimed_sums,
+        sampled_values,
+        queried_values,
+        trace_paths,
+        fri_layers,
+        last_layer_coefficients,
+        interaction_pow,
+        pcs_pow: stark.proof_of_work,
+    }))
+}
+
+fn validate_poseidon2_proof_topology(
+    profile: &FrozenProtocolProfile,
+    proof: &Poseidon2PrecompileProof<Poseidon2M31MerkleHasher>,
+) -> Result<(), SegmentLeafError> {
+    let stark = &proof.stark_proof;
+    let aux = proof
+        .stark_aux
+        .as_ref()
+        .ok_or(SegmentLeafError::MissingProverAuxiliaryData)?;
+    validate_count("Poseidon2 trace commitments", 4, stark.commitments.len())?;
+    validate_count(
+        "Poseidon2 trace decommitments",
+        4,
+        stark.decommitments.len(),
+    )?;
+    validate_count(
+        "Poseidon2 trace auxiliary trees",
+        4,
+        aux.trace_decommitment.len(),
+    )?;
+    validate_count(
+        "Poseidon2 queried-value trees",
+        4,
+        stark.queried_values.len(),
+    )?;
+    validate_count(
+        "Poseidon2 sampled-value trees",
+        4,
+        stark.sampled_values.len(),
+    )?;
+    validate_count(
+        "Poseidon2 raw queries",
+        FRI_QUERY_COUNT,
+        aux.unsorted_query_locations.len(),
+    )?;
+    let lifting_log_size = profile.poseidon2_proof_shape().tree_heights[3].as_u32();
+    let query_bound =
+        1_usize
+            .checked_shl(lifting_log_size)
+            .ok_or(SegmentLeafError::ArithmeticOverflow {
+                field: "Poseidon2 query domain size",
+            })?;
+    if let Some((query, raw)) = aux
+        .unsorted_query_locations
+        .iter()
+        .copied()
+        .enumerate()
+        .find(|(_, raw)| *raw >= query_bound)
+    {
+        return Err(SegmentLeafError::RawQueryOutOfRange {
+            query,
+            raw,
+            bound: query_bound,
+        });
+    }
+    let expected_logs = profile.poseidon2_program().column_log_sizes();
+    for tree in 0..expected_logs.len() {
+        validate_count(
+            "Poseidon2 queried-value columns",
+            expected_logs[tree].len(),
+            stark.queried_values[tree].len(),
+        )?;
+        validate_count(
+            "Poseidon2 sampled-value columns",
+            expected_logs[tree].len(),
+            stark.sampled_values[tree].len(),
+        )?;
+    }
+    if proof.interaction_claim.log_sizes != expected_logs[2] {
+        return Err(SegmentLeafError::InteractionLogSizeMismatch);
+    }
+    let expected_sample_counts = expected_poseidon2_sample_counts(profile);
+    for (tree, tree_counts) in expected_sample_counts.iter().enumerate() {
+        for (column, expected) in tree_counts.iter().copied().enumerate() {
+            let actual = stark.sampled_values[tree][column].len();
+            if actual != expected {
+                return Err(SegmentLeafError::SampleTopologyMismatch {
+                    tree,
+                    column,
+                    expected,
+                    actual,
+                });
+            }
+        }
+    }
+    validate_count(
+        "Poseidon2 FRI layers",
+        POSEIDON2_FRI_LAYER_COUNT,
+        1 + stark.fri_proof.inner_layers.len(),
+    )?;
+    validate_count(
+        "Poseidon2 FRI auxiliary layers",
+        POSEIDON2_FRI_LAYER_COUNT,
+        1 + aux.fri.inner_layers.len(),
+    )?;
+    Ok(())
+}
+
+fn expected_poseidon2_sample_counts(profile: &FrozenProtocolProfile) -> Vec<Vec<usize>> {
+    let mut counts = profile
+        .poseidon2_program()
+        .column_log_sizes()
+        .iter()
+        .map(|tree| vec![0; tree.len()])
+        .collect::<Vec<_>>();
+    for coordinate in profile.poseidon2_program().sample_coordinates() {
+        counts[coordinate.tree][coordinate.column] =
+            counts[coordinate.tree][coordinate.column].max(coordinate.point + 1);
+    }
+    counts
 }
 
 fn validate_proof_topology(
@@ -369,6 +584,193 @@ fn expected_sample_counts(profile: &FrozenProtocolProfile) -> Vec<Vec<usize>> {
             counts[coordinate.tree][coordinate.column].max(coordinate.point + 1);
     }
     counts
+}
+
+#[inline(never)]
+fn expand_poseidon2_queried_values(
+    proof: &Poseidon2PrecompileProof<Poseidon2M31MerkleHasher>,
+    raw_queries: &[usize],
+    sorted_queries: &[usize],
+) -> Result<Box<[M31Word; POSEIDON2_QUERY_VALUE_COUNT]>, SegmentLeafError> {
+    let mut values = Vec::with_capacity(POSEIDON2_QUERY_VALUE_COUNT);
+    for tree in 0..proof.stark_proof.queried_values.len() {
+        for column in &proof.stark_proof.queried_values[tree] {
+            validate_count(
+                "Poseidon2 queried values per column",
+                sorted_queries.len(),
+                column.len(),
+            )?;
+            for &raw in raw_queries {
+                let index = sorted_queries.binary_search(&raw).map_err(|_| {
+                    SegmentLeafError::QueryPositionMissing {
+                        phase: "Poseidon2 trace values",
+                        tree_or_layer: tree,
+                        position: raw,
+                    }
+                })?;
+                values.push(M31Word::from(column[index]));
+            }
+        }
+    }
+    values
+        .into_boxed_slice()
+        .try_into()
+        .map_err(|values: Box<[M31Word]>| {
+            count_mismatch(
+                "expanded Poseidon2 queried values",
+                POSEIDON2_QUERY_VALUE_COUNT,
+                values.len(),
+            )
+        })
+}
+
+#[inline(never)]
+fn expand_poseidon2_trace_paths(
+    profile: &FrozenProtocolProfile,
+    proof: &Poseidon2PrecompileProof<Poseidon2M31MerkleHasher>,
+    raw_queries: &[usize],
+    sorted_queries: &[usize],
+) -> Result<
+    Box<[MerklePathWire<POSEIDON2_MAX_MERKLE_DEPTH>; POSEIDON2_TRACE_PATH_COUNT]>,
+    SegmentLeafError,
+> {
+    let aux = proof
+        .stark_aux
+        .as_ref()
+        .ok_or(SegmentLeafError::MissingProverAuxiliaryData)?;
+    let mut paths = Vec::with_capacity(POSEIDON2_TRACE_PATH_COUNT);
+    for tree in 0..aux.trace_decommitment.len() {
+        if profile.poseidon2_proof_shape().tree_heights[tree] == M31Word::ZERO {
+            continue;
+        }
+        for &raw in raw_queries {
+            if sorted_queries.binary_search(&raw).is_err() {
+                return Err(SegmentLeafError::QueryPositionMissing {
+                    phase: "Poseidon2 trace path",
+                    tree_or_layer: tree,
+                    position: raw,
+                });
+            }
+            paths.push(expand_merkle_path(
+                "Poseidon2 trace path",
+                tree,
+                raw,
+                0,
+                &aux.trace_decommitment[tree].all_node_values,
+            )?);
+        }
+    }
+    paths.into_boxed_slice().try_into().map_err(
+        |paths: Box<[MerklePathWire<POSEIDON2_MAX_MERKLE_DEPTH>]>| {
+            count_mismatch(
+                "expanded Poseidon2 trace paths",
+                POSEIDON2_TRACE_PATH_COUNT,
+                paths.len(),
+            )
+        },
+    )
+}
+
+#[inline(never)]
+fn expand_poseidon2_fri_layers(
+    profile: &FrozenProtocolProfile,
+    proof: &Poseidon2PrecompileProof<Poseidon2M31MerkleHasher>,
+    raw_queries: &[usize],
+) -> Result<
+    Box<
+        [FriLayerWire<FRI_QUERY_COUNT, MAX_FRI_FOLD_WIDTH, POSEIDON2_MAX_MERKLE_DEPTH>;
+            POSEIDON2_FRI_LAYER_COUNT],
+    >,
+    SegmentLeafError,
+> {
+    let aux = proof
+        .stark_aux
+        .as_ref()
+        .ok_or(SegmentLeafError::MissingProverAuxiliaryData)?;
+    let shape = profile.poseidon2_proof_shape();
+    let mut layers = Vec::with_capacity(POSEIDON2_FRI_LAYER_COUNT);
+    let mut folded = 0_u32;
+    for layer in 0..POSEIDON2_FRI_LAYER_COUNT {
+        let (layer_proof, layer_aux) = if layer == 0 {
+            (
+                &proof.stark_proof.fri_proof.first_layer,
+                &aux.fri.first_layer,
+            )
+        } else {
+            (
+                &proof.stark_proof.fri_proof.inner_layers[layer - 1],
+                &aux.fri.inner_layers[layer - 1],
+            )
+        };
+        let width = shape.fri_layer_fold_widths[layer].as_u32();
+        let fold_step = width.ilog2();
+        let packed_log_size = if fold_step > 1 {
+            LOG_PACKED_LEAF_SIZE
+        } else {
+            0
+        };
+        let local_subtree_height = fold_step - packed_log_size;
+        let value_map = layer_aux
+            .all_values
+            .first()
+            .ok_or(SegmentLeafError::MissingFriValueMap { layer })?;
+        let queries = raw_queries
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(query, raw)| {
+                let layer_position = raw >> folded;
+                let subset_start = (layer_position >> fold_step) << fold_step;
+                let mut values = [Qm31Wire::ZERO; MAX_FRI_FOLD_WIDTH];
+                for (offset, value_slot) in values.iter_mut().enumerate().take(width as usize) {
+                    let position = subset_start + offset;
+                    let value = value_map.get(&position).copied().ok_or(
+                        SegmentLeafError::FriValueMissing {
+                            layer,
+                            query,
+                            position,
+                        },
+                    )?;
+                    *value_slot = Qm31Wire::from(value);
+                }
+                let packed_position = subset_start >> packed_log_size;
+                let local_root_position = packed_position >> local_subtree_height;
+                let path = expand_merkle_path(
+                    "Poseidon2 FRI path",
+                    layer,
+                    local_root_position,
+                    local_subtree_height,
+                    &layer_aux.decommitment.all_node_values,
+                )?;
+                Ok(FriQueryWire::new(values, path))
+            })
+            .collect::<Result<Vec<_>, SegmentLeafError>>()?
+            .into_boxed_slice()
+            .try_into()
+            .map_err(
+                |queries: Box<[FriQueryWire<MAX_FRI_FOLD_WIDTH, POSEIDON2_MAX_MERKLE_DEPTH>]>| {
+                    count_mismatch("Poseidon2 FRI queries", FRI_QUERY_COUNT, queries.len())
+                },
+            )?;
+        let commitment = proof_digest("Poseidon2 FRI commitment", layer, layer_proof.commitment)?;
+        layers.push(FriLayerWire::new(width, commitment, queries)?);
+        folded = folded
+            .checked_add(fold_step)
+            .ok_or(SegmentLeafError::ArithmeticOverflow {
+                field: "cumulative Poseidon2 FRI folds",
+            })?;
+    }
+    layers.into_boxed_slice().try_into().map_err(
+        |layers: Box<
+            [FriLayerWire<FRI_QUERY_COUNT, MAX_FRI_FOLD_WIDTH, POSEIDON2_MAX_MERKLE_DEPTH>],
+        >| {
+            count_mismatch(
+                "expanded Poseidon2 FRI layers",
+                POSEIDON2_FRI_LAYER_COUNT,
+                layers.len(),
+            )
+        },
+    )
 }
 
 #[inline(never)]
@@ -550,13 +952,13 @@ fn expand_fri_layers(
     )
 }
 
-fn expand_merkle_path(
+fn expand_merkle_path<const MAX_DEPTH: usize>(
     phase: &'static str,
     tree_or_layer: usize,
     mut position: usize,
     skip_layers: u32,
     node_maps: &[hashbrown::HashMap<usize, Poseidon2M31Hash>],
-) -> Result<MerklePathWire<VM_MAX_MERKLE_DEPTH>, SegmentLeafError> {
+) -> Result<MerklePathWire<MAX_DEPTH>, SegmentLeafError> {
     let skip = usize::try_from(skip_layers).map_err(|_| SegmentLeafError::ArithmeticOverflow {
         field: "Merkle local subtree height",
     })?;
@@ -568,14 +970,14 @@ fn expand_merkle_path(
         });
     }
     let active_depth = node_maps.len() - skip;
-    if active_depth > VM_MAX_MERKLE_DEPTH {
+    if active_depth > MAX_DEPTH {
         return Err(SegmentLeafError::CountMismatch {
             field: "Merkle path depth",
-            expected: VM_MAX_MERKLE_DEPTH,
+            expected: MAX_DEPTH,
             actual: active_depth,
         });
     }
-    let mut siblings = [Digest8::ZERO; VM_MAX_MERKLE_DEPTH];
+    let mut siblings = [Digest8::ZERO; MAX_DEPTH];
     for (wire_level, map) in node_maps.iter().enumerate().skip(skip) {
         let sibling_position = position ^ 1;
         let sibling =
@@ -734,6 +1136,7 @@ pub enum SegmentLeafError {
     PcsConfigMismatch,
     ComponentLogSizeMismatch,
     InteractionLogSizeMismatch,
+    SharedRelationMismatch,
     ProtocolMismatch,
     ProgramMismatch,
     MissingRoot {
@@ -822,7 +1225,10 @@ impl fmt::Display for SegmentLeafError {
                 formatter.write_str("VM proof component log sizes differ from the frozen profile")
             }
             Self::InteractionLogSizeMismatch => {
-                formatter.write_str("VM proof interaction log sizes differ from the frozen profile")
+                formatter.write_str("proof interaction log sizes differ from the frozen profile")
+            }
+            Self::SharedRelationMismatch => {
+                formatter.write_str("VM and Poseidon2 shared relation sums do not cancel")
             }
             Self::ProtocolMismatch => {
                 formatter.write_str("job protocol differs from the frozen profile")
@@ -969,7 +1375,7 @@ pub(crate) mod tests {
 
     pub(crate) struct RealFixture {
         pub(crate) profile: FrozenProtocolProfile,
-        proof: Proof<Poseidon2M31MerkleHasher>,
+        proof: SegmentProof<Poseidon2M31MerkleHasher>,
         metadata: SegmentRunMetadata,
         job: JobContext,
         pub(crate) wire: Box<VmSegmentLeafWire>,
@@ -1026,6 +1432,13 @@ pub(crate) mod tests {
             &statement,
         )
         .expect("fixture transcript prefix is valid");
+        let poseidon2_channel =
+            crate::profiled_channel::ProfiledPoseidon2M31Channel::for_poseidon2_proof(
+                profile.poseidon2_plan(),
+                profile.manifest().protocol_id(),
+                &statement,
+            )
+            .expect("Poseidon2 fixture transcript prefix is valid");
         let transcript = crate::profiled_channel::RecursionVmClaimTranscript::new(claim_digest);
         let (proof, channel) = prove_rv32im_with_channel_at_log_sizes_and_transcript::<
             crate::profiled_channel::ProfiledPoseidon2M31MerkleChannel,
@@ -1035,14 +1448,23 @@ pub(crate) mod tests {
             config,
             &preprocessing,
             vm_component_log_sizes(),
-            channel,
+            POSEIDON2_COMPONENT_LOG_SIZE,
+            prover::SegmentProofChannels {
+                vm: channel,
+                poseidon2: poseidon2_channel,
+            },
             &transcript,
         )
         .expect("capacity-bounded segment fits the frozen VM layout");
         channel
+            .vm
             .finish()
             .expect("the VM prover consumes the complete verifier transcript");
-        let prover_draws = channel.draws().to_vec();
+        channel
+            .poseidon2
+            .finish()
+            .expect("the Poseidon2 prover consumes the complete verifier transcript");
+        let prover_draws = channel.vm.draws().to_vec();
         let wire = adapt_vm_segment_leaf(&profile, &proof, &metadata, job)
             .expect("the real proof adapts to one fixed leaf");
         Box::new(RealFixture {
@@ -1186,8 +1608,8 @@ pub(crate) mod tests {
             &mut channel,
         );
         commitment_scheme.commit(
-            fixture.proof.stark_proof.commitments[1],
-            &fixture.proof.claim.main_trace_log_sizes(),
+            fixture.proof.vm.stark_proof.commitments[1],
+            &fixture.proof.vm.claim.main_trace_log_sizes(),
             &mut channel,
         );
         channel
@@ -1195,31 +1617,32 @@ pub(crate) mod tests {
             .expect("public claim follows the main root");
         let interaction_pow_valid = channel.verify_pow_nonce(
             prover::relations::INTERACTION_POW_BITS,
-            fixture.proof.interaction_pow,
+            fixture.wire.proof().interaction_pow,
         );
-        channel.mix_u64(fixture.proof.interaction_pow);
+        channel.mix_u64(fixture.wire.proof().interaction_pow);
         let relations = prover::relations::Relations::draw(&mut channel);
         channel
             .absorb_claimed_sums(
                 &fixture
                     .proof
+                    .vm
                     .interaction_claim
                     .claimed_sum
                     .component_values(),
             )
             .expect("claimed sums precede the interaction root");
         commitment_scheme.commit(
-            fixture.proof.stark_proof.commitments[2],
-            &fixture.proof.interaction_claim.log_sizes,
+            fixture.proof.vm.stark_proof.commitments[2],
+            &fixture.proof.vm.interaction_claim.log_sizes,
             &mut channel,
         );
         let ids = fixture.preprocessing.column_ids();
         let mut allocator = TraceLocationAllocator::new_with_preprocessed_columns(&ids);
         let components = prover::components::Components::new(
-            &fixture.proof.claim,
+            &fixture.proof.vm.claim,
             &mut allocator,
             relations,
-            &fixture.proof.interaction_claim.claimed_sum,
+            &fixture.proof.vm.interaction_claim.claimed_sum,
         );
         let core_components = CoreComponents {
             components: components.verifiers(),
@@ -1230,8 +1653,8 @@ pub(crate) mod tests {
         compiled_log_sizes.push(vec![max_log_degree_bound; 8]);
         let committed_log_sizes = vec![
             fixture.preprocessing.log_sizes.clone(),
-            fixture.proof.claim.main_trace_log_sizes(),
-            fixture.proof.interaction_claim.log_sizes.clone(),
+            fixture.proof.vm.claim.main_trace_log_sizes(),
+            fixture.proof.vm.interaction_claim.log_sizes.clone(),
             vec![max_log_degree_bound; 8],
         ];
         let log_sizes_match = compiled_log_sizes.0 == committed_log_sizes;
@@ -1239,7 +1662,7 @@ pub(crate) mod tests {
             &components.verifiers(),
             &mut channel,
             &mut commitment_scheme,
-            fixture.proof.stark_proof.clone(),
+            fixture.proof.vm.stark_proof.clone(),
         );
         assert_eq!(
             (
@@ -1519,7 +1942,7 @@ pub(crate) mod tests {
     fn missing_prover_auxiliary_data_is_rejected() {
         let fixture = real_fixture();
         let mut proof = fixture.proof.clone();
-        proof.stark_aux = None;
+        proof.vm.stark_aux = None;
         assert_eq!(
             adapt_vm_segment_leaf(&fixture.profile, &proof, &fixture.metadata, fixture.job),
             Err(SegmentLeafError::MissingProverAuxiliaryData)
@@ -1530,10 +1953,10 @@ pub(crate) mod tests {
     fn public_input_capacity_overflow_is_rejected() {
         let fixture = real_fixture();
         let mut proof = fixture.proof.clone();
-        proof.public_data.io_entries.input_words =
+        proof.vm.public_data.io_entries.input_words =
             vec![0; crate::profile::MAX_PUBLIC_INPUT_WORDS as usize + 1];
         let mut metadata = fixture.metadata.clone();
-        metadata.public_data = proof.public_data.clone();
+        metadata.public_data = proof.vm.public_data.clone();
         assert!(matches!(
             adapt_vm_segment_leaf(&fixture.profile, &proof, &metadata, fixture.job),
             Err(SegmentLeafError::PublicClaim(
@@ -1550,12 +1973,13 @@ pub(crate) mod tests {
         let fixture = real_fixture();
         let mut proof = fixture.proof.clone();
         proof
+            .vm
             .public_data
             .program_root
             .as_mut()
             .expect("root is present")[0] = stwo::core::fields::m31::P;
         let mut metadata = fixture.metadata.clone();
-        metadata.public_data = proof.public_data.clone();
+        metadata.public_data = proof.vm.public_data.clone();
         assert!(matches!(
             adapt_vm_segment_leaf(&fixture.profile, &proof, &metadata, fixture.job),
             Err(SegmentLeafError::PublicClaim(

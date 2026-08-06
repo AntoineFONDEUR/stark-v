@@ -290,6 +290,163 @@ impl VmAirProgram {
     }
 }
 
+/// Verifier-owned composition program for the detached Poseidon2 AIR.
+pub struct Poseidon2AirProgram {
+    log_size: u32,
+    component: ComponentProgram,
+    column_log_sizes: TreeVec<Vec<u32>>,
+    sample_coordinates: Vec<SampleCoordinate>,
+    sample_point_offsets: Vec<CirclePointIndex>,
+    composition_samples: [usize; COMPOSITION_SAMPLE_COUNT],
+    max_log_degree_bound: u32,
+}
+
+impl Poseidon2AirProgram {
+    /// Compiles the direct DSL component at its frozen segment capacity.
+    pub fn new(log_size: u32) -> Result<Self, VmAirProgramError> {
+        if !(MIN_CIRCLE_DOMAIN_LOG_SIZE..=MAX_CIRCLE_DOMAIN_LOG_SIZE).contains(&log_size) {
+            return Err(VmAirProgramError::ComponentLogSizeOutOfRange {
+                component: 0,
+                log_size,
+            });
+        }
+        let component = poseidon2_component(log_size);
+        let unresolved = compile_component(0, "poseidon2", &component)?;
+        let core_components = CoreComponents {
+            components: vec![&component],
+            n_preprocessed_columns: 0,
+        };
+        let composition_log_degree_bound = core_components.composition_log_degree_bound();
+        let max_log_degree_bound = composition_log_degree_bound
+            .checked_sub(COMPOSITION_LOG_SPLIT)
+            .ok_or(VmAirProgramError::CompositionSplitUnderflow {
+                composition_log_degree_bound,
+            })?;
+        let mut column_log_sizes = core_components.column_log_sizes();
+        column_log_sizes.push(vec![max_log_degree_bound; COMPOSITION_SAMPLE_COUNT]);
+        let layout_point = CirclePoint {
+            x: SecureField::zero(),
+            y: SecureField::one(),
+        };
+        let mut sample_points =
+            core_components.mask_points(layout_point, max_log_degree_bound, false);
+        sample_points.push(vec![vec![layout_point]; COMPOSITION_SAMPLE_COUNT]);
+        let (sample_coordinates, sampled_indices) = index_sample_layout(&sample_points);
+        let composition_tree = sample_points.len() - 1;
+        let composition_samples =
+            core::array::from_fn(|column| sampled_indices[composition_tree][column][0]);
+        let sample_point_offsets = resolve_sample_point_offsets(
+            core::slice::from_ref(&unresolved),
+            &sampled_indices,
+            sample_coordinates.len(),
+            composition_samples,
+            max_log_degree_bound,
+        )?;
+        let component = resolve_component(unresolved, &sampled_indices)?;
+        Ok(Self {
+            log_size,
+            component,
+            column_log_sizes,
+            sample_coordinates,
+            sample_point_offsets,
+            composition_samples,
+            max_log_degree_bound,
+        })
+    }
+
+    pub const fn column_log_sizes(&self) -> &TreeVec<Vec<u32>> {
+        &self.column_log_sizes
+    }
+
+    pub fn sample_coordinates(&self) -> &[SampleCoordinate] {
+        &self.sample_coordinates
+    }
+
+    pub fn sample_point_offsets(&self) -> &[CirclePointIndex] {
+        &self.sample_point_offsets
+    }
+
+    pub const fn max_log_degree_bound(&self) -> u32 {
+        self.max_log_degree_bound
+    }
+
+    pub const fn air_instruction_count(&self) -> usize {
+        self.component.constraint_count
+    }
+
+    /// Evaluates the detached AIR and its split-composition equality.
+    pub fn evaluate(
+        &self,
+        sampled_values: &[Rec],
+        claimed_sum: Rec,
+        relation_parameters: &HashMap<String, Rec>,
+        random_coefficient: Rec,
+        oods_point: &OodsPointCircuit,
+    ) -> Result<VmAirEvaluation, VmAirProgramError> {
+        if sampled_values.len() != self.sample_coordinates.len() {
+            return Err(VmAirProgramError::SampledValueCountMismatch {
+                expected: self.sample_coordinates.len(),
+                actual: sampled_values.len(),
+            });
+        }
+        validate_relation_parameters(Relations::DESCRIPTORS.as_slice(), relation_parameters)?;
+        let denominator_inverse = coset_vanishing_inverse(oods_point, self.max_log_degree_bound)?;
+        let component = poseidon2_component(self.log_size);
+        let mask = self
+            .component
+            .sampled_mask
+            .clone()
+            .map_cols(|sampled_column| {
+                sampled_column
+                    .into_iter()
+                    .map(|sample| sampled_values[sample].clone())
+                    .collect::<Vec<_>>()
+            });
+        let evaluator = CircuitPointEvaluator::new(
+            0,
+            mask,
+            self.component.mask_offsets.clone(),
+            Rec::zero(),
+            random_coefficient,
+            denominator_inverse,
+            claimed_sum,
+            self.log_size,
+            relation_parameters,
+        );
+        let evaluator = (*component).evaluate_dynamic_relations(evaluator);
+        let air_value = evaluator.finish(self.component.constraint_count)?;
+        let left =
+            core::array::from_fn(|index| sampled_values[self.composition_samples[index]].clone());
+        let right = core::array::from_fn(|index| {
+            sampled_values[self.composition_samples[SECURE_EXTENSION_DEGREE + index]].clone()
+        });
+        let claimed_value = combine_split_composition(
+            left,
+            right,
+            oods_point.x.clone(),
+            self.max_log_degree_bound,
+        )?;
+        let equality = air_value.clone() - claimed_value.clone();
+        Ok(VmAirEvaluation {
+            air_value,
+            claimed_value,
+            equality,
+        })
+    }
+}
+
+fn poseidon2_component(log_size: u32) -> FrameworkComponent<air::poseidon2::component::air::Eval> {
+    let mut allocator = TraceLocationAllocator::default();
+    air::poseidon2::component::air::Component::new(
+        &mut allocator,
+        air::poseidon2::component::air::Eval {
+            log_size,
+            relations: Relations::dummy(),
+        },
+        SecureField::zero(),
+    )
+}
+
 /// Computed and proof-claimed sides of the OODS composition assertion.
 #[derive(Clone, Debug)]
 pub struct VmAirEvaluation {
@@ -324,7 +481,11 @@ impl ComponentVisitor for ProgramCollector {
             return;
         }
         let index = self.components.len();
-        match compile_component(index, component) {
+        let Some(&name) = COMPONENT_NAMES.get(index) else {
+            self.error = Some(VmAirProgramError::ComponentNameMissing { index });
+            return;
+        };
+        match compile_component(index, name, component) {
             Ok(component) => self.components.push(component),
             Err(error) => self.error = Some(error),
         }
@@ -333,11 +494,9 @@ impl ComponentVisitor for ProgramCollector {
 
 fn compile_component<E: FrameworkEval>(
     index: usize,
+    name: &'static str,
     component: &FrameworkComponent<E>,
 ) -> Result<UnresolvedComponentProgram, VmAirProgramError> {
-    let name = *COMPONENT_NAMES
-        .get(index)
-        .ok_or(VmAirProgramError::ComponentNameMissing { index })?;
     let log_size = component.log_size();
     let info = (**component).evaluate(InfoEvaluator::new(
         log_size,
@@ -1381,5 +1540,19 @@ mod tests {
             ),
             Err(VmAirProgramError::DynamicConstraintCountMismatch { component: 0, .. })
         ));
+    }
+
+    #[test]
+    fn detached_poseidon2_program_has_frozen_dimensions() {
+        let program = Poseidon2AirProgram::new(11).expect("Poseidon2 profile is valid");
+        assert_eq!(
+            (
+                program.column_log_sizes().iter().flatten().count(),
+                program.sample_coordinates().len(),
+                program.air_instruction_count(),
+                program.max_log_degree_bound(),
+            ),
+            (461, 465, 432, 11),
+        );
     }
 }

@@ -67,6 +67,25 @@ impl VmAirCompositionControlPreprocessed {
         recursion_air_instruction_count: u32,
         recursion_sampled_value_count: u32,
     ) -> Result<Self, VmAirCompositionControlError> {
+        Self::new_with_poseidon2(
+            vm_plan,
+            vm_profile,
+            None,
+            recursion_plan,
+            recursion_air_instruction_count,
+            recursion_sampled_value_count,
+        )
+    }
+
+    /// Adds the detached Poseidon2 AIR slice to the segment verifier lanes.
+    pub fn new_with_poseidon2(
+        vm_plan: &VerifierControlPlan,
+        vm_profile: VmAirCompositionProfile,
+        poseidon2: Option<(&VerifierControlPlan, VmAirCompositionProfile)>,
+        recursion_plan: &VerifierControlPlan,
+        recursion_air_instruction_count: u32,
+        recursion_sampled_value_count: u32,
+    ) -> Result<Self, VmAirCompositionControlError> {
         if vm_plan.schema() != VerifierSchema::Vm {
             return Err(VmAirCompositionControlError::SchemaMismatch {
                 lane: "segment",
@@ -87,6 +106,21 @@ impl VmAirCompositionControlPreprocessed {
             vm_profile.sampled_value_count(),
             super::control_air::SEGMENT_VERIFIER_ID,
         )?;
+        if let Some((poseidon2_plan, poseidon2_profile)) = poseidon2 {
+            if poseidon2_plan.schema() != VerifierSchema::Poseidon2 {
+                return Err(VmAirCompositionControlError::SchemaMismatch {
+                    lane: "poseidon2",
+                    expected: VerifierSchema::Poseidon2,
+                    actual: poseidon2_plan.schema(),
+                });
+            }
+            rows.extend(validated_rows(
+                poseidon2_plan.steps(),
+                poseidon2_profile.air_instruction_count(),
+                poseidon2_profile.sampled_value_count(),
+                super::control_air::POSEIDON2_VERIFIER_ID,
+            )?);
+        }
         rows.extend(validated_rows(
             recursion_plan.steps(),
             recursion_air_instruction_count,
@@ -271,7 +305,10 @@ fn encoded_row(
         .map_err(|_| VmAirCompositionControlError::SequenceOutOfRange { sequence })?;
     let encoded = step.encode();
     Ok(PreprocessedRow {
-        segment_mask: u32::from(verifier_id == super::control_air::SEGMENT_VERIFIER_ID),
+        segment_mask: u32::from(matches!(
+            verifier_id,
+            super::control_air::SEGMENT_VERIFIER_ID | super::control_air::POSEIDON2_VERIFIER_ID
+        )),
         verifier_id,
         sequence,
         tag: encoded.tag(),

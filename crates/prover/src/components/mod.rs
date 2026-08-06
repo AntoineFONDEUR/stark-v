@@ -24,8 +24,11 @@ stwo_macros::components! {
         program,
         memory,
         merkle,
-        poseidon2: air::poseidon2::component,
         clock_update,
+    },
+    // The segment prover commits this DSL-owned table in its hash instance.
+    detached: {
+        poseidon2,
     },
     lookup: {
         bitwise,

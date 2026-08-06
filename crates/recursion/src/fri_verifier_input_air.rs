@@ -23,7 +23,8 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::relation;
 
 use super::control_air::{
-    LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
+    LEFT_RECURSION_VERIFIER_ID, POSEIDON2_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID,
+    SEGMENT_VERIFIER_ID,
 };
 use super::fri_merkle_air::FriMerkleRelations;
 use super::fri_verifier_circuit::{FriVerifierCircuit, FriVerifierInputSource, FriVerifierProfile};
@@ -121,7 +122,7 @@ struct PreprocessedRow {
     source_indices: [u32; 4],
 }
 
-/// Verifier-owned FRI input-node layout for the VM lane and two child lanes.
+/// Verifier-owned FRI input-node layout for both segment lanes and two child lanes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FriVerifierInputPreprocessed {
     log_size: u32,
@@ -129,7 +130,7 @@ pub struct FriVerifierInputPreprocessed {
 }
 
 impl FriVerifierInputPreprocessed {
-    pub fn new(lanes: [FriVerifierCircuitLane<'_>; 3]) -> Result<Self, FriVerifierInputError> {
+    pub fn new(lanes: [FriVerifierCircuitLane<'_>; 4]) -> Result<Self, FriVerifierInputError> {
         validate_lane_order(&lanes)?;
         let mut circuit_ids = HashSet::with_capacity(lanes.len());
         let mut rows = Vec::new();
@@ -277,10 +278,11 @@ fn source_mask_column(source: FriVerifierInputSource) -> usize {
 }
 
 fn validate_lane_order(
-    lanes: &[FriVerifierCircuitLane<'_>; 3],
+    lanes: &[FriVerifierCircuitLane<'_>; 4],
 ) -> Result<(), FriVerifierInputError> {
     for (lane, expected) in lanes.iter().zip([
         SEGMENT_VERIFIER_ID,
+        POSEIDON2_VERIFIER_ID,
         LEFT_RECURSION_VERIFIER_ID,
         RIGHT_RECURSION_VERIFIER_ID,
     ]) {
@@ -296,7 +298,7 @@ fn validate_lane_order(
 
 fn lane_masks(verifier_id: u32) -> Result<(u32, u32), FriVerifierInputError> {
     match verifier_id {
-        SEGMENT_VERIFIER_ID => Ok((1, 0)),
+        SEGMENT_VERIFIER_ID | POSEIDON2_VERIFIER_ID => Ok((1, 0)),
         LEFT_RECURSION_VERIFIER_ID | RIGHT_RECURSION_VERIFIER_ID => Ok((0, 1)),
         _ => Err(FriVerifierInputError::UnknownVerifierId { verifier_id }),
     }
@@ -662,8 +664,8 @@ pub fn gen_interaction_trace(
 pub fn push_fri_verifier_inputs(
     table: &mut FriVerifierInputTable,
     preprocessed: &FriVerifierInputPreprocessed,
-    references: [FriVerifierCircuitLane<'_>; 3],
-    witnesses: [FriVerifierCircuitLane<'_>; 3],
+    references: [FriVerifierCircuitLane<'_>; 4],
+    witnesses: [FriVerifierCircuitLane<'_>; 4],
     proof_kind: ProofKind,
 ) -> Result<(), FriVerifierInputError> {
     validate_lane_order(&references)?;
@@ -762,7 +764,7 @@ fn verifier_is_active(
     proof_kind: ProofKind,
 ) -> Result<bool, FriVerifierInputError> {
     match verifier_id {
-        SEGMENT_VERIFIER_ID => Ok(proof_kind == ProofKind::SegmentLeaf),
+        SEGMENT_VERIFIER_ID | POSEIDON2_VERIFIER_ID => Ok(proof_kind == ProofKind::SegmentLeaf),
         LEFT_RECURSION_VERIFIER_ID | RIGHT_RECURSION_VERIFIER_ID => {
             Ok(proof_kind == ProofKind::BinaryNode)
         }
@@ -871,16 +873,17 @@ mod tests {
         build_fri_verifier_reference,
     };
 
-    const CIRCUIT_IDS: [u32; 3] = [301, 302, 303];
+    const CIRCUIT_IDS: [u32; 4] = [301, 302, 303, 304];
 
     struct CircuitSet {
         segment: FriVerifierCircuit,
+        poseidon2: FriVerifierCircuit,
         left: FriVerifierCircuit,
         right: FriVerifierCircuit,
     }
 
     impl CircuitSet {
-        fn lanes(&self) -> [FriVerifierCircuitLane<'_>; 3] {
+        fn lanes(&self) -> [FriVerifierCircuitLane<'_>; 4] {
             [
                 FriVerifierCircuitLane {
                     verifier_id: SEGMENT_VERIFIER_ID,
@@ -888,13 +891,18 @@ mod tests {
                     circuit: &self.segment,
                 },
                 FriVerifierCircuitLane {
-                    verifier_id: LEFT_RECURSION_VERIFIER_ID,
+                    verifier_id: POSEIDON2_VERIFIER_ID,
                     circuit_id: CIRCUIT_IDS[1],
+                    circuit: &self.poseidon2,
+                },
+                FriVerifierCircuitLane {
+                    verifier_id: LEFT_RECURSION_VERIFIER_ID,
+                    circuit_id: CIRCUIT_IDS[2],
                     circuit: &self.left,
                 },
                 FriVerifierCircuitLane {
                     verifier_id: RIGHT_RECURSION_VERIFIER_ID,
-                    circuit_id: CIRCUIT_IDS[2],
+                    circuit_id: CIRCUIT_IDS[3],
                     circuit: &self.right,
                 },
             ]
@@ -908,6 +916,7 @@ mod tests {
     fn inactive_set(profile: &FriVerifierProfile) -> CircuitSet {
         CircuitSet {
             segment: build_fri_verifier_reference(profile).expect("segment reference is valid"),
+            poseidon2: build_fri_verifier_reference(profile).expect("Poseidon2 reference is valid"),
             left: build_fri_verifier_reference(profile).expect("left reference is valid"),
             right: build_fri_verifier_reference(profile).expect("right reference is valid"),
         }
@@ -956,6 +965,11 @@ mod tests {
                 active_circuit(profile)
             } else {
                 build_fri_verifier_reference(profile).expect("segment reference is valid")
+            },
+            poseidon2: if kind == ProofKind::SegmentLeaf {
+                active_circuit(profile)
+            } else {
+                build_fri_verifier_reference(profile).expect("Poseidon2 reference is valid")
             },
             left: if kind == ProofKind::BinaryNode {
                 active_circuit(profile)
@@ -1097,7 +1111,7 @@ mod tests {
                     FriVerifierInputSource::AuthenticatedValueWord { .. }
                 ))
                 .count(),
-            3 * expected_per_lane
+            references.lanes().len() * expected_per_lane
         );
     }
 }

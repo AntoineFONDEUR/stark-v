@@ -28,8 +28,7 @@ stwo_macros::define_air! {
         relation: memory_access,
     }
     // Fn-DSL tables folded into the `Tracer` (defined via `define_air_fns!`).
-    // The runner fills them like any opcode table; their components plug into
-    // the prover via `components! { ... name: module ... }`.
+    // The component router assigns each table to a constituent proof.
     external: {
         poseidon2: crate::poseidon2,
     }

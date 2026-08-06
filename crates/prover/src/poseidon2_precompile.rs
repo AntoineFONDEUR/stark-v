@@ -21,7 +21,7 @@ use stwo::prover::backend::simd::SimdBackend;
 use stwo::prover::pcs::CommitmentSchemeProver;
 use stwo::prover::poly::circle::PolyOps;
 use stwo::prover::poly::twiddles::TwiddleTree;
-use stwo::prover::{ProvingError, prove_ex};
+use stwo::prover::{ProvingError, prove, prove_ex};
 use stwo_constraint_framework::TraceLocationAllocator;
 
 use air::trace::Poseidon2Table;
@@ -31,6 +31,11 @@ use crate::precompile::{JointInteractionProof, bind_joint_interaction};
 use crate::relations::Relations;
 
 type B = SimdBackend;
+
+/// Returns the DSL table's natural power-of-two trace size.
+pub fn poseidon2_precompile_log_size(rows: usize) -> u32 {
+    rows.max(1).next_power_of_two().ilog2().max(4)
+}
 
 /// Public main-trace shape of one standalone Poseidon2 instance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,10 +63,6 @@ pub struct Poseidon2PrecompileInteractionClaim {
 impl Poseidon2PrecompileInteractionClaim {
     fn mix_into(&self, channel: &mut impl Channel) {
         channel.mix_felts(&[self.claimed_sum]);
-        channel.mix_u64(self.log_sizes.len() as u64);
-        for log_size in &self.log_sizes {
-            channel.mix_u64(*log_size as u64);
-        }
     }
 }
 
@@ -131,6 +132,7 @@ where
     claim: Poseidon2PrecompileClaim,
     commitment_scheme: CommitmentSchemeProver<'a, B, MC>,
     channel: MC::C,
+    retain_query_expansion: bool,
 }
 
 /// Poseidon2 commitment after its unique post-commitment seed was drawn.
@@ -144,6 +146,14 @@ where
         >,
 {
     committed: CommittedPoseidon2Precompile<'a, MC>,
+    interaction_seed: SecureField,
+}
+
+/// Verifier state after replaying the standalone main commitment.
+pub(crate) struct Poseidon2PrecompileVerifier<MC: MerkleChannel> {
+    proof: Poseidon2PrecompileProof<MC::H>,
+    commitment_scheme: CommitmentSchemeVerifier<MC>,
+    pub(crate) channel: MC::C,
     interaction_seed: SecureField,
 }
 
@@ -166,6 +176,7 @@ pub fn commit_poseidon2_precompile<'a, MC>(
     config: PcsConfig,
     twiddles: &'a TwiddleTree<B>,
     mut channel: MC::C,
+    retain_query_expansion: bool,
 ) -> Result<CommittedPoseidon2Precompile<'a, MC>, Poseidon2PrecompileProvingError>
 where
     MC: MerkleChannel,
@@ -188,16 +199,17 @@ where
     tree_builder.extend_evals(vec![]);
     tree_builder.commit(&mut channel);
 
-    claim.mix_into(&mut channel);
     let mut tree_builder = commitment_scheme.tree_builder();
     tree_builder.extend_evals(trace.clone());
     tree_builder.commit(&mut channel);
+    claim.mix_into(&mut channel);
 
     Ok(CommittedPoseidon2Precompile {
         trace,
         claim,
         commitment_scheme,
         channel,
+        retain_query_expansion,
     })
 }
 
@@ -238,7 +250,7 @@ where
         seeds: [SecureField; 2],
         joint_interaction: JointInteractionProof,
         relations: Relations,
-    ) -> Result<Poseidon2PrecompileProof<MC::H>, Poseidon2PrecompileProvingError> {
+    ) -> Result<(Poseidon2PrecompileProof<MC::H>, MC::C), Poseidon2PrecompileProvingError> {
         if seeds[1] != self.interaction_seed {
             return Err(Poseidon2PrecompileProvingError::JointSeedMismatch);
         }
@@ -275,18 +287,34 @@ where
         tree_builder.extend_evals(interaction_trace);
         tree_builder.commit(&mut self.committed.channel);
 
-        let extended = prove_ex(
-            &[&component],
-            &mut self.committed.channel,
-            self.committed.commitment_scheme,
-            false,
-        )?;
-        Ok(Poseidon2PrecompileProof {
-            claim: self.committed.claim,
-            interaction_claim,
-            stark_proof: extended.proof,
-            stark_aux: Some(extended.aux),
-        })
+        let (stark_proof, stark_aux) = if self.committed.retain_query_expansion {
+            let extended = prove_ex(
+                &[&component],
+                &mut self.committed.channel,
+                self.committed.commitment_scheme,
+                false,
+            )?;
+            (extended.proof, Some(extended.aux))
+        } else {
+            (
+                prove(
+                    &[&component],
+                    &mut self.committed.channel,
+                    self.committed.commitment_scheme,
+                )?,
+                None,
+            )
+        };
+        let final_channel = self.committed.channel.clone();
+        Ok((
+            Poseidon2PrecompileProof {
+                claim: self.committed.claim,
+                interaction_claim,
+                stark_proof,
+                stark_aux,
+            },
+            final_channel,
+        ))
     }
 }
 
@@ -303,6 +331,22 @@ pub fn verify_poseidon2_precompile<MC>(
 where
     MC: MerkleChannel,
 {
+    let (precompile_seed, verifier) = replay_poseidon2_precompile::<MC>(proof, config)?;
+    let seeds = [vm_seed, precompile_seed];
+    let mut joint_channel =
+        crate::precompile::verify_joint_interaction::<MC::C>(seeds, joint_interaction)?;
+    let relations = Relations::draw(&mut joint_channel);
+    verifier.verify(seeds, joint_interaction, relations)
+}
+
+/// Replays the fixed main-trace prefix and returns its post-commitment seed.
+pub(crate) fn replay_poseidon2_precompile<MC>(
+    proof: Poseidon2PrecompileProof<MC::H>,
+    config: PcsConfig,
+) -> Result<(SecureField, Poseidon2PrecompileVerifier<MC>), VerificationError>
+where
+    MC: MerkleChannel,
+{
     let commitments = &proof.stark_proof.commitments;
     let preprocessing_root = commitments.first().ok_or_else(|| {
         VerificationError::InvalidStructure(
@@ -312,56 +356,96 @@ where
     let main_root = commitments.get(1).ok_or_else(|| {
         VerificationError::InvalidStructure("Poseidon2 proof has no main commitment".to_string())
     })?;
-    let interaction_root = commitments.get(2).ok_or_else(|| {
-        VerificationError::InvalidStructure(
-            "Poseidon2 proof has no interaction commitment".to_string(),
-        )
-    })?;
 
     let mut channel = MC::C::default();
     let mut commitment_scheme = CommitmentSchemeVerifier::<MC>::new(config);
     commitment_scheme.commit(*preprocessing_root, &[], &mut channel);
-    proof.claim.mix_into(&mut channel);
     commitment_scheme.commit(
         *main_root,
         &proof.claim.main_trace_log_sizes(),
         &mut channel,
     );
+    proof.claim.mix_into(&mut channel);
 
-    let precompile_seed = channel.draw_secure_felt();
-    let seeds = [vm_seed, precompile_seed];
-    let mut joint_channel =
-        crate::precompile::verify_joint_interaction::<MC::C>(seeds, joint_interaction)?;
-    let relations = Relations::draw(&mut joint_channel);
-    bind_joint_interaction(&mut channel, seeds, joint_interaction);
-
-    let mut location_allocator = TraceLocationAllocator::default();
-    let component = air::poseidon2::component::air::Component::new(
-        &mut location_allocator,
-        air::poseidon2::component::air::Eval {
-            log_size: proof.claim.log_size,
-            relations,
+    let interaction_seed = channel.draw_secure_felt();
+    Ok((
+        interaction_seed,
+        Poseidon2PrecompileVerifier {
+            proof,
+            commitment_scheme,
+            channel,
+            interaction_seed,
         },
-        proof.interaction_claim.claimed_sum,
-    );
-    if component.trace_log_degree_bounds()[2] != proof.interaction_claim.log_sizes {
-        return Err(VerificationError::InvalidStructure(
-            "Poseidon2 interaction shape does not match its DSL AIR".to_string(),
-        ));
+    ))
+}
+
+impl<MC: MerkleChannel> Poseidon2PrecompileVerifier<MC> {
+    /// Returns the public sum that the VM deficit must cancel.
+    pub(crate) fn claimed_sum(&self) -> SecureField {
+        self.proof.interaction_claim.claimed_sum
     }
 
-    proof.interaction_claim.mix_into(&mut channel);
-    commitment_scheme.commit(
-        *interaction_root,
-        &proof.interaction_claim.log_sizes,
-        &mut channel,
-    );
-    verify(
-        &[&component],
-        &mut channel,
-        &mut commitment_scheme,
-        proof.stark_proof,
-    )
+    /// Finishes verification using the binder-owned joint relation draw.
+    pub(crate) fn verify(
+        mut self,
+        seeds: [SecureField; 2],
+        joint_interaction: JointInteractionProof,
+        relations: Relations,
+    ) -> Result<(), VerificationError> {
+        if seeds[1] != self.interaction_seed {
+            return Err(VerificationError::InvalidStructure(
+                "joint transcript does not contain the Poseidon2 verifier seed".to_string(),
+            ));
+        }
+        bind_joint_interaction(&mut self.channel, seeds, joint_interaction);
+        self.verify_bound(seeds, relations)
+    }
+
+    /// Finishes verification after the caller binds the shared transcript.
+    pub(crate) fn verify_bound(
+        mut self,
+        seeds: [SecureField; 2],
+        relations: Relations,
+    ) -> Result<(), VerificationError> {
+        if seeds[1] != self.interaction_seed {
+            return Err(VerificationError::InvalidStructure(
+                "joint transcript does not contain the Poseidon2 verifier seed".to_string(),
+            ));
+        }
+        let interaction_root = self.proof.stark_proof.commitments.get(2).ok_or_else(|| {
+            VerificationError::InvalidStructure(
+                "Poseidon2 proof has no interaction commitment".to_string(),
+            )
+        })?;
+
+        let mut location_allocator = TraceLocationAllocator::default();
+        let component = air::poseidon2::component::air::Component::new(
+            &mut location_allocator,
+            air::poseidon2::component::air::Eval {
+                log_size: self.proof.claim.log_size,
+                relations,
+            },
+            self.proof.interaction_claim.claimed_sum,
+        );
+        if component.trace_log_degree_bounds()[2] != self.proof.interaction_claim.log_sizes {
+            return Err(VerificationError::InvalidStructure(
+                "Poseidon2 interaction shape does not match its DSL AIR".to_string(),
+            ));
+        }
+
+        self.proof.interaction_claim.mix_into(&mut self.channel);
+        self.commitment_scheme.commit(
+            *interaction_root,
+            &self.proof.interaction_claim.log_sizes,
+            &mut self.channel,
+        );
+        verify(
+            &[&component],
+            &mut self.channel,
+            &mut self.commitment_scheme,
+            self.proof.stark_proof,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -393,6 +477,7 @@ mod tests {
             config,
             &twiddles,
             Default::default(),
+            true,
         )
         .expect("the fixture fits its fixed trace");
         let (precompile_seed, seeded) = committed.into_seeded();
@@ -401,7 +486,7 @@ mod tests {
         let (joint_interaction, mut joint_channel) =
             prove_joint_interaction::<stwo::core::channel::Blake2sChannel>(seeds);
         let relations = Relations::draw(&mut joint_channel);
-        let proof = seeded
+        let (proof, _) = seeded
             .prove(seeds, joint_interaction, relations)
             .expect("the joint transcript contains the fixture seed");
         (proof, vm_seed, joint_interaction)
@@ -434,6 +519,7 @@ mod tests {
             config,
             &twiddles,
             Default::default(),
+            true,
         )
         .expect("the recursion-channel fixture fits its fixed trace");
         let (precompile_seed, seeded) = committed.into_seeded();
@@ -442,7 +528,7 @@ mod tests {
         let (joint_interaction, mut joint_channel) =
             prove_joint_interaction::<Poseidon2M31Channel>(seeds);
         let relations = Relations::draw(&mut joint_channel);
-        let proof = seeded
+        let (proof, _) = seeded
             .prove(seeds, joint_interaction, relations)
             .expect("the joint transcript contains the recursion-channel seed");
         assert!(
@@ -497,6 +583,7 @@ mod tests {
             config,
             &twiddles,
             Default::default(),
+            false,
         );
         assert!(matches!(
             result,

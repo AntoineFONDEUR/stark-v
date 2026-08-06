@@ -12,8 +12,9 @@ The active definition is split across these source files:
   trace-table columns, derived expressions, constraints, and lookups through
   `define_air!`.
 - `crates/air/src/poseidon2.rs` declares Poseidon2 through `define_air_fns!`.
-- `crates/prover/src/components/mod.rs` fixes the component roster and claim
-  order.
+- `crates/prover/src/components/mod.rs` fixes the VM constituent roster and
+  identifies DSL-owned tables, currently Poseidon2, committed by a detached
+  constituent proof.
 - `crates/runner/src/ops/` executes instructions and fills the trace tables.
 - `crates/prover/src/public_data.rs` defines verifier-owned boundary terms.
 
@@ -39,7 +40,8 @@ The active execution-table families are:
 - loads and stores;
 - low and high multiplication;
 - division and remainder;
-- program, memory, Merkle, Poseidon2, and clock-update support tables.
+- program, memory, Merkle, and clock-update support tables in the VM
+  constituent, plus the detached Poseidon2 support table.
 
 ## Shared relations
 

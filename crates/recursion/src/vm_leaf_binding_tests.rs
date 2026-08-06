@@ -35,9 +35,10 @@ use super::transcript_binding_air::UniversalTranscriptWitness;
 use super::transcript_payload_air::{VerifierInputKind, VerifierInputRelations};
 use super::transcript_program::VerifierTranscriptExecution;
 use super::transcript_program::tests::{
-    plan_for_schema_with_counts, recording_execution_for_with_claimed_sum,
+    plan_for_schema_with_counts, recording_joint_executions_for_with_claimed_sums,
 };
 use super::transcript_state_air::TranscriptStateRelations;
+use super::verifier_randomness_air::VerifierRandomnessRelations;
 use super::vm_public_claim::tests::{public_data, shape};
 use super::vm_public_claim::{
     VmPublicClaimShape, canonical_vm_public_claim_words, vm_public_claim_digest,
@@ -72,7 +73,8 @@ use super::vm_public_logup_circuit::{
     build_vm_public_logup_reference,
 };
 use super::vm_public_logup_control_air::{
-    VmPublicLogupControlPreprocessed, gen_interaction_trace as gen_public_logup_control_interaction,
+    SegmentJointBindingWitness, VmPublicLogupControlPreprocessed, VmPublicLogupControlTable,
+    gen_interaction_trace as gen_public_logup_control_interaction, push_vm_public_logup_control,
 };
 use super::vm_public_logup_input_air::{
     VmPublicLogupInputPreprocessed, VmPublicLogupInputTable,
@@ -136,9 +138,17 @@ fn leaf_binding_relation_sum(mut channel: Poseidon2M31Channel) -> SecureField {
         VM_RELATION_CHALLENGE_COUNT,
         public_logup_reference.public_term_count(),
     );
+    let poseidon2_plan =
+        plan_for_schema_with_counts(VerifierSchema::Poseidon2, 1, VM_RELATION_CHALLENGE_COUNT, 0);
     let recursion_plan = plan_for_schema_with_counts(VerifierSchema::Recursion, 1, 1, 0);
-    let provisional_execution =
-        recording_execution_for_with_claimed_sum(&vm_plan, 1, SecureField::zero());
+    let (provisional_execution, _, _, _) = recording_joint_executions_for_with_claimed_sums(
+        &vm_plan,
+        &poseidon2_plan,
+        1,
+        SecureField::zero(),
+        SecureField::zero(),
+        SecureField::zero(),
+    );
     let challenge_words = public_logup_challenge_words(&provisional_execution);
     let public_claim_words = canonical_vm_public_claim_words(&public_data, shape)
         .expect("fixture public claim is canonical");
@@ -150,12 +160,22 @@ fn leaf_binding_relation_sum(mut channel: Poseidon2M31Channel) -> SecureField {
             claim_words: &public_claim_words,
             relation_challenges: challenge_words,
             claimed_sums: &[SecureField::zero()],
+            shared_relation_sum: SecureField::zero(),
         },
     )
     .expect("fixture public relation denominators are nonzero");
-    let interaction_claimed_sum = -provisional_public_logup.constrained_sum();
-    let transcript_execution =
-        recording_execution_for_with_claimed_sum(&vm_plan, 1, interaction_claimed_sum);
+    let interaction_claimed_sum = SecureField::zero();
+    let shared_relation_sum = provisional_public_logup.constrained_sum();
+    let poseidon2_claimed_sum = -shared_relation_sum;
+    let (transcript_execution, poseidon2_execution, interaction_seeds, interaction_pow) =
+        recording_joint_executions_for_with_claimed_sums(
+            &vm_plan,
+            &poseidon2_plan,
+            1,
+            interaction_claimed_sum,
+            poseidon2_claimed_sum,
+            shared_relation_sum,
+        );
     let challenge_words = public_logup_challenge_words(&transcript_execution);
     let public_logup_witness = build_vm_public_logup_circuit(
         shape,
@@ -165,6 +185,7 @@ fn leaf_binding_relation_sum(mut channel: Poseidon2M31Channel) -> SecureField {
             claim_words: &public_claim_words,
             relation_challenges: challenge_words,
             claimed_sums: &[interaction_claimed_sum],
+            shared_relation_sum,
         },
     )
     .expect("fixture public LogUp equation closes");
@@ -179,6 +200,7 @@ fn leaf_binding_relation_sum(mut channel: Poseidon2M31Channel) -> SecureField {
     let transcript_state_relations = TranscriptStateRelations::draw(&mut channel);
     let relation_challenge_relations = RelationChallengeRelations::draw(&mut channel);
     let control_relations = ControlRelations::draw(&mut channel);
+    let randomness_relations = VerifierRandomnessRelations::draw(&mut channel);
 
     let claim_preprocessing =
         VmPublicClaimInputPreprocessed::new(shape).expect("fixture claim shape is supported");
@@ -219,7 +241,10 @@ fn leaf_binding_relation_sum(mut channel: Poseidon2M31Channel) -> SecureField {
     push_relation_challenges(
         &mut challenge_table,
         &challenge_preprocessing,
-        UniversalTranscriptWitness::Segment(&transcript_execution),
+        UniversalTranscriptWitness::Segment {
+            vm: &transcript_execution,
+            poseidon2: &poseidon2_execution,
+        },
     )
     .expect("fixture transcript challenges materialize");
     let (_, relation_challenge_sum) = gen_relation_challenge_interaction(
@@ -237,10 +262,27 @@ fn leaf_binding_relation_sum(mut channel: Poseidon2M31Channel) -> SecureField {
         0,
     )
     .expect("fixture universal public control slices are exact");
+    let mut public_control_table = VmPublicLogupControlTable::new();
+    let segment_binding = SegmentJointBindingWitness {
+        interaction_seeds,
+        interaction_pow,
+        shared_relation_sum,
+        poseidon2_claimed_sum,
+    };
+    push_vm_public_logup_control(
+        &mut public_control_table,
+        &public_control_preprocessing,
+        ProofKind::SegmentLeaf,
+        Some(segment_binding),
+    )
+    .expect("fixture joint segment binding materializes");
     let (_, public_control_sum) = gen_public_logup_control_interaction(
+        &public_control_table.into_witness(),
         &public_control_preprocessing.gen_columns(),
         ProofKind::SegmentLeaf,
         &control_relations,
+        &verifier_input_relations,
+        &randomness_relations,
     );
 
     let mut poseidon = Poseidon2Table::new();
@@ -399,6 +441,12 @@ fn leaf_binding_relation_sum(mut channel: Poseidon2M31Channel) -> SecureField {
         + statement_source_terms(&statement_words, &statement_relations)
         + claim_digest_source_terms(&public_data, shape, &verifier_input_relations)
         + claimed_sum_source_terms(interaction_claimed_sum, &verifier_input_relations)
+        + shared_relation_sum_source_terms(shared_relation_sum, &verifier_input_relations)
+        + joint_binding_source_terms(
+            segment_binding,
+            &verifier_input_relations,
+            &randomness_relations,
+        )
         + transcript_draw_source_terms(&transcript_execution, &transcript_state_relations)
         + air_challenge_sink_terms(&transcript_execution, &relation_challenge_relations)
         + public_control_source_terms(&vm_plan, &control_relations)
@@ -443,6 +491,119 @@ fn claimed_sum_source_terms(
             sum + denominator.inverse()
         },
     )
+}
+
+fn shared_relation_sum_source_terms(
+    shared_relation_sum: SecureField,
+    relations: &VerifierInputRelations,
+) -> SecureField {
+    shared_relation_sum
+        .to_m31_array()
+        .into_iter()
+        .enumerate()
+        .fold(SecureField::zero(), |sum, (limb, value)| {
+            let denominator: SecureField = relations.input_word.combine(&[
+                M31::from(SEGMENT_VERIFIER_ID),
+                M31::from(VerifierInputKind::SharedRelationSum.as_u32()),
+                M31::zero(),
+                M31::from(u32::try_from(limb).expect("shared-sum limb fits u32")),
+                value,
+            ]);
+            sum + denominator.inverse()
+        })
+}
+
+fn joint_binding_source_terms(
+    witness: SegmentJointBindingWitness,
+    input_relations: &VerifierInputRelations,
+    randomness_relations: &VerifierRandomnessRelations,
+) -> SecureField {
+    let seed_terms = witness.interaction_seeds.into_iter().enumerate().fold(
+        SecureField::zero(),
+        |sum, (item, seed)| {
+            seed.to_m31_array()
+                .into_iter()
+                .enumerate()
+                .fold(sum, |sum, (limb, value)| {
+                    let item = u32::try_from(item).expect("joint-seed item fits u32");
+                    let limb = u32::try_from(limb).expect("joint-seed limb fits u32");
+                    let randomness: SecureField = randomness_relations.word.combine(&[
+                        M31::from(item),
+                        M31::from(
+                            super::verifier_randomness_air::VerifierRandomnessKind::InteractionSeed
+                                .as_u32(),
+                        ),
+                        M31::zero(),
+                        M31::from(limb),
+                        value,
+                    ]);
+                    [
+                        super::control_air::SEGMENT_VERIFIER_ID,
+                        super::control_air::POSEIDON2_VERIFIER_ID,
+                    ]
+                    .into_iter()
+                    .fold(sum + randomness.inverse(), |sum, verifier_id| {
+                        let input: SecureField = input_relations.input_word.combine(&[
+                            M31::from(verifier_id),
+                            M31::from(VerifierInputKind::JointInteractionSeed.as_u32()),
+                            M31::from(item),
+                            M31::from(limb),
+                            value,
+                        ]);
+                        sum + input.inverse()
+                    })
+                })
+        },
+    );
+    let nonce_terms = crate::transcript::encode_u64_words(witness.interaction_pow)
+        .into_iter()
+        .enumerate()
+        .fold(seed_terms, |sum, (limb, value)| {
+            [
+                super::control_air::SEGMENT_VERIFIER_ID,
+                super::control_air::POSEIDON2_VERIFIER_ID,
+            ]
+            .into_iter()
+            .fold(sum, |sum, verifier_id| {
+                let denominator: SecureField = input_relations.input_word.combine(&[
+                    M31::from(verifier_id),
+                    M31::from(VerifierInputKind::InteractionPowNonce.as_u32()),
+                    M31::zero(),
+                    M31::from(u32::try_from(limb).expect("nonce limb fits u32")),
+                    M31::from(value),
+                ]);
+                sum + denominator.inverse() + denominator.inverse()
+            })
+        });
+    [
+        (
+            SEGMENT_VERIFIER_ID,
+            VerifierInputKind::SharedRelationSum,
+            witness.shared_relation_sum,
+        ),
+        (
+            super::control_air::POSEIDON2_VERIFIER_ID,
+            VerifierInputKind::ClaimedSum,
+            witness.poseidon2_claimed_sum,
+        ),
+    ]
+    .into_iter()
+    .fold(nonce_terms, |sum, (verifier_id, kind, value)| {
+        value
+            .to_m31_array()
+            .into_iter()
+            .enumerate()
+            .fold(sum, |sum, (limb, value)| {
+                let denominator: SecureField = input_relations.input_word.combine(&[
+                    M31::from(verifier_id),
+                    M31::from(kind.as_u32()),
+                    M31::zero(),
+                    M31::from(u32::try_from(limb).expect("secure-field limb fits u32")),
+                    value,
+                ]);
+                sum + denominator.inverse()
+            })
+    })
 }
 
 fn transcript_draw_source_terms(
@@ -528,7 +689,8 @@ fn public_control_source_terms(
             matches!(
                 step,
                 VerifierStep::AccumulatePublicLogupTerm { .. }
-                    | VerifierStep::AssertGlobalLogupZero
+                    | VerifierStep::AssertVmSharedRelation
+                    | VerifierStep::AssertSegmentSharedRelationZero
             )
         })
         .fold(SecureField::zero(), |sum, (sequence, step)| {

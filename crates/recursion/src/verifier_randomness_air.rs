@@ -22,7 +22,8 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::relation;
 
 use super::control_air::{
-    LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
+    LEFT_RECURSION_VERIFIER_ID, POSEIDON2_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID,
+    SEGMENT_VERIFIER_ID,
 };
 use super::kernel::{VerifierControlPlan, VerifierSchema, VerifierStep};
 use super::transcript::RecordingTranscriptBackend;
@@ -84,6 +85,7 @@ pub enum VerifierRandomnessKind {
     DeepRandomness = 3,
     FriAlpha = 4,
     RawQuery = 5,
+    InteractionSeed = 6,
 }
 
 impl VerifierRandomnessKind {
@@ -109,7 +111,8 @@ impl DrawDescriptor {
             VerifierRandomnessKind::CompositionRandomness
             | VerifierRandomnessKind::DeepRandomness
             | VerifierRandomnessKind::FriAlpha
-            | VerifierRandomnessKind::RawQuery => 1,
+            | VerifierRandomnessKind::RawQuery
+            | VerifierRandomnessKind::InteractionSeed => 1,
         }
     }
 }
@@ -126,18 +129,20 @@ struct PreprocessedRow {
     descriptor: DrawDescriptor,
 }
 
-/// Trusted non-relation draw operations for all three verifier lanes.
+/// Trusted non-relation draw operations for all four verifier lanes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifierRandomnessPreprocessed {
     log_size: u32,
     rows: Vec<PreprocessedRow>,
     vm_draw_count: u32,
+    poseidon2_draw_count: u32,
     recursion_draw_count: u32,
 }
 
 impl VerifierRandomnessPreprocessed {
     pub fn new(
         vm: &VerifierControlPlan,
+        poseidon2: &VerifierControlPlan,
         recursion: &VerifierControlPlan,
     ) -> Result<Self, VerifierRandomnessError> {
         if vm.schema() != VerifierSchema::Vm {
@@ -145,6 +150,13 @@ impl VerifierRandomnessPreprocessed {
                 lane: "segment",
                 expected: VerifierSchema::Vm,
                 actual: vm.schema(),
+            });
+        }
+        if poseidon2.schema() != VerifierSchema::Poseidon2 {
+            return Err(VerifierRandomnessError::SchemaMismatch {
+                lane: "Poseidon2 segment",
+                expected: VerifierSchema::Poseidon2,
+                actual: poseidon2.schema(),
             });
         }
         if recursion.schema() != VerifierSchema::Recursion {
@@ -157,6 +169,8 @@ impl VerifierRandomnessPreprocessed {
 
         let mut rows = Vec::new();
         let vm_draw_count = append_plan_rows(&mut rows, vm, SEGMENT_VERIFIER_ID, 1, 0)?;
+        let poseidon2_draw_count =
+            append_plan_rows(&mut rows, poseidon2, POSEIDON2_VERIFIER_ID, 1, 0)?;
         let recursion_draw_count =
             append_plan_rows(&mut rows, recursion, LEFT_RECURSION_VERIFIER_ID, 0, 1)?;
         append_plan_rows(&mut rows, recursion, RIGHT_RECURSION_VERIFIER_ID, 0, 1)?;
@@ -173,6 +187,7 @@ impl VerifierRandomnessPreprocessed {
             log_size,
             rows,
             vm_draw_count,
+            poseidon2_draw_count,
             recursion_draw_count,
         })
     }
@@ -183,6 +198,10 @@ impl VerifierRandomnessPreprocessed {
 
     pub const fn vm_draw_count(&self) -> u32 {
         self.vm_draw_count
+    }
+
+    pub const fn poseidon2_draw_count(&self) -> u32 {
+        self.poseidon2_draw_count
     }
 
     pub const fn recursion_draw_count(&self) -> u32 {
@@ -277,6 +296,7 @@ fn draw_descriptor(step: VerifierStep) -> Result<Option<DrawDescriptor>, Verifie
         word_count: SECURE_FIELD_WORDS,
     };
     let descriptor = match step {
+        VerifierStep::DrawInteractionSeed => secure(VerifierRandomnessKind::InteractionSeed, 0),
         VerifierStep::DrawCompositionRandomness => {
             secure(VerifierRandomnessKind::CompositionRandomness, 0)
         }
@@ -307,8 +327,13 @@ fn draw_descriptor(step: VerifierStep) -> Result<Option<DrawDescriptor>, Verifie
         | VerifierStep::BindPcsParameters
         | VerifierStep::AbsorbTraceCommitment { .. }
         | VerifierStep::AbsorbPublicClaim
+        | VerifierStep::AbsorbJointInteractionSeeds
+        | VerifierStep::AbsorbJointInteractionNonce { .. }
         | VerifierStep::VerifyAndAbsorbInteractionPow { .. }
         | VerifierStep::AccumulatePublicLogupTerm { .. }
+        | VerifierStep::AssertVmSharedRelation
+        | VerifierStep::AssertSegmentSharedRelationZero
+        | VerifierStep::AbsorbSharedRelationSum
         | VerifierStep::AssertGlobalLogupZero
         | VerifierStep::AbsorbClaimedSums { .. }
         | VerifierStep::EvaluateAirInstruction { .. }
@@ -491,14 +516,17 @@ pub fn push_verifier_randomness(
     preprocessed: &VerifierRandomnessPreprocessed,
     witness: UniversalTranscriptWitness<'_>,
 ) -> Result<(), VerifierRandomnessError> {
-    let (segment, left, right) = match witness {
-        UniversalTranscriptWitness::Segment(execution) => (Some(execution), None, None),
-        UniversalTranscriptWitness::Binary { left, right } => (None, Some(left), Some(right)),
-        UniversalTranscriptWitness::Empty => (None, None, None),
+    let (segment, poseidon2, left, right) = match witness {
+        UniversalTranscriptWitness::Segment { vm, poseidon2 } => {
+            (Some(vm), Some(poseidon2), None, None)
+        }
+        UniversalTranscriptWitness::Binary { left, right } => (None, None, Some(left), Some(right)),
+        UniversalTranscriptWitness::Empty => (None, None, None, None),
     };
     for row in &preprocessed.rows {
         let execution = match row.verifier_id {
             SEGMENT_VERIFIER_ID => segment,
+            POSEIDON2_VERIFIER_ID => poseidon2,
             LEFT_RECURSION_VERIFIER_ID => left,
             RIGHT_RECURSION_VERIFIER_ID => right,
             verifier_id => return Err(VerifierRandomnessError::UnknownVerifierId { verifier_id }),
@@ -624,9 +652,14 @@ mod tests {
     use crate::transcript_program::TranscriptEffect;
     use crate::transcript_program::tests::{plan_for_schema, recording_execution_for};
 
-    fn plans() -> (VerifierControlPlan, VerifierControlPlan) {
+    fn plans() -> (
+        VerifierControlPlan,
+        VerifierControlPlan,
+        VerifierControlPlan,
+    ) {
         (
             plan_for_schema(VerifierSchema::Vm, 1),
+            plan_for_schema(VerifierSchema::Poseidon2, 1),
             plan_for_schema(VerifierSchema::Recursion, 1),
         )
     }
@@ -661,14 +694,18 @@ mod tests {
     }
 
     fn assert_constraints(kind: ProofKind, tamper_inactive: bool) {
-        let (vm, recursion) = plans();
-        let preprocessing = VerifierRandomnessPreprocessed::new(&vm, &recursion)
+        let (vm, poseidon2, recursion) = plans();
+        let preprocessing = VerifierRandomnessPreprocessed::new(&vm, &poseidon2, &recursion)
             .expect("fixture plans have canonical verifier draws");
         let segment = recording_execution_for(&vm, 1);
+        let poseidon2_segment = recording_execution_for(&poseidon2, 1);
         let left = recording_execution_for(&recursion, 1);
         let right = recording_execution_for(&recursion, 2);
         let witness = match kind {
-            ProofKind::SegmentLeaf => UniversalTranscriptWitness::Segment(&segment),
+            ProofKind::SegmentLeaf => UniversalTranscriptWitness::Segment {
+                vm: &segment,
+                poseidon2: &poseidon2_segment,
+            },
             ProofKind::BinaryNode => UniversalTranscriptWitness::Binary {
                 left: &left,
                 right: &right,
@@ -711,15 +748,19 @@ mod tests {
     }
 
     fn bridge_sum(swap_verifier: bool, swap_kind: bool) -> QM31 {
-        let (vm, recursion) = plans();
-        let preprocessing = VerifierRandomnessPreprocessed::new(&vm, &recursion)
+        let (vm, poseidon2, recursion) = plans();
+        let preprocessing = VerifierRandomnessPreprocessed::new(&vm, &poseidon2, &recursion)
             .expect("fixture plans have canonical verifier draws");
         let execution = recording_execution_for(&vm, 1);
+        let poseidon2_execution = recording_execution_for(&poseidon2, 1);
         let mut table = VerifierRandomnessTable::new();
         push_verifier_randomness(
             &mut table,
             &preprocessing,
-            UniversalTranscriptWitness::Segment(&execution),
+            UniversalTranscriptWitness::Segment {
+                vm: &execution,
+                poseidon2: &poseidon2_execution,
+            },
         )
         .expect("fixture verifier draws materialize");
 
@@ -734,10 +775,16 @@ mod tests {
             &randomness_relations,
         );
         component_sum
-            + transcript_source_terms(&preprocessing, &execution, &transcript_relations)
+            + transcript_source_terms(
+                &preprocessing,
+                &execution,
+                &poseidon2_execution,
+                &transcript_relations,
+            )
             + randomness_consumer_terms(
                 &preprocessing,
                 &execution,
+                &poseidon2_execution,
                 &randomness_relations,
                 swap_verifier,
                 swap_kind,
@@ -746,7 +793,8 @@ mod tests {
 
     fn transcript_source_terms(
         preprocessing: &VerifierRandomnessPreprocessed,
-        execution: &VerifierTranscriptExecution<RecordingTranscriptBackend>,
+        vm_execution: &VerifierTranscriptExecution<RecordingTranscriptBackend>,
+        poseidon2_execution: &VerifierTranscriptExecution<RecordingTranscriptBackend>,
         relations: &TranscriptStateRelations,
     ) -> QM31 {
         preprocessing
@@ -754,6 +802,11 @@ mod tests {
             .iter()
             .filter(|row| row.segment_mask == 1)
             .fold(QM31::zero(), |sum, row| {
+                let execution = if row.verifier_id == SEGMENT_VERIFIER_ID {
+                    vm_execution
+                } else {
+                    poseidon2_execution
+                };
                 let draw =
                     operation_draw(execution, row).expect("fixture operation has a verifier draw");
                 let mut tuple = vec![
@@ -773,7 +826,8 @@ mod tests {
 
     fn randomness_consumer_terms(
         preprocessing: &VerifierRandomnessPreprocessed,
-        execution: &VerifierTranscriptExecution<RecordingTranscriptBackend>,
+        vm_execution: &VerifierTranscriptExecution<RecordingTranscriptBackend>,
+        poseidon2_execution: &VerifierTranscriptExecution<RecordingTranscriptBackend>,
         relations: &VerifierRandomnessRelations,
         swap_verifier: bool,
         swap_kind: bool,
@@ -783,6 +837,11 @@ mod tests {
             .iter()
             .filter(|row| row.segment_mask == 1)
             .flat_map(|row| {
+                let execution = if row.verifier_id == SEGMENT_VERIFIER_ID {
+                    vm_execution
+                } else {
+                    poseidon2_execution
+                };
                 let draw =
                     operation_draw(execution, row).expect("fixture operation has a verifier draw");
                 draw.into_iter()
@@ -858,16 +917,17 @@ mod tests {
     }
 
     #[rstest]
-    fn fixture_plans_have_six_non_relation_draws_per_lane() {
-        let (vm, recursion) = plans();
-        let preprocessing = VerifierRandomnessPreprocessed::new(&vm, &recursion)
+    fn fixture_plans_include_constituent_seeds_outside_relation_draws() {
+        let (vm, poseidon2, recursion) = plans();
+        let preprocessing = VerifierRandomnessPreprocessed::new(&vm, &poseidon2, &recursion)
             .expect("fixture plans have canonical verifier draws");
         assert_eq!(
             (
                 preprocessing.vm_draw_count(),
+                preprocessing.poseidon2_draw_count(),
                 preprocessing.recursion_draw_count()
             ),
-            (6, 6)
+            (7, 7, 6)
         );
     }
 
@@ -882,14 +942,16 @@ mod tests {
     #[rstest]
     fn partial_query_block_exports_only_its_single_planned_word() {
         let vm = plan_with_nine_queries(VerifierSchema::Vm);
+        let poseidon2 = plan_with_nine_queries(VerifierSchema::Poseidon2);
         let recursion = plan_with_nine_queries(VerifierSchema::Recursion);
-        let preprocessing = VerifierRandomnessPreprocessed::new(&vm, &recursion)
+        let preprocessing = VerifierRandomnessPreprocessed::new(&vm, &poseidon2, &recursion)
             .expect("nine-query plans have canonical verifier draws");
         let query_rows = preprocessing
             .rows
             .iter()
             .filter(|row| {
-                row.segment_mask == 1 && row.descriptor.kind == VerifierRandomnessKind::RawQuery
+                row.verifier_id == SEGMENT_VERIFIER_ID
+                    && row.descriptor.kind == VerifierRandomnessKind::RawQuery
             })
             .map(|row| {
                 (
@@ -904,10 +966,10 @@ mod tests {
 
     #[rstest]
     fn typed_draw_adapters_partition_every_transcript_draw() {
-        let (vm, recursion) = plans();
+        let (vm, poseidon2, recursion) = plans();
         let relation = RelationChallengePreprocessed::new(&vm, &recursion)
             .expect("fixture relation draws are canonical");
-        let randomness = VerifierRandomnessPreprocessed::new(&vm, &recursion)
+        let randomness = VerifierRandomnessPreprocessed::new(&vm, &poseidon2, &recursion)
             .expect("fixture verifier draws are canonical");
         let vm_draws = vm
             .steps()
@@ -919,13 +981,19 @@ mod tests {
             .iter()
             .filter(|step| step.transcript_effect() == Some(TranscriptEffect::Draw))
             .count();
+        let poseidon2_draws = poseidon2
+            .steps()
+            .iter()
+            .filter(|step| step.transcript_effect() == Some(TranscriptEffect::Draw))
+            .count();
         assert_eq!(
             (
                 relation.vm_challenge_count() as usize + randomness.vm_draw_count() as usize,
+                randomness.poseidon2_draw_count() as usize,
                 relation.recursion_challenge_count() as usize
                     + randomness.recursion_draw_count() as usize,
             ),
-            (vm_draws, recursion_draws)
+            (vm_draws, poseidon2_draws, recursion_draws)
         );
     }
 }

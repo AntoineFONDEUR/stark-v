@@ -17,7 +17,7 @@ use stwo::prover::backend::simd::SimdBackend;
 use thiserror::Error;
 
 use prover::{
-    Preprocessing, Proof, PublicData, prove_rv32im_with_channel, verify_rv32im_with_channel,
+    Preprocessing, PublicData, SegmentProof, prove_rv32im_with_channel, verify_rv32im_with_channel,
 };
 
 /// A public field that must agree at an adjacent segment boundary.
@@ -61,7 +61,7 @@ pub fn prove_segments(
     run_results: Vec<runner::RunResult>,
     config: PcsConfig,
     preprocessing: &Preprocessing,
-) -> Vec<Proof<Blake2sMerkleHasher>> {
+) -> Vec<SegmentProof<Blake2sMerkleHasher>> {
     prove_segments_with_channel::<Blake2sMerkleChannel>(run_results, config, preprocessing)
 }
 
@@ -74,7 +74,7 @@ pub fn prove_segments_with_channel<MC: MerkleChannel>(
     run_results: Vec<runner::RunResult>,
     config: PcsConfig,
     preprocessing: &Preprocessing<MC::H>,
-) -> Vec<Proof<MC::H>>
+) -> Vec<SegmentProof<MC::H>>
 where
     SimdBackend: stwo::prover::backend::BackendForChannel<MC>
         + stwo::prover::backend::ColumnOps<
@@ -121,7 +121,7 @@ pub fn validate_segment_chain(public_data: &[PublicData]) -> Result<(), Continua
 
 /// Verifies a non-empty continuation with the Blake2s channel.
 pub fn verify_segments(
-    proofs: Vec<Proof<Blake2sMerkleHasher>>,
+    proofs: Vec<SegmentProof<Blake2sMerkleHasher>>,
     config: PcsConfig,
     preprocessing: &Preprocessing,
 ) -> Result<(), ContinuationError> {
@@ -130,13 +130,13 @@ pub fn verify_segments(
 
 /// Verifies each proof and every adjacent public boundary on the host.
 pub fn verify_segments_with_channel<MC: MerkleChannel>(
-    proofs: Vec<Proof<MC::H>>,
+    proofs: Vec<SegmentProof<MC::H>>,
     config: PcsConfig,
     preprocessing: &Preprocessing<MC::H>,
 ) -> Result<(), ContinuationError> {
     let public_data = proofs
         .iter()
-        .map(|proof| proof.public_data.clone())
+        .map(|proof| proof.vm.public_data.clone())
         .collect::<Vec<_>>();
     validate_segment_chain(&public_data)?;
 

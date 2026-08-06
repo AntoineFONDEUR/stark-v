@@ -4,7 +4,7 @@
 //! operation headers that the universal transcript AIR authenticates. This
 //! channel consumes the trusted verifier plan as STWO requests commitments,
 //! randomness, proof-of-work checks, and query blocks, while retaining the
-//! Poseidon2-M31 Merkle hash used by ordinary VM proofs.
+//! Poseidon2-M31 Merkle hash used by recursion-targeted segment proofs.
 
 use core::fmt;
 
@@ -87,6 +87,33 @@ impl ProfiledPoseidon2M31Channel {
         Ok(channel)
     }
 
+    /// Initializes the fixed prefix of one standalone Poseidon2 proof.
+    pub fn for_poseidon2_proof(
+        plan: &VerifierControlPlan,
+        protocol_id: ProtocolId,
+        statement: &SpanStatement,
+    ) -> Result<Self, ProfiledChannelError> {
+        if plan.schema() != VerifierSchema::Poseidon2 {
+            return Err(ProfiledChannelError::SchemaMismatch {
+                expected: VerifierSchema::Poseidon2,
+                actual: plan.schema(),
+            });
+        }
+        let mut channel = Self {
+            kernel: TranscriptKernel::default(),
+            plan: Some(plan.clone()),
+            next_sequence: 0,
+            draws: Vec::new(),
+        };
+        channel.consume_exact_mix(VerifierStep::BindProtocol, protocol_id.digest().words())?;
+        channel.consume_exact_mix(VerifierStep::BindStatement, &statement.canonical_words())?;
+        channel.consume_exact_mix(
+            VerifierStep::BindPcsParameters,
+            &plan.pcs_parameters().canonical_words(),
+        )?;
+        Ok(channel)
+    }
+
     /// Binds the fixed canonical VM claim after the main trace commitment.
     pub fn absorb_vm_public_claim(
         &mut self,
@@ -114,6 +141,17 @@ impl ProfiledPoseidon2M31Channel {
         };
         require_count("claimed sums", count, claimed_sums.len())?;
         self.consume_secure_field_mix(step, claimed_sums)
+    }
+
+    /// Binds the VM constituent's public shared-relation deficit.
+    pub fn absorb_shared_relation_sum(
+        &mut self,
+        shared_relation_sum: SecureField,
+    ) -> Result<(), ProfiledChannelError> {
+        self.consume_exact_secure_field_mix(
+            VerifierStep::AbsorbSharedRelationSum,
+            &[shared_relation_sum],
+        )
     }
 
     /// Requires the STWO prover to have consumed every transcript operation.
@@ -155,6 +193,18 @@ impl ProfiledPoseidon2M31Channel {
         self.consume_mix(step, &words)
     }
 
+    fn consume_exact_secure_field_mix(
+        &mut self,
+        expected: VerifierStep,
+        values: &[SecureField],
+    ) -> Result<(), ProfiledChannelError> {
+        let (_, actual) = self.next_transcript_step()?;
+        if actual != expected {
+            return Err(self.unexpected("fixed field mix", actual));
+        }
+        self.consume_secure_field_mix(actual, values)
+    }
+
     fn consume_exact_mix(
         &mut self,
         expected: VerifierStep,
@@ -191,7 +241,8 @@ impl ProfiledPoseidon2M31Channel {
         let (sequence, step) = self.next_transcript_step()?;
         if !matches!(
             step,
-            VerifierStep::DrawRelationChallenge { .. }
+            VerifierStep::DrawInteractionSeed
+                | VerifierStep::DrawRelationChallenge { .. }
                 | VerifierStep::DrawCompositionRandomness
                 | VerifierStep::DrawOodsPoint
                 | VerifierStep::DrawDeepRandomness
@@ -280,8 +331,23 @@ impl Channel for ProfiledPoseidon2M31Channel {
         candidate.consume_pow(nonce, n_bits).is_ok()
     }
 
-    fn mix_u32s(&mut self, _data: &[u32]) {
-        panic!("the profiled transcript accepts typed canonical payloads only")
+    fn mix_u32s(&mut self, data: &[u32]) {
+        let (_, step) = self
+            .next_transcript_step()
+            .expect("STWO requested word absorption after the verifier plan ended");
+        assert_eq!(
+            step,
+            VerifierStep::AbsorbPublicClaim,
+            "STWO word absorption disagrees with verifier step {step:?}",
+        );
+        let words = data
+            .iter()
+            .copied()
+            .map(M31Word::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("profiled public claims contain canonical M31 words");
+        self.consume_mix(step, &words)
+            .expect("STWO public claim matches the trusted verifier plan");
     }
 
     fn mix_felts(&mut self, felts: &[SecureField]) {
@@ -289,8 +355,16 @@ impl Channel for ProfiledPoseidon2M31Channel {
             .next_transcript_step()
             .expect("STWO requested field absorption after the verifier plan ended");
         let expected = match step {
+            VerifierStep::AbsorbJointInteractionSeeds => {
+                assert_eq!(felts.len(), 2, "joint binding contains two ordered seeds");
+                self.consume_secure_field_mix(step, felts)
+                    .expect("joint seeds match the trusted verifier plan");
+                return;
+            }
             VerifierStep::AbsorbSampledValues { count }
-            | VerifierStep::AbsorbLastLayerCoefficients { count } => count,
+            | VerifierStep::AbsorbLastLayerCoefficients { count }
+            | VerifierStep::AbsorbClaimedSums { count } => count,
+            VerifierStep::AbsorbSharedRelationSum => 1,
             _ => panic!("STWO field absorption disagrees with verifier step {step:?}"),
         };
         require_count("secure fields", expected, felts.len())
@@ -305,6 +379,12 @@ impl Channel for ProfiledPoseidon2M31Channel {
         let bits = match step {
             VerifierStep::VerifyAndAbsorbInteractionPow { bits }
             | VerifierStep::VerifyAndAbsorbPcsPow { bits } => bits,
+            VerifierStep::AbsorbJointInteractionNonce { .. } => {
+                let words = crate::transcript::encode_u64_words(value);
+                self.consume_mix(step, &words)
+                    .expect("joint nonce matches the trusted verifier plan");
+                return;
+            }
             _ => panic!("STWO nonce absorption disagrees with verifier step {step:?}"),
         };
         self.consume_pow(value, bits)
@@ -509,6 +589,7 @@ impl prover::VmClaimTranscript<ProfiledPoseidon2M31Channel> for RecursionVmClaim
         channel: &mut ProfiledPoseidon2M31Channel,
         interaction_claim: &prover::InteractionClaim,
     ) -> Result<(), Self::Error> {
-        channel.absorb_claimed_sums(&interaction_claim.claimed_sum.component_values())
+        channel.absorb_claimed_sums(&interaction_claim.claimed_sum.component_values())?;
+        channel.absorb_shared_relation_sum(interaction_claim.shared_relation_sum)
     }
 }

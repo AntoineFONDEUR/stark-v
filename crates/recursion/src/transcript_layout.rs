@@ -396,15 +396,20 @@ fn payload_word_count(
         VerifierStep::AbsorbPublicClaim => match plan.schema() {
             super::kernel::VerifierSchema::Vm => DIGEST_WORDS,
             super::kernel::VerifierSchema::Recursion => 0,
+            super::kernel::VerifierSchema::Poseidon2 => 1,
         },
-        VerifierStep::DrawRelationChallenge { .. }
+        VerifierStep::DrawInteractionSeed
+        | VerifierStep::DrawRelationChallenge { .. }
         | VerifierStep::DrawCompositionRandomness
         | VerifierStep::DrawOodsPoint
         | VerifierStep::DrawDeepRandomness
         | VerifierStep::DrawFriAlpha { .. }
         | VerifierStep::DrawQueryBlock { .. } => 0,
         VerifierStep::VerifyAndAbsorbInteractionPow { .. }
+        | VerifierStep::AbsorbJointInteractionNonce { .. }
         | VerifierStep::VerifyAndAbsorbPcsPow { .. } => POW_NONCE_WORDS,
+        VerifierStep::AbsorbJointInteractionSeeds => 8,
+        VerifierStep::AbsorbSharedRelationSum => 4,
         VerifierStep::AbsorbClaimedSums { count }
         | VerifierStep::AbsorbSampledValues { count }
         | VerifierStep::AbsorbLastLayerCoefficients { count } => {
@@ -413,6 +418,8 @@ fn payload_word_count(
                 .ok_or(TranscriptLayoutError::PayloadWordCountOverflow { count });
         }
         VerifierStep::AccumulatePublicLogupTerm { .. }
+        | VerifierStep::AssertVmSharedRelation
+        | VerifierStep::AssertSegmentSharedRelationZero
         | VerifierStep::AssertGlobalLogupZero
         | VerifierStep::EvaluateAirInstruction { .. }
         | VerifierStep::AssertComposition { .. }

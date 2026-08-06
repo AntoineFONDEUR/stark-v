@@ -1,8 +1,8 @@
 //! Trusted universal control program for recursion.
 //!
-//! The preprocessed trace contains one VM verifier lane and two recursion
-//! verifier lanes. Public proof-kind constants activate only the segment lane
-//! or both binary lanes; an empty leaf activates none. Every active row emits
+//! The preprocessed trace contains VM and Poseidon2 segment lanes plus two
+//! recursion lanes. Public proof-kind constants activate both segment lanes or
+//! both binary lanes; an empty leaf activates none. Every active row emits
 //! its exact `(verifier, sequence, tag, args)` tuple, so downstream gadgets
 //! must discharge every mandatory verifier step without proof-selected
 //! control flow.
@@ -26,8 +26,9 @@ use super::kernel::{VerifierControlPlan, VerifierSchema, VerifierStep};
 use super::wire::ProofKind;
 
 pub const SEGMENT_VERIFIER_ID: u32 = 0;
-pub const LEFT_RECURSION_VERIFIER_ID: u32 = 1;
-pub const RIGHT_RECURSION_VERIFIER_ID: u32 = 2;
+pub const POSEIDON2_VERIFIER_ID: u32 = 1;
+pub const LEFT_RECURSION_VERIFIER_ID: u32 = 2;
+pub const RIGHT_RECURSION_VERIFIER_ID: u32 = 3;
 
 const MIN_LOG_SIZE: u32 = 4;
 const MAX_LOG_SIZE: u32 = 30;
@@ -81,12 +82,14 @@ pub struct ControlPreprocessed {
     log_size: u32,
     rows: Vec<ControlRow>,
     vm_step_count: usize,
+    poseidon2_step_count: usize,
     recursion_step_count: usize,
 }
 
 impl ControlPreprocessed {
     pub fn new(
         vm: &VerifierControlPlan,
+        poseidon2: &VerifierControlPlan,
         recursion: &VerifierControlPlan,
     ) -> Result<Self, ControlLayoutError> {
         if vm.schema() != VerifierSchema::Vm {
@@ -94,6 +97,13 @@ impl ControlPreprocessed {
                 lane: "segment",
                 expected: VerifierSchema::Vm,
                 actual: vm.schema(),
+            });
+        }
+        if poseidon2.schema() != VerifierSchema::Poseidon2 {
+            return Err(ControlLayoutError::SchemaMismatch {
+                lane: "Poseidon2 segment",
+                expected: VerifierSchema::Poseidon2,
+                actual: poseidon2.schema(),
             });
         }
         if recursion.schema() != VerifierSchema::Recursion {
@@ -107,6 +117,8 @@ impl ControlPreprocessed {
         let row_count = vm
             .steps()
             .len()
+            .checked_add(poseidon2.steps().len())
+            .ok_or(ControlLayoutError::RowCountOverflow)?
             .checked_add(
                 recursion
                     .steps()
@@ -126,12 +138,14 @@ impl ControlPreprocessed {
 
         let mut rows = Vec::with_capacity(row_count);
         append_plan_rows(&mut rows, vm, SEGMENT_VERIFIER_ID, 1, 0)?;
+        append_plan_rows(&mut rows, poseidon2, POSEIDON2_VERIFIER_ID, 1, 0)?;
         append_plan_rows(&mut rows, recursion, LEFT_RECURSION_VERIFIER_ID, 0, 1)?;
         append_plan_rows(&mut rows, recursion, RIGHT_RECURSION_VERIFIER_ID, 0, 1)?;
         Ok(Self {
             log_size,
             rows,
             vm_step_count: vm.steps().len(),
+            poseidon2_step_count: poseidon2.steps().len(),
             recursion_step_count: recursion.steps().len(),
         })
     }
@@ -176,7 +190,7 @@ impl ControlPreprocessed {
 
     pub const fn active_step_count(&self, kind: ProofKind) -> usize {
         match kind {
-            ProofKind::SegmentLeaf => self.vm_step_count,
+            ProofKind::SegmentLeaf => self.vm_step_count + self.poseidon2_step_count,
             ProofKind::BinaryNode => 2 * self.recursion_step_count,
             ProofKind::EmptyLeaf => 0,
         }
@@ -394,8 +408,12 @@ mod tests {
     }
 
     fn preprocessing() -> ControlPreprocessed {
-        ControlPreprocessed::new(&plan(VerifierSchema::Vm), &plan(VerifierSchema::Recursion))
-            .expect("fixture plans occupy their canonical lanes")
+        ControlPreprocessed::new(
+            &plan(VerifierSchema::Vm),
+            &plan(VerifierSchema::Poseidon2),
+            &plan(VerifierSchema::Recursion),
+        )
+        .expect("fixture plans occupy their canonical lanes")
     }
 
     fn assert_control_constraints(kind: ProofKind) {
@@ -425,20 +443,18 @@ mod tests {
     }
 
     #[rstest]
-    #[case::segment(ProofKind::SegmentLeaf, 1)]
-    #[case::binary(ProofKind::BinaryNode, 2)]
-    #[case::empty(ProofKind::EmptyLeaf, 0)]
-    fn proof_kind_activates_only_its_verifier_lanes(
-        #[case] kind: ProofKind,
-        #[case] lane_multiplier: usize,
-    ) {
+    #[case::segment(ProofKind::SegmentLeaf)]
+    #[case::binary(ProofKind::BinaryNode)]
+    #[case::empty(ProofKind::EmptyLeaf)]
+    fn proof_kind_activates_only_its_verifier_lanes(#[case] kind: ProofKind) {
         let vm = plan(VerifierSchema::Vm);
+        let poseidon2 = plan(VerifierSchema::Poseidon2);
         let recursion = plan(VerifierSchema::Recursion);
         let preprocessing =
-            ControlPreprocessed::new(&vm, &recursion).expect("fixture lanes are valid");
+            ControlPreprocessed::new(&vm, &poseidon2, &recursion).expect("fixture lanes are valid");
         let expected = match kind {
-            ProofKind::SegmentLeaf => lane_multiplier * vm.steps().len(),
-            ProofKind::BinaryNode => lane_multiplier * recursion.steps().len(),
+            ProofKind::SegmentLeaf => vm.steps().len() + poseidon2.steps().len(),
+            ProofKind::BinaryNode => 2 * recursion.steps().len(),
             ProofKind::EmptyLeaf => 0,
         };
         assert_eq!(preprocessing.active_step_count(kind), expected);
@@ -459,12 +475,13 @@ mod tests {
     #[rstest]
     fn control_layout_rejects_swapped_schema_lanes() {
         let vm = plan(VerifierSchema::Vm);
-        let result = ControlPreprocessed::new(&vm, &vm);
+        let recursion = plan(VerifierSchema::Recursion);
+        let result = ControlPreprocessed::new(&vm, &vm, &recursion);
         assert!(matches!(
             result,
             Err(ControlLayoutError::SchemaMismatch {
-                lane: "binary",
-                expected: VerifierSchema::Recursion,
+                lane: "Poseidon2 segment",
+                expected: VerifierSchema::Poseidon2,
                 actual: VerifierSchema::Vm,
             })
         ));

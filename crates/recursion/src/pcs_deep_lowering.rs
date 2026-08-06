@@ -169,7 +169,8 @@ mod tests {
 
     use super::*;
     use crate::control_air::{
-        LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
+        LEFT_RECURSION_VERIFIER_ID, POSEIDON2_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID,
+        SEGMENT_VERIFIER_ID,
     };
     use crate::pcs_deep_circuit::{
         PcsDeepInputSource, PcsDeepProfile, PcsDeepWitness, build_pcs_deep_circuit,
@@ -186,16 +187,17 @@ mod tests {
     use crate::wire::ProofKind;
     use crate::{linear_ops, qm31_inv, qm31_mul};
 
-    const CIRCUIT_IDS: [u32; 3] = [201, 202, 203];
+    const CIRCUIT_IDS: [u32; 4] = [201, 202, 203, 204];
 
     struct CircuitSet {
         segment: PcsDeepCircuit,
+        poseidon2: PcsDeepCircuit,
         left: PcsDeepCircuit,
         right: PcsDeepCircuit,
     }
 
     impl CircuitSet {
-        fn lanes(&self) -> [PcsDeepCircuitLane<'_>; 3] {
+        fn lanes(&self) -> [PcsDeepCircuitLane<'_>; 4] {
             [
                 PcsDeepCircuitLane {
                     verifier_id: SEGMENT_VERIFIER_ID,
@@ -203,13 +205,18 @@ mod tests {
                     circuit: &self.segment,
                 },
                 PcsDeepCircuitLane {
-                    verifier_id: LEFT_RECURSION_VERIFIER_ID,
+                    verifier_id: POSEIDON2_VERIFIER_ID,
                     circuit_id: CIRCUIT_IDS[1],
+                    circuit: &self.poseidon2,
+                },
+                PcsDeepCircuitLane {
+                    verifier_id: LEFT_RECURSION_VERIFIER_ID,
+                    circuit_id: CIRCUIT_IDS[2],
                     circuit: &self.left,
                 },
                 PcsDeepCircuitLane {
                     verifier_id: RIGHT_RECURSION_VERIFIER_ID,
-                    circuit_id: CIRCUIT_IDS[2],
+                    circuit_id: CIRCUIT_IDS[3],
                     circuit: &self.right,
                 },
             ]
@@ -229,6 +236,7 @@ mod tests {
     fn reference_set(profile: &PcsDeepProfile) -> CircuitSet {
         CircuitSet {
             segment: build_pcs_deep_reference(profile).expect("segment reference is valid"),
+            poseidon2: build_pcs_deep_reference(profile).expect("Poseidon2 reference is valid"),
             left: build_pcs_deep_reference(profile).expect("left reference is valid"),
             right: build_pcs_deep_reference(profile).expect("right reference is valid"),
         }
@@ -263,6 +271,7 @@ mod tests {
     fn segment_witness_set(profile: &PcsDeepProfile, answer_delta: SecureField) -> CircuitSet {
         CircuitSet {
             segment: active_circuit(profile, answer_delta),
+            poseidon2: active_circuit(profile, SecureField::zero()),
             left: build_pcs_deep_reference(profile).expect("left reference is valid"),
             right: build_pcs_deep_reference(profile).expect("right reference is valid"),
         }
@@ -327,6 +336,14 @@ mod tests {
             &randomness_relations,
             &query_relations,
             &deep_relations,
+        ) + semantic_source_terms(
+            crate::control_air::POSEIDON2_VERIFIER_ID,
+            &witnesses.poseidon2,
+            &verifier_input_relations,
+            &trace_relations,
+            &randomness_relations,
+            &query_relations,
+            &deep_relations,
         );
 
         let mut traces = CircuitTraces::default();
@@ -337,6 +354,13 @@ mod tests {
             &witnesses.segment,
         )
         .expect("valid segment DEEP circuit lowers");
+        lower_pcs_deep_circuit(
+            &mut traces,
+            CIRCUIT_IDS[1],
+            &references.poseidon2,
+            &witnesses.poseidon2,
+        )
+        .expect("valid Poseidon2 DEEP circuit lowers");
         let traces = traces
             .into_air_traces()
             .expect("lowered PCS DEEP schedules fit their traces");
@@ -360,7 +384,9 @@ mod tests {
         );
         let public_sum =
             public_pcs_deep_terms(CIRCUIT_IDS[0], &references.segment, &circuit_relations)
-                .expect("segment reference outputs are zero");
+                .expect("segment reference outputs are zero")
+                + public_pcs_deep_terms(CIRCUIT_IDS[1], &references.poseidon2, &circuit_relations)
+                    .expect("Poseidon2 reference outputs are zero");
         assert!(
             (input_sum + semantic_sum + mul_sum + inverse_sum + linear_sum + public_sum).is_zero()
         );

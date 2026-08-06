@@ -158,9 +158,26 @@ where
     SimdBackend: GrindOps<C>,
 {
     let mut channel = joint_interaction_channel::<C>(seeds);
-    let pow_nonce = SimdBackend::grind(&channel, INTERACTION_POW_BITS);
+    let proof = prove_joint_interaction_in_channel(&mut channel, seeds, false);
+    (proof, channel)
+}
+
+/// Grinds the shared nonce in an existing constituent transcript.
+pub(crate) fn prove_joint_interaction_in_channel<C>(
+    channel: &mut C,
+    seeds: [SecureField; 2],
+    bind_seeds: bool,
+) -> JointInteractionProof
+where
+    C: Channel,
+    SimdBackend: GrindOps<C>,
+{
+    if bind_seeds {
+        channel.mix_felts(&seeds);
+    }
+    let pow_nonce = SimdBackend::grind(channel, INTERACTION_POW_BITS);
     channel.mix_u64(pow_nonce);
-    (JointInteractionProof { pow_nonce }, channel)
+    JointInteractionProof { pow_nonce }
 }
 
 /// Checks the shared grind before any cross-proof relation challenge is drawn.
@@ -179,6 +196,28 @@ where
     }
     channel.mix_u64(proof.pow_nonce);
     Ok(channel)
+}
+
+/// Verifies the shared nonce in an existing constituent transcript.
+pub(crate) fn verify_joint_interaction_in_channel<C>(
+    channel: &mut C,
+    seeds: [SecureField; 2],
+    proof: JointInteractionProof,
+    bind_seeds: bool,
+) -> Result<(), VerificationError>
+where
+    C: Channel,
+{
+    if bind_seeds {
+        channel.mix_felts(&seeds);
+    }
+    if !channel.verify_pow_nonce(INTERACTION_POW_BITS, proof.pow_nonce) {
+        return Err(VerificationError::InvalidStructure(
+            "precompile binding: invalid joint interaction proof of work".to_string(),
+        ));
+    }
+    channel.mix_u64(proof.pow_nonce);
+    Ok(())
 }
 
 /// Binds the ordered joint transcript prefix into one constituent proof.

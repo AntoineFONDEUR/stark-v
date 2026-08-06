@@ -172,7 +172,8 @@ mod tests {
 
     use super::*;
     use crate::control_air::{
-        LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
+        LEFT_RECURSION_VERIFIER_ID, POSEIDON2_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID,
+        SEGMENT_VERIFIER_ID,
     };
     use crate::fri_merkle_air::FriMerkleRelations;
     use crate::fri_verifier_circuit::{
@@ -191,16 +192,17 @@ mod tests {
     use crate::wire::ProofKind;
     use crate::{linear_ops, qm31_inv, qm31_mul};
 
-    const CIRCUIT_IDS: [u32; 3] = [301, 302, 303];
+    const CIRCUIT_IDS: [u32; 4] = [301, 302, 303, 304];
 
     struct CircuitSet {
         segment: FriVerifierCircuit,
+        poseidon2: FriVerifierCircuit,
         left: FriVerifierCircuit,
         right: FriVerifierCircuit,
     }
 
     impl CircuitSet {
-        fn lanes(&self) -> [FriVerifierCircuitLane<'_>; 3] {
+        fn lanes(&self) -> [FriVerifierCircuitLane<'_>; 4] {
             [
                 FriVerifierCircuitLane {
                     verifier_id: SEGMENT_VERIFIER_ID,
@@ -208,13 +210,18 @@ mod tests {
                     circuit: &self.segment,
                 },
                 FriVerifierCircuitLane {
-                    verifier_id: LEFT_RECURSION_VERIFIER_ID,
+                    verifier_id: POSEIDON2_VERIFIER_ID,
                     circuit_id: CIRCUIT_IDS[1],
+                    circuit: &self.poseidon2,
+                },
+                FriVerifierCircuitLane {
+                    verifier_id: LEFT_RECURSION_VERIFIER_ID,
+                    circuit_id: CIRCUIT_IDS[2],
                     circuit: &self.left,
                 },
                 FriVerifierCircuitLane {
                     verifier_id: RIGHT_RECURSION_VERIFIER_ID,
-                    circuit_id: CIRCUIT_IDS[2],
+                    circuit_id: CIRCUIT_IDS[3],
                     circuit: &self.right,
                 },
             ]
@@ -318,6 +325,7 @@ mod tests {
     fn reference_set(profile: &FriVerifierProfile) -> CircuitSet {
         CircuitSet {
             segment: build_fri_verifier_reference(profile).expect("segment reference is valid"),
+            poseidon2: build_fri_verifier_reference(profile).expect("Poseidon2 reference is valid"),
             left: build_fri_verifier_reference(profile).expect("left reference is valid"),
             right: build_fri_verifier_reference(profile).expect("right reference is valid"),
         }
@@ -326,6 +334,7 @@ mod tests {
     fn segment_witness_set(profile: &FriVerifierProfile) -> CircuitSet {
         CircuitSet {
             segment: satisfying_circuit(profile),
+            poseidon2: satisfying_circuit(profile),
             left: build_fri_verifier_reference(profile).expect("left reference is valid"),
             right: build_fri_verifier_reference(profile).expect("right reference is valid"),
         }
@@ -424,6 +433,15 @@ mod tests {
             &deep_relations,
             &fri_merkle_relations,
             &route_relations,
+        ) + semantic_source_terms(
+            crate::control_air::POSEIDON2_VERIFIER_ID,
+            &witnesses.poseidon2,
+            &verifier_input_relations,
+            &randomness_relations,
+            &query_relations,
+            &deep_relations,
+            &fri_merkle_relations,
+            &route_relations,
         );
 
         let mut traces = CircuitTraces::default();
@@ -434,6 +452,13 @@ mod tests {
             &witnesses.segment,
         )
         .expect("valid segment FRI circuit lowers");
+        lower_fri_verifier_circuit(
+            &mut traces,
+            CIRCUIT_IDS[1],
+            &references.poseidon2,
+            &witnesses.poseidon2,
+        )
+        .expect("valid Poseidon2 FRI circuit lowers");
         let traces = traces
             .into_air_traces()
             .expect("lowered FRI verifier schedules fit their traces");
@@ -457,7 +482,13 @@ mod tests {
         );
         let public_sum =
             public_fri_verifier_terms(CIRCUIT_IDS[0], &references.segment, &circuit_relations)
-                .expect("segment reference outputs are zero");
+                .expect("segment reference outputs are zero")
+                + public_fri_verifier_terms(
+                    CIRCUIT_IDS[1],
+                    &references.poseidon2,
+                    &circuit_relations,
+                )
+                .expect("Poseidon2 reference outputs are zero");
         assert!(
             (input_sum + semantic_sum + mul_sum + inverse_sum + linear_sum + public_sum).is_zero()
         );

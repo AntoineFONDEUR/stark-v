@@ -26,7 +26,8 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::relation;
 
 use super::control_air::{
-    ControlRelations, LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
+    ControlRelations, LEFT_RECURSION_VERIFIER_ID, POSEIDON2_VERIFIER_ID,
+    RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
 };
 use super::kernel::{VerifierControlPlan, VerifierSchema, VerifierStep};
 use super::merkle_root_air::{MerkleRootError, trace_tree_id};
@@ -118,13 +119,15 @@ struct PreprocessedRow {
     chunks: [ChunkSource; RATE],
 }
 
-/// Trusted leaf streams for the VM and recursion PCS profiles.
+/// Trusted leaf streams for both segment constituents and recursion children.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TraceMerklePreprocessed {
     log_size: u32,
     rows: Vec<PreprocessedRow>,
     vm_queried_value_count: usize,
     vm_query_count: usize,
+    poseidon2_queried_value_count: usize,
+    poseidon2_query_count: usize,
     recursion_queried_value_count: usize,
     recursion_query_count: usize,
 }
@@ -135,6 +138,9 @@ impl TraceMerklePreprocessed {
         const VM_TABLES: usize,
         const VM_TREES: usize,
         const VM_FRI_LAYERS: usize,
+        const POSEIDON2_TABLES: usize,
+        const POSEIDON2_TREES: usize,
+        const POSEIDON2_FRI_LAYERS: usize,
         const RECURSION_TABLES: usize,
         const RECURSION_TREES: usize,
         const RECURSION_FRI_LAYERS: usize,
@@ -142,6 +148,9 @@ impl TraceMerklePreprocessed {
         vm_plan: &VerifierControlPlan,
         vm_shape: &FixedProofShape<VM_TABLES, VM_TREES, VM_FRI_LAYERS>,
         vm_column_log_sizes: &[Vec<u32>],
+        poseidon2_plan: &VerifierControlPlan,
+        poseidon2_shape: &FixedProofShape<POSEIDON2_TABLES, POSEIDON2_TREES, POSEIDON2_FRI_LAYERS>,
+        poseidon2_column_log_sizes: &[Vec<u32>],
         recursion_plan: &VerifierControlPlan,
         recursion_shape: &FixedProofShape<RECURSION_TABLES, RECURSION_TREES, RECURSION_FRI_LAYERS>,
         recursion_column_log_sizes: &[Vec<u32>],
@@ -160,6 +169,13 @@ impl TraceMerklePreprocessed {
             recursion_shape,
             recursion_column_log_sizes,
         )?;
+        let poseidon2 = validate_profile(
+            "Poseidon2",
+            VerifierSchema::Poseidon2,
+            poseidon2_plan,
+            poseidon2_shape,
+            poseidon2_column_log_sizes,
+        )?;
         let mut rows = Vec::new();
         append_lane_rows(
             &mut rows,
@@ -168,6 +184,16 @@ impl TraceMerklePreprocessed {
             &vm_shape.tree_heights.map(M31Word::as_u32),
             vm.query_count,
             SEGMENT_VERIFIER_ID,
+            1,
+            0,
+        )?;
+        append_lane_rows(
+            &mut rows,
+            poseidon2_plan,
+            poseidon2_column_log_sizes,
+            &poseidon2_shape.tree_heights.map(M31Word::as_u32),
+            poseidon2.query_count,
+            POSEIDON2_VERIFIER_ID,
             1,
             0,
         )?;
@@ -197,6 +223,8 @@ impl TraceMerklePreprocessed {
             rows,
             vm_queried_value_count: vm.queried_value_count,
             vm_query_count: vm.query_count,
+            poseidon2_queried_value_count: poseidon2.queried_value_count,
+            poseidon2_query_count: poseidon2.query_count,
             recursion_queried_value_count: recursion.queried_value_count,
             recursion_query_count: recursion.query_count,
         })
@@ -285,6 +313,7 @@ fn validate_profile<const N_TABLES: usize, const N_TREES: usize, const N_FRI_LAY
     shape.validate(pcs).map_err(|error| match schema {
         VerifierSchema::Vm => TraceMerkleError::VmShape(error),
         VerifierSchema::Recursion => TraceMerkleError::RecursionShape(error),
+        VerifierSchema::Poseidon2 => TraceMerkleError::Poseidon2Shape(error),
     })?;
     if column_log_sizes.len() != N_TREES {
         return Err(TraceMerkleError::TreeCountMismatch {
@@ -321,11 +350,16 @@ fn validate_profile<const N_TABLES: usize, const N_TREES: usize, const N_FRI_LAY
         }
     }
     for (tree, (columns, height)) in column_log_sizes.iter().zip(shape.tree_heights).enumerate() {
-        let largest = columns
-            .iter()
-            .copied()
-            .max()
-            .ok_or(TraceMerkleError::EmptyCommitmentTree { profile, tree })?;
+        let Some(largest) = columns.iter().copied().max() else {
+            if height != M31Word::ZERO {
+                return Err(TraceMerkleError::EmptyTreeHasNonzeroHeight {
+                    profile,
+                    tree,
+                    height: height.as_u32(),
+                });
+            }
+            continue;
+        };
         let natural = largest
             .checked_add(pcs.config().fri_config.log_blowup_factor)
             .ok_or(TraceMerkleError::ArithmeticOverflow {
@@ -381,6 +415,9 @@ fn append_lane_rows(
 ) -> Result<(), TraceMerkleError> {
     let mut tree_offset = 0_usize;
     for (tree, (columns, tree_height)) in column_log_sizes.iter().zip(tree_heights).enumerate() {
+        if columns.is_empty() {
+            continue;
+        }
         let tree_u32 = canonical_usize("commitment tree", tree)?;
         let mut order = (0..columns.len()).collect::<Vec<_>>();
         // STWO hashes lifted leaf values in stable ascending log-size order.
@@ -801,7 +838,10 @@ pub struct TraceOpeningSet<'a> {
 /// Trace-opening witnesses selected by the universal proof kind.
 #[derive(Clone, Copy)]
 pub enum UniversalTraceOpeningWitness<'a> {
-    Segment(TraceOpeningSet<'a>),
+    Segment {
+        vm: TraceOpeningSet<'a>,
+        poseidon2: TraceOpeningSet<'a>,
+    },
     Binary {
         left: TraceOpeningSet<'a>,
         right: TraceOpeningSet<'a>,
@@ -924,7 +964,10 @@ pub struct TracePathSet<'a, const MAX_DEPTH: usize> {
 /// Path witnesses selected by the public universal proof kind.
 #[derive(Clone, Copy)]
 pub enum UniversalTracePathWitness<'a, const MAX_DEPTH: usize> {
-    Segment(TracePathSet<'a, MAX_DEPTH>),
+    Segment {
+        vm: TracePathSet<'a, MAX_DEPTH>,
+        poseidon2: TracePathSet<'a, MAX_DEPTH>,
+    },
     Binary {
         left: TracePathSet<'a, MAX_DEPTH>,
         right: TracePathSet<'a, MAX_DEPTH>,
@@ -940,14 +983,27 @@ pub fn push_trace_merkle_paths<const MAX_DEPTH: usize>(
     witness: UniversalTracePathWitness<'_, MAX_DEPTH>,
 ) -> Result<(), TraceMerkleError> {
     let expected_claims = match witness {
-        UniversalTracePathWitness::Segment(paths) => validate_path_set(
-            SEGMENT_VERIFIER_ID,
-            claims,
-            paths,
-            claims
-                .iter()
-                .filter(|claim| claim.verifier_id == SEGMENT_VERIFIER_ID),
-        )?,
+        UniversalTracePathWitness::Segment { vm, poseidon2 } => {
+            let vm_count = validate_path_set(
+                SEGMENT_VERIFIER_ID,
+                claims,
+                vm,
+                claims
+                    .iter()
+                    .filter(|claim| claim.verifier_id == SEGMENT_VERIFIER_ID),
+            )?;
+            let poseidon2_count = validate_path_set(
+                POSEIDON2_VERIFIER_ID,
+                claims,
+                poseidon2,
+                claims
+                    .iter()
+                    .filter(|claim| claim.verifier_id == POSEIDON2_VERIFIER_ID),
+            )?;
+            vm_count
+                .checked_add(poseidon2_count)
+                .ok_or(TraceMerkleError::RowCountOverflow)?
+        }
         UniversalTracePathWitness::Binary { left, right } => {
             let left_count = validate_path_set(
                 LEFT_RECURSION_VERIFIER_ID,
@@ -984,16 +1040,36 @@ pub fn push_trace_merkle_paths<const MAX_DEPTH: usize>(
                 verifier_id: claim.verifier_id,
             },
         )?;
-        let trees = paths.roots.len();
-        if trees == 0 || paths.paths.len() % trees != 0 {
+        let active_trees = claims
+            .iter()
+            .filter(|candidate| candidate.verifier_id == claim.verifier_id)
+            .map(|candidate| candidate.tree)
+            .max()
+            .map_or(0, |_| {
+                claims
+                    .iter()
+                    .filter(|candidate| {
+                        candidate.verifier_id == claim.verifier_id && candidate.query == 0
+                    })
+                    .count()
+            });
+        if active_trees == 0 || paths.paths.len() % active_trees != 0 {
             return Err(TraceMerkleError::InvalidPathLayout {
                 verifier_id: claim.verifier_id,
-                roots: trees,
+                roots: paths.roots.len(),
                 paths: paths.paths.len(),
             });
         }
-        let query_count = paths.paths.len() / trees;
-        let path_index = (claim.tree as usize)
+        let query_count = paths.paths.len() / active_trees;
+        let tree_rank = claims
+            .iter()
+            .filter(|candidate| {
+                candidate.verifier_id == claim.verifier_id
+                    && candidate.query == 0
+                    && candidate.tree < claim.tree
+            })
+            .count();
+        let path_index = tree_rank
             .checked_mul(query_count)
             .and_then(|base| base.checked_add(claim.query as usize))
             .ok_or(TraceMerkleError::ArithmeticOverflow {
@@ -1089,7 +1165,10 @@ fn select_paths<const MAX_DEPTH: usize>(
     verifier_id: u32,
 ) -> Result<Option<TracePathSet<'_, MAX_DEPTH>>, TraceMerkleError> {
     match (witness, verifier_id) {
-        (UniversalTracePathWitness::Segment(paths), SEGMENT_VERIFIER_ID) => Ok(Some(paths)),
+        (UniversalTracePathWitness::Segment { vm, .. }, SEGMENT_VERIFIER_ID) => Ok(Some(vm)),
+        (UniversalTracePathWitness::Segment { poseidon2, .. }, POSEIDON2_VERIFIER_ID) => {
+            Ok(Some(poseidon2))
+        }
         (UniversalTracePathWitness::Binary { left, .. }, LEFT_RECURSION_VERIFIER_ID) => {
             Ok(Some(left))
         }
@@ -1097,11 +1176,13 @@ fn select_paths<const MAX_DEPTH: usize>(
             Ok(Some(right))
         }
         (UniversalTracePathWitness::Empty, SEGMENT_VERIFIER_ID)
+        | (UniversalTracePathWitness::Empty, POSEIDON2_VERIFIER_ID)
         | (UniversalTracePathWitness::Empty, LEFT_RECURSION_VERIFIER_ID)
         | (UniversalTracePathWitness::Empty, RIGHT_RECURSION_VERIFIER_ID)
-        | (UniversalTracePathWitness::Segment(_), LEFT_RECURSION_VERIFIER_ID)
-        | (UniversalTracePathWitness::Segment(_), RIGHT_RECURSION_VERIFIER_ID)
-        | (UniversalTracePathWitness::Binary { .. }, SEGMENT_VERIFIER_ID) => Ok(None),
+        | (UniversalTracePathWitness::Segment { .. }, LEFT_RECURSION_VERIFIER_ID)
+        | (UniversalTracePathWitness::Segment { .. }, RIGHT_RECURSION_VERIFIER_ID)
+        | (UniversalTracePathWitness::Binary { .. }, SEGMENT_VERIFIER_ID)
+        | (UniversalTracePathWitness::Binary { .. }, POSEIDON2_VERIFIER_ID) => Ok(None),
         (_, verifier_id) => Err(TraceMerkleError::UnknownVerifierId { verifier_id }),
     }
 }
@@ -1118,12 +1199,20 @@ fn validate_witness(
     witness: UniversalTraceOpeningWitness<'_>,
 ) -> Result<(), TraceMerkleError> {
     match witness {
-        UniversalTraceOpeningWitness::Segment(opening) => validate_opening(
-            SEGMENT_VERIFIER_ID,
-            preprocessed.vm_queried_value_count,
-            preprocessed.vm_query_count,
-            opening,
-        ),
+        UniversalTraceOpeningWitness::Segment { vm, poseidon2 } => {
+            validate_opening(
+                SEGMENT_VERIFIER_ID,
+                preprocessed.vm_queried_value_count,
+                preprocessed.vm_query_count,
+                vm,
+            )?;
+            validate_opening(
+                POSEIDON2_VERIFIER_ID,
+                preprocessed.poseidon2_queried_value_count,
+                preprocessed.poseidon2_query_count,
+                poseidon2,
+            )
+        }
         UniversalTraceOpeningWitness::Binary { left, right } => {
             validate_opening(
                 LEFT_RECURSION_VERIFIER_ID,
@@ -1170,7 +1259,10 @@ fn select_opening(
     verifier_id: u32,
 ) -> Result<Option<TraceOpeningSet<'_>>, TraceMerkleError> {
     match (witness, verifier_id) {
-        (UniversalTraceOpeningWitness::Segment(opening), SEGMENT_VERIFIER_ID) => Ok(Some(opening)),
+        (UniversalTraceOpeningWitness::Segment { vm, .. }, SEGMENT_VERIFIER_ID) => Ok(Some(vm)),
+        (UniversalTraceOpeningWitness::Segment { poseidon2, .. }, POSEIDON2_VERIFIER_ID) => {
+            Ok(Some(poseidon2))
+        }
         (UniversalTraceOpeningWitness::Binary { left, .. }, LEFT_RECURSION_VERIFIER_ID) => {
             Ok(Some(left))
         }
@@ -1178,11 +1270,13 @@ fn select_opening(
             Ok(Some(right))
         }
         (UniversalTraceOpeningWitness::Empty, SEGMENT_VERIFIER_ID)
+        | (UniversalTraceOpeningWitness::Empty, POSEIDON2_VERIFIER_ID)
         | (UniversalTraceOpeningWitness::Empty, LEFT_RECURSION_VERIFIER_ID)
         | (UniversalTraceOpeningWitness::Empty, RIGHT_RECURSION_VERIFIER_ID)
-        | (UniversalTraceOpeningWitness::Segment(_), LEFT_RECURSION_VERIFIER_ID)
-        | (UniversalTraceOpeningWitness::Segment(_), RIGHT_RECURSION_VERIFIER_ID)
-        | (UniversalTraceOpeningWitness::Binary { .. }, SEGMENT_VERIFIER_ID) => Ok(None),
+        | (UniversalTraceOpeningWitness::Segment { .. }, LEFT_RECURSION_VERIFIER_ID)
+        | (UniversalTraceOpeningWitness::Segment { .. }, RIGHT_RECURSION_VERIFIER_ID)
+        | (UniversalTraceOpeningWitness::Binary { .. }, SEGMENT_VERIFIER_ID)
+        | (UniversalTraceOpeningWitness::Binary { .. }, POSEIDON2_VERIFIER_ID) => Ok(None),
         (_, verifier_id) => Err(TraceMerkleError::UnknownVerifierId { verifier_id }),
     }
 }
@@ -1192,6 +1286,7 @@ fn select_opening(
 pub enum TraceMerkleError {
     Pcs(PcsParameterError),
     VmShape(ProofShapeError),
+    Poseidon2Shape(ProofShapeError),
     RecursionShape(ProofShapeError),
     TreeNamespace(MerkleRootError),
     QueryPosition(QueryPositionError),
@@ -1216,9 +1311,10 @@ pub enum TraceMerkleError {
         expected: u32,
         actual: u32,
     },
-    EmptyCommitmentTree {
+    EmptyTreeHasNonzeroHeight {
         profile: &'static str,
         tree: usize,
+        height: u32,
     },
     TreeHeightMismatch {
         profile: &'static str,
@@ -1411,13 +1507,24 @@ mod tests {
 
     fn preprocessing() -> (TraceMerklePreprocessed, QueryPositionPreprocessed) {
         let vm = plan(VerifierSchema::Vm);
+        let poseidon2 = plan(VerifierSchema::Poseidon2);
         let recursion = plan(VerifierSchema::Recursion);
         let columns = column_log_sizes();
-        let trace =
-            TraceMerklePreprocessed::new(&vm, &shape(), &columns, &recursion, &shape(), &columns)
-                .expect("fixture trace Merkle geometry is valid");
-        let query = QueryPositionPreprocessed::new(pcs(), &shape(), pcs(), &shape())
-            .expect("fixture query geometry is valid");
+        let trace = TraceMerklePreprocessed::new(
+            &vm,
+            &shape(),
+            &columns,
+            &poseidon2,
+            &shape(),
+            &columns,
+            &recursion,
+            &shape(),
+            &columns,
+        )
+        .expect("fixture trace Merkle geometry is valid");
+        let query =
+            QueryPositionPreprocessed::new(pcs(), &shape(), pcs(), &shape(), pcs(), &shape())
+                .expect("fixture query geometry is valid");
         (trace, query)
     }
 
@@ -1451,10 +1558,16 @@ mod tests {
         let right_values = values(200);
         let right_queries = queries(99);
         let witness = match kind {
-            ProofKind::SegmentLeaf => UniversalTraceOpeningWitness::Segment(TraceOpeningSet {
-                queried_values: &vm_values,
-                raw_queries: &vm_queries,
-            }),
+            ProofKind::SegmentLeaf => UniversalTraceOpeningWitness::Segment {
+                vm: TraceOpeningSet {
+                    queried_values: &vm_values,
+                    raw_queries: &vm_queries,
+                },
+                poseidon2: TraceOpeningSet {
+                    queried_values: &vm_values,
+                    raw_queries: &vm_queries,
+                },
+            },
             ProofKind::BinaryNode => UniversalTraceOpeningWitness::Binary {
                 left: TraceOpeningSet {
                     queried_values: &left_values,
@@ -1697,14 +1810,22 @@ mod tests {
             &mut poseidon2,
             &preprocessing,
             &query_preprocessing,
-            UniversalTraceOpeningWitness::Segment(TraceOpeningSet {
-                queried_values: &queried_values,
-                raw_queries: &raw_queries,
-            }),
+            UniversalTraceOpeningWitness::Segment {
+                vm: TraceOpeningSet {
+                    queried_values: &queried_values,
+                    raw_queries: &raw_queries,
+                },
+                poseidon2: TraceOpeningSet {
+                    queried_values: &queried_values,
+                    raw_queries: &raw_queries,
+                },
+            },
         )?;
-        let mut roots = [Digest8::ZERO; TREE_COUNT];
-        let mut paths = Vec::with_capacity(TREE_COUNT * QUERY_COUNT);
+        let mut roots = [[Digest8::ZERO; TREE_COUNT]; 2];
+        let mut paths: [Vec<_>; 2] =
+            core::array::from_fn(|_| Vec::with_capacity(TREE_COUNT * QUERY_COUNT));
         for claim in &claims {
+            let lane = usize::from(claim.verifier_id == POSEIDON2_VERIFIER_ID);
             let mut siblings = [Digest8::ZERO; MAX_DEPTH];
             let mut child = Poseidon2M31Hash(claim.digest);
             for level in 0..claim.height {
@@ -1720,30 +1841,36 @@ mod tests {
             }
             let root = Digest8::try_from(child.0).expect("Poseidon2 root limbs are canonical");
             if claim.query == 0 {
-                roots[claim.tree as usize] = root;
-            } else if roots[claim.tree as usize] != root {
+                roots[lane][claim.tree as usize] = root;
+            } else if roots[lane][claim.tree as usize] != root {
                 return Err(TraceMerkleError::TracePathRootMismatch {
                     verifier_id: claim.verifier_id,
                     tree: claim.tree,
                     query: claim.query,
                 });
             }
-            paths.push(
+            paths[lane].push(
                 MerklePathWire::new(claim.height, siblings)
                     .expect("fixture path fills the declared depth"),
             );
         }
         if tamper_root {
-            roots[0] = digest(9_000);
+            roots[0][0] = digest(9_000);
         }
         push_trace_merkle_paths(
             &mut MerklePathTable::new(),
             &mut poseidon2,
             &claims,
-            UniversalTracePathWitness::Segment(TracePathSet {
-                roots: &roots,
-                paths: &paths,
-            }),
+            UniversalTracePathWitness::Segment {
+                vm: TracePathSet {
+                    roots: &roots[0],
+                    paths: &paths[0],
+                },
+                poseidon2: TracePathSet {
+                    roots: &roots[1],
+                    paths: &paths[1],
+                },
+            },
         )
     }
 

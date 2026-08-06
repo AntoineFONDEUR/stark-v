@@ -18,7 +18,8 @@ use stwo::core::fields::{ComplexConjugate, FieldExpOps};
 use stwo::core::poly::circle::{CanonicCoset, MAX_CIRCLE_DOMAIN_LOG_SIZE};
 
 use super::oods_circuit::{OodsCircuitError, OodsPointCircuit, oods_point_from_seed};
-use super::vm_air_program::{SampleCoordinate, VmAirProgram};
+use super::protocol::{FixedProofShape, ProofShapeError, ValidatedPcsParameters};
+use super::vm_air_program::{Poseidon2AirProgram, SampleCoordinate, VmAirProgram};
 use super::vm_pcs_layout::VmPcsLayout;
 use crate::recorder::{CircuitBuilder, ConstraintCircuit, Rec};
 
@@ -153,45 +154,78 @@ impl PcsDeepProfile {
         layout: &VmPcsLayout,
     ) -> Result<Self, PcsDeepCircuitError> {
         if program.column_log_sizes().0.as_slice() != layout.column_log_sizes() {
-            return Err(PcsDeepCircuitError::VmColumnLayoutMismatch);
+            return Err(PcsDeepCircuitError::AirColumnLayoutMismatch);
         }
-        if program.sample_coordinates().len() != program.sample_point_offsets().len() {
-            return Err(PcsDeepCircuitError::VmSampleMetadataLengthMismatch {
-                coordinates: program.sample_coordinates().len(),
-                offsets: program.sample_point_offsets().len(),
+        Self::from_air_metadata(
+            program.column_log_sizes(),
+            program.sample_coordinates(),
+            program.sample_point_offsets(),
+            layout.log_blowup_factor(),
+            layout.lifting_log_size(),
+            layout.n_queries(),
+        )
+    }
+
+    /// Derives the quotient layout from the detached Poseidon2 AIR and proof shape.
+    pub fn from_poseidon2<
+        const N_TABLES: usize,
+        const N_TREES: usize,
+        const N_FRI_LAYERS: usize,
+    >(
+        program: &Poseidon2AirProgram,
+        pcs: ValidatedPcsParameters,
+        shape: &FixedProofShape<N_TABLES, N_TREES, N_FRI_LAYERS>,
+    ) -> Result<Self, PcsDeepCircuitError> {
+        let validated = shape
+            .validate(pcs)
+            .map_err(PcsDeepCircuitError::Poseidon2Shape)?;
+        Self::from_air_metadata(
+            program.column_log_sizes(),
+            program.sample_coordinates(),
+            program.sample_point_offsets(),
+            pcs.config().fri_config.log_blowup_factor,
+            validated.lifting_log_size(),
+            pcs.config().fri_config.n_queries,
+        )
+    }
+
+    fn from_air_metadata(
+        column_log_sizes: &stwo::core::pcs::TreeVec<Vec<u32>>,
+        sample_coordinates: &[SampleCoordinate],
+        sample_point_offsets: &[CirclePointIndex],
+        log_blowup_factor: u32,
+        lifting_log_size: u32,
+        n_queries: usize,
+    ) -> Result<Self, PcsDeepCircuitError> {
+        if sample_coordinates.len() != sample_point_offsets.len() {
+            return Err(PcsDeepCircuitError::AirSampleMetadataLengthMismatch {
+                coordinates: sample_coordinates.len(),
+                offsets: sample_point_offsets.len(),
             });
         }
-        let mut nested = program
-            .column_log_sizes()
+        let mut nested = column_log_sizes
             .iter()
             .map(|columns| vec![Vec::new(); columns.len()])
             .collect::<Vec<_>>();
         let mut previous = None;
-        for (index, (coordinate, &offset)) in program
-            .sample_coordinates()
+        for (index, (coordinate, &offset)) in sample_coordinates
             .iter()
-            .zip(program.sample_point_offsets())
+            .zip(sample_point_offsets)
             .enumerate()
         {
-            validate_vm_coordinate(index, *coordinate, previous, &nested)?;
+            validate_sample_coordinate(index, *coordinate, previous, &nested)?;
             nested[coordinate.tree][coordinate.column].push(offset);
             previous = Some(*coordinate);
         }
-        let committed_log_sizes = program
-            .column_log_sizes()
+        let committed_log_sizes = column_log_sizes
             .iter()
             .map(|tree| {
                 tree.iter()
-                    .map(|log_size| log_size + layout.log_blowup_factor())
+                    .map(|log_size| log_size + log_blowup_factor)
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        Self::new(
-            committed_log_sizes,
-            nested,
-            layout.lifting_log_size(),
-            layout.n_queries(),
-        )
+        Self::new(committed_log_sizes, nested, lifting_log_size, n_queries)
     }
 
     pub const fn sample_count(&self) -> usize {
@@ -223,20 +257,20 @@ impl PcsDeepProfile {
     }
 }
 
-fn validate_vm_coordinate(
+fn validate_sample_coordinate(
     index: usize,
     coordinate: SampleCoordinate,
     previous: Option<SampleCoordinate>,
     nested: &[Vec<Vec<CirclePointIndex>>],
 ) -> Result<(), PcsDeepCircuitError> {
     let Some(columns) = nested.get(coordinate.tree) else {
-        return Err(PcsDeepCircuitError::VmSampleCoordinateOutOfRange { index, coordinate });
+        return Err(PcsDeepCircuitError::AirSampleCoordinateOutOfRange { index, coordinate });
     };
     let Some(points) = columns.get(coordinate.column) else {
-        return Err(PcsDeepCircuitError::VmSampleCoordinateOutOfRange { index, coordinate });
+        return Err(PcsDeepCircuitError::AirSampleCoordinateOutOfRange { index, coordinate });
     };
     if coordinate.point != points.len() {
-        return Err(PcsDeepCircuitError::VmSamplePointOrderMismatch {
+        return Err(PcsDeepCircuitError::AirSamplePointOrderMismatch {
             index,
             expected: points.len(),
             actual: coordinate.point,
@@ -246,7 +280,7 @@ fn validate_vm_coordinate(
         (coordinate.tree, coordinate.column, coordinate.point)
             <= (previous.tree, previous.column, previous.point)
     }) {
-        return Err(PcsDeepCircuitError::VmSampleOrderMismatch { index });
+        return Err(PcsDeepCircuitError::AirSampleOrderMismatch { index });
     }
     Ok(())
 }
@@ -879,23 +913,24 @@ pub enum PcsDeepCircuitError {
         log_size: u32,
         lifting_log_size: u32,
     },
-    VmColumnLayoutMismatch,
-    VmSampleMetadataLengthMismatch {
+    AirColumnLayoutMismatch,
+    AirSampleMetadataLengthMismatch {
         coordinates: usize,
         offsets: usize,
     },
-    VmSampleCoordinateOutOfRange {
+    AirSampleCoordinateOutOfRange {
         index: usize,
         coordinate: SampleCoordinate,
     },
-    VmSamplePointOrderMismatch {
+    AirSamplePointOrderMismatch {
         index: usize,
         expected: usize,
         actual: usize,
     },
-    VmSampleOrderMismatch {
+    AirSampleOrderMismatch {
         index: usize,
     },
+    Poseidon2Shape(ProofShapeError),
     CountOverflow {
         field: &'static str,
     },

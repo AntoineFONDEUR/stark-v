@@ -20,7 +20,8 @@ use stwo::prover::poly::circle::CircleEvaluation;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 
 use super::control_air::{
-    LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
+    LEFT_RECURSION_VERIFIER_ID, POSEIDON2_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID,
+    SEGMENT_VERIFIER_ID,
 };
 use super::protocol::{FixedProofShape, ProofShapeError, ValidatedPcsParameters};
 use super::transcript_payload_air::{VerifierInputKind, VerifierInputRelations};
@@ -73,13 +74,15 @@ struct PreprocessedRow {
     path_count: u32,
 }
 
-/// Trusted root layout for the VM lane and both recursion-verifier lanes.
+/// Trusted root layout for both segment constituents and both child lanes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MerkleRootPreprocessed {
     log_size: u32,
     rows: Vec<PreprocessedRow>,
     vm_tree_count: usize,
     vm_fri_layer_count: usize,
+    poseidon2_tree_count: usize,
+    poseidon2_fri_layer_count: usize,
     recursion_tree_count: usize,
     recursion_fri_layer_count: usize,
 }
@@ -89,23 +92,33 @@ impl MerkleRootPreprocessed {
         const VM_TABLES: usize,
         const VM_TREES: usize,
         const VM_FRI_LAYERS: usize,
+        const POSEIDON2_TABLES: usize,
+        const POSEIDON2_TREES: usize,
+        const POSEIDON2_FRI_LAYERS: usize,
         const RECURSION_TABLES: usize,
         const RECURSION_TREES: usize,
         const RECURSION_FRI_LAYERS: usize,
     >(
         vm_pcs: ValidatedPcsParameters,
         vm_shape: &FixedProofShape<VM_TABLES, VM_TREES, VM_FRI_LAYERS>,
+        poseidon2_pcs: ValidatedPcsParameters,
+        poseidon2_shape: &FixedProofShape<POSEIDON2_TABLES, POSEIDON2_TREES, POSEIDON2_FRI_LAYERS>,
         recursion_pcs: ValidatedPcsParameters,
         recursion_shape: &FixedProofShape<RECURSION_TABLES, RECURSION_TREES, RECURSION_FRI_LAYERS>,
     ) -> Result<Self, MerkleRootError> {
         vm_shape
             .validate(vm_pcs)
             .map_err(MerkleRootError::VmShape)?;
+        poseidon2_shape
+            .validate(poseidon2_pcs)
+            .map_err(MerkleRootError::Poseidon2Shape)?;
         recursion_shape
             .validate(recursion_pcs)
             .map_err(MerkleRootError::RecursionShape)?;
         validate_item_capacity("VM commitment trees", VM_TREES)?;
         validate_item_capacity("VM FRI layers", VM_FRI_LAYERS)?;
+        validate_item_capacity("Poseidon2 commitment trees", POSEIDON2_TREES)?;
+        validate_item_capacity("Poseidon2 FRI layers", POSEIDON2_FRI_LAYERS)?;
         validate_item_capacity("recursion commitment trees", RECURSION_TREES)?;
         validate_item_capacity("recursion FRI layers", RECURSION_FRI_LAYERS)?;
 
@@ -116,6 +129,15 @@ impl MerkleRootPreprocessed {
             1,
             0,
             vm_pcs.config().fri_config.n_queries,
+            &vm_shape.tree_heights.map(M31Word::as_u32),
+        )?;
+        append_lane_rows::<POSEIDON2_TREES, POSEIDON2_FRI_LAYERS>(
+            &mut rows,
+            POSEIDON2_VERIFIER_ID,
+            1,
+            0,
+            poseidon2_pcs.config().fri_config.n_queries,
+            &poseidon2_shape.tree_heights.map(M31Word::as_u32),
         )?;
         for verifier_id in [LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID] {
             append_lane_rows::<RECURSION_TREES, RECURSION_FRI_LAYERS>(
@@ -124,6 +146,7 @@ impl MerkleRootPreprocessed {
                 0,
                 1,
                 recursion_pcs.config().fri_config.n_queries,
+                &recursion_shape.tree_heights.map(M31Word::as_u32),
             )?;
         }
         let padded_rows = rows
@@ -140,6 +163,8 @@ impl MerkleRootPreprocessed {
             rows,
             vm_tree_count: VM_TREES,
             vm_fri_layer_count: VM_FRI_LAYERS,
+            poseidon2_tree_count: POSEIDON2_TREES,
+            poseidon2_fri_layer_count: POSEIDON2_FRI_LAYERS,
             recursion_tree_count: RECURSION_TREES,
             recursion_fri_layer_count: RECURSION_FRI_LAYERS,
         })
@@ -196,9 +221,10 @@ fn append_lane_rows<const N_TREES: usize, const N_FRI_LAYERS: usize>(
     segment_mask: u32,
     binary_mask: u32,
     path_count: usize,
+    tree_heights: &[u32; N_TREES],
 ) -> Result<(), MerkleRootError> {
     let path_count = canonical_usize("Merkle path multiplicity", path_count)?;
-    for tree in 0..N_TREES {
+    for (tree, &tree_height) in tree_heights.iter().enumerate() {
         rows.push(PreprocessedRow {
             segment_mask,
             binary_mask,
@@ -206,7 +232,7 @@ fn append_lane_rows<const N_TREES: usize, const N_FRI_LAYERS: usize>(
             source: RootSource::Trace,
             item: canonical_usize("commitment tree", tree)?,
             tree_id: trace_tree_id(verifier_id, tree)?,
-            path_count,
+            path_count: if tree_height == 0 { 0 } else { path_count },
         });
     }
     for layer in 0..N_FRI_LAYERS {
@@ -374,7 +400,10 @@ pub struct MerkleRootSet<'a> {
 /// Root witnesses selected by the public universal proof kind.
 #[derive(Clone, Copy)]
 pub enum UniversalMerkleRootWitness<'a> {
-    Segment(MerkleRootSet<'a>),
+    Segment {
+        vm: MerkleRootSet<'a>,
+        poseidon2: MerkleRootSet<'a>,
+    },
     Binary {
         left: MerkleRootSet<'a>,
         right: MerkleRootSet<'a>,
@@ -404,12 +433,20 @@ fn validate_witness(
     witness: UniversalMerkleRootWitness<'_>,
 ) -> Result<(), MerkleRootError> {
     match witness {
-        UniversalMerkleRootWitness::Segment(roots) => validate_root_set(
-            SEGMENT_VERIFIER_ID,
-            preprocessed.vm_tree_count,
-            preprocessed.vm_fri_layer_count,
-            roots,
-        ),
+        UniversalMerkleRootWitness::Segment { vm, poseidon2 } => {
+            validate_root_set(
+                SEGMENT_VERIFIER_ID,
+                preprocessed.vm_tree_count,
+                preprocessed.vm_fri_layer_count,
+                vm,
+            )?;
+            validate_root_set(
+                POSEIDON2_VERIFIER_ID,
+                preprocessed.poseidon2_tree_count,
+                preprocessed.poseidon2_fri_layer_count,
+                poseidon2,
+            )
+        }
         UniversalMerkleRootWitness::Binary { left, right } => {
             validate_root_set(
                 LEFT_RECURSION_VERIFIER_ID,
@@ -466,17 +503,22 @@ fn select_digest(
     row: PreprocessedRow,
 ) -> Result<Option<Digest8>, MerkleRootError> {
     let roots = match (witness, row.verifier_id) {
-        (UniversalMerkleRootWitness::Segment(roots), SEGMENT_VERIFIER_ID) => Some(roots),
+        (UniversalMerkleRootWitness::Segment { vm, .. }, SEGMENT_VERIFIER_ID) => Some(vm),
+        (UniversalMerkleRootWitness::Segment { poseidon2, .. }, POSEIDON2_VERIFIER_ID) => {
+            Some(poseidon2)
+        }
         (UniversalMerkleRootWitness::Binary { left, .. }, LEFT_RECURSION_VERIFIER_ID) => Some(left),
         (UniversalMerkleRootWitness::Binary { right, .. }, RIGHT_RECURSION_VERIFIER_ID) => {
             Some(right)
         }
         (UniversalMerkleRootWitness::Empty, SEGMENT_VERIFIER_ID)
+        | (UniversalMerkleRootWitness::Empty, POSEIDON2_VERIFIER_ID)
         | (UniversalMerkleRootWitness::Empty, LEFT_RECURSION_VERIFIER_ID)
         | (UniversalMerkleRootWitness::Empty, RIGHT_RECURSION_VERIFIER_ID)
-        | (UniversalMerkleRootWitness::Segment(_), LEFT_RECURSION_VERIFIER_ID)
-        | (UniversalMerkleRootWitness::Segment(_), RIGHT_RECURSION_VERIFIER_ID)
-        | (UniversalMerkleRootWitness::Binary { .. }, SEGMENT_VERIFIER_ID) => None,
+        | (UniversalMerkleRootWitness::Segment { .. }, LEFT_RECURSION_VERIFIER_ID)
+        | (UniversalMerkleRootWitness::Segment { .. }, RIGHT_RECURSION_VERIFIER_ID)
+        | (UniversalMerkleRootWitness::Binary { .. }, SEGMENT_VERIFIER_ID)
+        | (UniversalMerkleRootWitness::Binary { .. }, POSEIDON2_VERIFIER_ID) => None,
         (_, verifier_id) => return Err(MerkleRootError::UnknownVerifierId { verifier_id }),
     };
     roots
@@ -521,6 +563,7 @@ pub fn gen_interaction_trace(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MerkleRootError {
     VmShape(ProofShapeError),
+    Poseidon2Shape(ProofShapeError),
     RecursionShape(ProofShapeError),
     RowCountOverflow,
     LogSizeOutOfRange {
@@ -614,7 +657,7 @@ mod tests {
     }
 
     fn preprocessing() -> MerkleRootPreprocessed {
-        MerkleRootPreprocessed::new(pcs(), &shape(), pcs(), &shape())
+        MerkleRootPreprocessed::new(pcs(), &shape(), pcs(), &shape(), pcs(), &shape())
             .expect("fixture Merkle root geometry is valid")
     }
 
@@ -634,13 +677,20 @@ mod tests {
     fn materialize(kind: ProofKind) -> (MerkleRootPreprocessed, MerkleRootTable) {
         let preprocessing = preprocessing();
         let (vm_trace, vm_fri) = roots(10);
+        let (poseidon2_trace, poseidon2_fri) = roots(150);
         let (left_trace, left_fri) = roots(300);
         let (right_trace, right_fri) = roots(600);
         let witness = match kind {
-            ProofKind::SegmentLeaf => UniversalMerkleRootWitness::Segment(MerkleRootSet {
-                trace: &vm_trace,
-                fri: &vm_fri,
-            }),
+            ProofKind::SegmentLeaf => UniversalMerkleRootWitness::Segment {
+                vm: MerkleRootSet {
+                    trace: &vm_trace,
+                    fri: &vm_fri,
+                },
+                poseidon2: MerkleRootSet {
+                    trace: &poseidon2_trace,
+                    fri: &poseidon2_fri,
+                },
+            },
             ProofKind::BinaryNode => UniversalMerkleRootWitness::Binary {
                 left: MerkleRootSet {
                     trace: &left_trace,

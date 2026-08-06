@@ -1,4 +1,4 @@
-//! Fixed VM AIR composition circuit for recursion segment verification.
+//! Fixed segment AIR composition circuits for recursion verification.
 //!
 //! Every proof value and Fiat-Shamir word enters through a tracked base-field
 //! input. The fixed VM program reconstructs secure values, evaluates all AIR
@@ -19,7 +19,9 @@ use super::air_relation_parameters::{
     bind_relation_parameters,
 };
 use super::oods_circuit::{OodsCircuitError, oods_point_from_seed};
-use super::vm_air_program::{VM_AIR_COMPONENT_COUNT, VmAirProgram, VmAirProgramError};
+use super::vm_air_program::{
+    Poseidon2AirProgram, VM_AIR_COMPONENT_COUNT, VmAirProgram, VmAirProgramError,
+};
 use crate::recorder::{CircuitBuilder, ConstraintCircuit, Rec};
 
 /// Base-field words in one secure-field verifier value.
@@ -43,10 +45,21 @@ pub struct VmAirCompositionInputBinding {
     pub source: VmAirCompositionInputSource,
 }
 
-/// Fixed dimensions tied to one compiled VM AIR profile.
+/// AIR program identity whose dimensions are frozen in preprocessing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AirCompositionProgram {
+    Vm {
+        component_log_sizes: [u32; VM_AIR_COMPONENT_COUNT],
+    },
+    Poseidon2 {
+        log_size: u32,
+    },
+}
+
+/// Fixed dimensions tied to one compiled segment AIR profile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VmAirCompositionProfile {
-    component_log_sizes: [u32; VM_AIR_COMPONENT_COUNT],
+    program: AirCompositionProgram,
     max_log_degree_bound: u32,
     sampled_value_count: u32,
     claimed_sum_count: u32,
@@ -55,8 +68,8 @@ pub struct VmAirCompositionProfile {
 }
 
 impl VmAirCompositionProfile {
-    pub const fn component_log_sizes(&self) -> [u32; VM_AIR_COMPONENT_COUNT] {
-        self.component_log_sizes
+    pub const fn program(&self) -> AirCompositionProgram {
+        self.program
     }
 
     pub const fn max_log_degree_bound(&self) -> u32 {
@@ -270,7 +283,9 @@ fn build_with_program(
         );
     }
     let profile = VmAirCompositionProfile {
-        component_log_sizes,
+        program: AirCompositionProgram::Vm {
+            component_log_sizes,
+        },
         max_log_degree_bound: program.max_log_degree_bound(),
         sampled_value_count,
         claimed_sum_count: checked_count("claimed sums", VM_AIR_COMPONENT_COUNT)?,
@@ -350,6 +365,144 @@ fn build_with_program(
     let evaluation = program.evaluate(
         &sampled_values,
         &claimed_sums,
+        &relation_parameters,
+        composition_randomness,
+        &oods_point,
+    )?;
+    builder
+        .circuit
+        .constrain_zero(segment * evaluation.equality);
+    Ok(builder.finish(profile))
+}
+
+/// Builds the inactive detached-Poseidon2 composition circuit.
+pub fn build_poseidon2_air_composition_reference(
+    log_size: u32,
+) -> Result<VmAirCompositionCircuit, VmAirCompositionCircuitError> {
+    let program = Poseidon2AirProgram::new(log_size)?;
+    let sampled_values = vec![SecureField::zero(); program.sample_coordinates().len()];
+    let relation_challenges =
+        vec![[M31Word::ZERO; RELATION_CHALLENGE_WORD_COUNT]; Relations::DESCRIPTORS.len()];
+    build_poseidon2_with_program(
+        log_size,
+        &program,
+        VmAirCompositionWitness {
+            segment_selector: false,
+            sampled_values: &sampled_values,
+            claimed_sums: &[SecureField::zero()],
+            relation_challenges: &relation_challenges,
+            composition_randomness: [M31Word::ZERO; SECURE_VALUE_WORD_COUNT],
+            oods_point: [M31Word::ZERO; SECURE_VALUE_WORD_COUNT],
+        },
+    )
+}
+
+/// Builds the detached-Poseidon2 composition circuit from authenticated values.
+pub fn build_poseidon2_air_composition_circuit(
+    log_size: u32,
+    witness: VmAirCompositionWitness<'_>,
+) -> Result<VmAirCompositionCircuit, VmAirCompositionCircuitError> {
+    let program = Poseidon2AirProgram::new(log_size)?;
+    build_poseidon2_with_program(log_size, &program, witness)
+}
+
+fn build_poseidon2_with_program(
+    log_size: u32,
+    program: &Poseidon2AirProgram,
+    witness: VmAirCompositionWitness<'_>,
+) -> Result<VmAirCompositionCircuit, VmAirCompositionCircuitError> {
+    let sampled_value_count = checked_count("sampled values", program.sample_coordinates().len())?;
+    if witness.sampled_values.len() != program.sample_coordinates().len() {
+        return Err(VmAirCompositionCircuitError::SampledValueCountMismatch {
+            expected: program.sample_coordinates().len(),
+            actual: witness.sampled_values.len(),
+        });
+    }
+    if witness.claimed_sums.len() != 1 {
+        return Err(VmAirCompositionCircuitError::ClaimedSumCountMismatch {
+            expected: 1,
+            actual: witness.claimed_sums.len(),
+        });
+    }
+    if witness.relation_challenges.len() != Relations::DESCRIPTORS.len() {
+        return Err(
+            VmAirCompositionCircuitError::RelationChallengeCountMismatch {
+                expected: Relations::DESCRIPTORS.len(),
+                actual: witness.relation_challenges.len(),
+            },
+        );
+    }
+    let profile = VmAirCompositionProfile {
+        program: AirCompositionProgram::Poseidon2 { log_size },
+        max_log_degree_bound: program.max_log_degree_bound(),
+        sampled_value_count,
+        claimed_sum_count: 1,
+        relation_challenge_count: checked_count(
+            "relation challenges",
+            Relations::DESCRIPTORS.len(),
+        )?,
+        air_instruction_count: checked_count("AIR instructions", program.air_instruction_count())?,
+    };
+
+    let mut builder = TrackedBuilder::new();
+    let segment = builder.input(
+        VmAirCompositionInputSource::SegmentSelector,
+        M31Word::from(u16::from(witness.segment_selector)),
+    );
+    let sampled_values = witness
+        .sampled_values
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(item_index, value)| {
+            let item_index =
+                u32::try_from(item_index).expect("validated sampled-value count fits u32");
+            builder.secure_input(value, |word_index| {
+                VmAirCompositionInputSource::SampledValueWord {
+                    item_index,
+                    word_index,
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let claimed_sum = builder.secure_input(witness.claimed_sums[0], |word_index| {
+        VmAirCompositionInputSource::ClaimedSumWord {
+            item_index: 0,
+            word_index,
+        }
+    });
+    let relation_challenges = witness
+        .relation_challenges
+        .iter()
+        .enumerate()
+        .map(|(challenge, words)| {
+            let challenge =
+                u32::try_from(challenge).expect("validated relation challenge count fits u32");
+            RelationChallengeCircuit::new(core::array::from_fn(|word_index| {
+                builder.input(
+                    VmAirCompositionInputSource::RelationChallengeWord {
+                        challenge,
+                        word_index: u32::try_from(word_index)
+                            .expect("relation challenge word index fits u32"),
+                    },
+                    words[word_index],
+                )
+            }))
+        })
+        .collect::<Vec<_>>();
+    let relation_parameters =
+        bind_relation_parameters(&Relations::DESCRIPTORS, &relation_challenges)?;
+    let composition_randomness = builder
+        .secure_words(witness.composition_randomness, |word_index| {
+            VmAirCompositionInputSource::CompositionRandomnessWord { word_index }
+        });
+    let oods_seed = builder.secure_words(witness.oods_point, |word_index| {
+        VmAirCompositionInputSource::OodsPointWord { word_index }
+    });
+    let oods_point = oods_point_from_seed(oods_seed)?;
+    let evaluation = program.evaluate(
+        &sampled_values,
+        claimed_sum,
         &relation_parameters,
         composition_randomness,
         &oods_point,
@@ -517,6 +670,103 @@ mod tests {
             composition_randomness,
             oods_point: oods_words,
         }
+    }
+
+    fn poseidon2_active_fixture() -> ActiveFixture {
+        let program = Poseidon2AirProgram::new(11).expect("fixture Poseidon2 profile is valid");
+        let mut samples = vec![SecureField::zero(); program.sample_coordinates().len()];
+        let claimed_sums = vec![SecureField::zero()];
+        let challenges = Relations::DESCRIPTORS
+            .iter()
+            .enumerate()
+            .map(|(challenge, _)| {
+                core::array::from_fn(|word| {
+                    M31Word::from(
+                        u16::try_from(2 + challenge * RELATION_CHALLENGE_WORD_COUNT + word)
+                            .expect("fixture relation word fits u16"),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let relation_circuits = challenges
+            .iter()
+            .map(|words| {
+                RelationChallengeCircuit::new(
+                    words.map(|word| Rec::from(BaseField::from(word.as_u32()))),
+                )
+            })
+            .collect::<Vec<_>>();
+        let parameters = bind_relation_parameters(&Relations::DESCRIPTORS, &relation_circuits)
+            .expect("fixture supplies every relation draw");
+        let composition_randomness = [2_u16, 3, 5, 7].map(M31Word::from);
+        let composition_randomness_value = SecureField::from_m31_array(
+            composition_randomness.map(|word| M31::from(word.as_u32())),
+        );
+        let oods_words = [11_u16, 13, 17, 19].map(M31Word::from);
+        let oods_seed =
+            SecureField::from_m31_array(oods_words.map(|word| M31::from(word.as_u32())));
+        let oods_point = oods_point_from_seed(Rec::from(oods_seed))
+            .expect("fixture OODS seed maps outside the composition coset");
+        let evaluation = program
+            .evaluate(
+                &samples.iter().copied().map(Rec::from).collect::<Vec<_>>(),
+                Rec::from(claimed_sums[0]),
+                &parameters,
+                Rec::from(composition_randomness_value),
+                &oods_point,
+            )
+            .expect("complete Poseidon2 fixture evaluates");
+        let composition_tree = program
+            .sample_coordinates()
+            .iter()
+            .map(|coordinate| coordinate.tree)
+            .max()
+            .expect("Poseidon2 program samples its composition tree");
+        let first_left_coordinate = program
+            .sample_coordinates()
+            .iter()
+            .position(|coordinate| {
+                coordinate.tree == composition_tree
+                    && coordinate.column == 0
+                    && coordinate.point == 0
+            })
+            .expect("split composition has a first left coordinate");
+        samples[first_left_coordinate] = evaluation.air_value.value();
+        ActiveFixture {
+            samples,
+            claimed_sums,
+            challenges,
+            composition_randomness,
+            oods_point: oods_words,
+        }
+    }
+
+    #[test]
+    fn poseidon2_reference_owns_the_compiled_profile() {
+        let circuit = build_poseidon2_air_composition_reference(11)
+            .expect("fixture Poseidon2 reference is constructible");
+        assert_eq!(
+            circuit.profile().program(),
+            AirCompositionProgram::Poseidon2 { log_size: 11 }
+        );
+    }
+
+    #[test]
+    fn poseidon2_fixture_constrains_the_exact_composition_equality() {
+        let fixture = poseidon2_active_fixture();
+        let circuit = build_poseidon2_air_composition_circuit(
+            11,
+            VmAirCompositionWitness {
+                segment_selector: true,
+                sampled_values: &fixture.samples,
+                claimed_sums: &fixture.claimed_sums,
+                relation_challenges: &fixture.challenges,
+                composition_randomness: fixture.composition_randomness,
+                oods_point: fixture.oods_point,
+            },
+        )
+        .expect("fixture Poseidon2 circuit is constructible");
+        assert_eq!(circuit.nonzero_output_count(), 0);
     }
 
     #[test]

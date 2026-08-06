@@ -298,16 +298,16 @@ pub(crate) mod tests {
 
     fn frozen_root_verifier_shape() -> RootVerifierShape {
         RootVerifierShape {
-            step_count: 4_937,
+            step_count: 4_943,
             plan_digest: Digest8::try_from([
-                1_257_248_829,
-                1_216_201_935,
-                354_922_115,
-                2_062_314_934,
-                1_132_069_174,
-                1_088_399_207,
-                325_143_630,
-                1_511_814_991,
+                2_069_739_185,
+                1_656_291_528,
+                337_902_103,
+                12_002_415,
+                1_437_175_451,
+                992_675_095,
+                1_850_827_234,
+                375_452_118,
             ])
             .expect("the checked verifier-plan digest is canonical"),
         }

@@ -1,7 +1,7 @@
 //! Control-step and query-route adapter for fixed FRI verification.
 //!
 //! Trusted preprocessing extracts every DEEP, FRI-fold, and last-layer step
-//! from the verifier plans for all three lanes. Fold and last-layer rows also
+//! from the verifier plans for all four lanes. Fold and last-layer rows also
 //! consume the atomic query-position tuple and export its scalar fields to the
 //! fixed arithmetic circuit. This keeps schedule ownership and route splitting
 //! in one component without letting committed values choose either layout.
@@ -21,7 +21,8 @@ use stwo::prover::poly::circle::CircleEvaluation;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 
 use super::control_air::{
-    ControlRelations, LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
+    ControlRelations, LEFT_RECURSION_VERIFIER_ID, POSEIDON2_VERIFIER_ID,
+    RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
 };
 use super::fri_verifier_circuit::FriVerifierProfile;
 use super::fri_verifier_input_air::{FriVerifierRouteField, FriVerifierRouteRelations};
@@ -85,19 +86,19 @@ struct PreprocessedRow {
 pub struct FriVerifierControlPreprocessed {
     log_size: u32,
     rows: Vec<PreprocessedRow>,
-    query_counts: [usize; 3],
+    query_counts: [usize; 4],
 }
 
 impl FriVerifierControlPreprocessed {
-    pub fn new(lanes: [FriVerifierControlLane<'_>; 3]) -> Result<Self, FriVerifierControlError> {
+    pub fn new(lanes: [FriVerifierControlLane<'_>; 4]) -> Result<Self, FriVerifierControlError> {
         validate_lane_order(&lanes)?;
         let mut rows = Vec::new();
-        let mut query_counts = [0_usize; 3];
+        let mut query_counts = [0_usize; 4];
         for (lane_index, lane) in lanes.iter().copied().enumerate() {
-            let expected_schema = if lane.verifier_id == SEGMENT_VERIFIER_ID {
-                VerifierSchema::Vm
-            } else {
-                VerifierSchema::Recursion
+            let expected_schema = match lane.verifier_id {
+                SEGMENT_VERIFIER_ID => VerifierSchema::Vm,
+                POSEIDON2_VERIFIER_ID => VerifierSchema::Poseidon2,
+                _ => VerifierSchema::Recursion,
             };
             if lane.plan.schema() != expected_schema {
                 return Err(FriVerifierControlError::SchemaMismatch {
@@ -172,10 +173,11 @@ impl FriVerifierControlPreprocessed {
 }
 
 fn validate_lane_order(
-    lanes: &[FriVerifierControlLane<'_>; 3],
+    lanes: &[FriVerifierControlLane<'_>; 4],
 ) -> Result<(), FriVerifierControlError> {
     for (lane, expected) in lanes.iter().zip([
         SEGMENT_VERIFIER_ID,
+        POSEIDON2_VERIFIER_ID,
         LEFT_RECURSION_VERIFIER_ID,
         RIGHT_RECURSION_VERIFIER_ID,
     ]) {
@@ -190,10 +192,11 @@ fn validate_lane_order(
 }
 
 fn validate_query_lane_order(
-    lanes: &[FriVerifierQueryLane<'_>; 3],
+    lanes: &[FriVerifierQueryLane<'_>; 4],
 ) -> Result<(), FriVerifierControlError> {
     for (lane, expected) in lanes.iter().zip([
         SEGMENT_VERIFIER_ID,
+        POSEIDON2_VERIFIER_ID,
         LEFT_RECURSION_VERIFIER_ID,
         RIGHT_RECURSION_VERIFIER_ID,
     ]) {
@@ -209,7 +212,7 @@ fn validate_query_lane_order(
 
 fn lane_masks(verifier_id: u32) -> Result<(u32, u32), FriVerifierControlError> {
     match verifier_id {
-        SEGMENT_VERIFIER_ID => Ok((1, 0)),
+        SEGMENT_VERIFIER_ID | POSEIDON2_VERIFIER_ID => Ok((1, 0)),
         LEFT_RECURSION_VERIFIER_ID | RIGHT_RECURSION_VERIFIER_ID => Ok((0, 1)),
         _ => Err(FriVerifierControlError::UnknownVerifierId { verifier_id }),
     }
@@ -500,7 +503,7 @@ pub fn push_fri_verifier_control(
     table: &mut FriVerifierControlTable,
     preprocessed: &FriVerifierControlPreprocessed,
     query_preprocessed: &QueryPositionPreprocessed,
-    query_lanes: [FriVerifierQueryLane<'_>; 3],
+    query_lanes: [FriVerifierQueryLane<'_>; 4],
     proof_kind: ProofKind,
 ) -> Result<(), FriVerifierControlError> {
     validate_query_lane_order(&query_lanes)?;
@@ -538,7 +541,7 @@ fn verifier_is_active(
     proof_kind: ProofKind,
 ) -> Result<bool, FriVerifierControlError> {
     match verifier_id {
-        SEGMENT_VERIFIER_ID => Ok(proof_kind == ProofKind::SegmentLeaf),
+        SEGMENT_VERIFIER_ID | POSEIDON2_VERIFIER_ID => Ok(proof_kind == ProofKind::SegmentLeaf),
         LEFT_RECURSION_VERIFIER_ID | RIGHT_RECURSION_VERIFIER_ID => {
             Ok(proof_kind == ProofKind::BinaryNode)
         }
@@ -673,6 +676,7 @@ mod tests {
 
     struct Fixture {
         vm_plan: VerifierControlPlan,
+        poseidon2_plan: VerifierControlPlan,
         recursion_plan: VerifierControlPlan,
         profile: FriVerifierProfile,
         query_preprocessed: QueryPositionPreprocessed,
@@ -684,6 +688,11 @@ mod tests {
                 FriVerifierControlLane {
                     verifier_id: SEGMENT_VERIFIER_ID,
                     plan: &self.vm_plan,
+                    profile: &self.profile,
+                },
+                FriVerifierControlLane {
+                    verifier_id: POSEIDON2_VERIFIER_ID,
+                    plan: &self.poseidon2_plan,
                     profile: &self.profile,
                 },
                 FriVerifierControlLane {
@@ -705,10 +714,12 @@ mod tests {
         let pcs = pcs_parameters().validate().expect("fixture PCS is valid");
         let profile =
             FriVerifierProfile::from_shape(pcs, &shape()).expect("fixture FRI profile is valid");
-        let query_preprocessed = QueryPositionPreprocessed::new(pcs, &shape(), pcs, &shape())
-            .expect("fixture query preprocessing is valid");
+        let query_preprocessed =
+            QueryPositionPreprocessed::new(pcs, &shape(), pcs, &shape(), pcs, &shape())
+                .expect("fixture query preprocessing is valid");
         Fixture {
             vm_plan: plan(VerifierSchema::Vm),
+            poseidon2_plan: plan(VerifierSchema::Poseidon2),
             recursion_plan: plan(VerifierSchema::Recursion),
             profile,
             query_preprocessed,
@@ -727,6 +738,10 @@ mod tests {
             [
                 FriVerifierQueryLane {
                     verifier_id: SEGMENT_VERIFIER_ID,
+                    raw_queries: &raw,
+                },
+                FriVerifierQueryLane {
+                    verifier_id: POSEIDON2_VERIFIER_ID,
                     raw_queries: &raw,
                 },
                 FriVerifierQueryLane {
@@ -786,7 +801,7 @@ mod tests {
     fn preprocessing_owns_every_pcs_arithmetic_step() {
         let fixture = fixture();
         let expected_per_lane = fixture.profile.query_count() * (fixture.profile.layer_count() + 2);
-        assert_eq!(fixture.preprocessing().row_count(), expected_per_lane * 3);
+        assert_eq!(fixture.preprocessing().row_count(), expected_per_lane * 4);
     }
 
     #[rstest]
@@ -798,6 +813,11 @@ mod tests {
             FriVerifierControlLane {
                 verifier_id: SEGMENT_VERIFIER_ID,
                 plan: &fixture.vm_plan,
+                profile: &changed,
+            },
+            FriVerifierControlLane {
+                verifier_id: POSEIDON2_VERIFIER_ID,
+                plan: &fixture.poseidon2_plan,
                 profile: &changed,
             },
             FriVerifierControlLane {

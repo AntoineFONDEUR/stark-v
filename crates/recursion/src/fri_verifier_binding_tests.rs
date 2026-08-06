@@ -23,7 +23,8 @@ use stwo::core::utils::bit_reverse_index;
 use stwo_constraint_framework::Relation;
 
 use super::control_air::{
-    ControlRelations, LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
+    ControlRelations, LEFT_RECURSION_VERIFIER_ID, POSEIDON2_VERIFIER_ID,
+    RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
 };
 use super::fri_merkle_air::FriMerkleRelations;
 use super::fri_verifier_circuit::{
@@ -54,7 +55,7 @@ use crate::circuit::CircuitTraces;
 use crate::relations::RecursionRelations;
 use crate::{linear_ops, qm31_inv, qm31_mul};
 
-const CIRCUIT_IDS: [u32; 3] = [311, 312, 313];
+const CIRCUIT_IDS: [u32; 4] = [311, 312, 313, 314];
 const RAW_QUERY: u32 = 93;
 
 fn word(value: u16) -> M31Word {
@@ -106,6 +107,7 @@ fn plan(schema: VerifierSchema) -> VerifierControlPlan {
 
 struct Fixture {
     vm_plan: VerifierControlPlan,
+    poseidon2_plan: VerifierControlPlan,
     recursion_plan: VerifierControlPlan,
     profile: FriVerifierProfile,
     query_preprocessed: QueryPositionPreprocessed,
@@ -116,10 +118,12 @@ impl Fixture {
         let pcs = pcs_parameters().validate().expect("fixture PCS is valid");
         let profile =
             FriVerifierProfile::from_shape(pcs, &shape()).expect("fixture FRI profile is valid");
-        let query_preprocessed = QueryPositionPreprocessed::new(pcs, &shape(), pcs, &shape())
-            .expect("fixture query preprocessing is valid");
+        let query_preprocessed =
+            QueryPositionPreprocessed::new(pcs, &shape(), pcs, &shape(), pcs, &shape())
+                .expect("fixture query preprocessing is valid");
         Self {
             vm_plan: plan(VerifierSchema::Vm),
+            poseidon2_plan: plan(VerifierSchema::Poseidon2),
             recursion_plan: plan(VerifierSchema::Recursion),
             profile,
             query_preprocessed,
@@ -131,6 +135,11 @@ impl Fixture {
             FriVerifierControlLane {
                 verifier_id: SEGMENT_VERIFIER_ID,
                 plan: &self.vm_plan,
+                profile: &self.profile,
+            },
+            FriVerifierControlLane {
+                verifier_id: POSEIDON2_VERIFIER_ID,
+                plan: &self.poseidon2_plan,
                 profile: &self.profile,
             },
             FriVerifierControlLane {
@@ -240,14 +249,14 @@ impl Fixture {
         .expect("fixture FRI circuit is constructible")
     }
 
-    fn reference_lanes_circuits(&self) -> [FriVerifierCircuit; 3] {
+    fn reference_lanes_circuits(&self) -> [FriVerifierCircuit; 4] {
         core::array::from_fn(|_| {
             build_fri_verifier_reference(&self.profile).expect("reference is valid")
         })
     }
 }
 
-fn circuit_lanes(circuits: &[FriVerifierCircuit; 3]) -> [FriVerifierCircuitLane<'_>; 3] {
+fn circuit_lanes(circuits: &[FriVerifierCircuit; 4]) -> [FriVerifierCircuitLane<'_>; 4] {
     [
         FriVerifierCircuitLane {
             verifier_id: SEGMENT_VERIFIER_ID,
@@ -255,14 +264,19 @@ fn circuit_lanes(circuits: &[FriVerifierCircuit; 3]) -> [FriVerifierCircuitLane<
             circuit: &circuits[0],
         },
         FriVerifierCircuitLane {
-            verifier_id: LEFT_RECURSION_VERIFIER_ID,
+            verifier_id: POSEIDON2_VERIFIER_ID,
             circuit_id: CIRCUIT_IDS[1],
             circuit: &circuits[1],
         },
         FriVerifierCircuitLane {
-            verifier_id: RIGHT_RECURSION_VERIFIER_ID,
+            verifier_id: LEFT_RECURSION_VERIFIER_ID,
             circuit_id: CIRCUIT_IDS[2],
             circuit: &circuits[2],
+        },
+        FriVerifierCircuitLane {
+            verifier_id: RIGHT_RECURSION_VERIFIER_ID,
+            circuit_id: CIRCUIT_IDS[3],
+            circuit: &circuits[3],
         },
     ]
 }
@@ -289,6 +303,10 @@ fn fri_route_bridge_closes_between_control_and_input_airs() {
                 raw_queries: &raw_words,
             },
             FriVerifierQueryLane {
+                verifier_id: POSEIDON2_VERIFIER_ID,
+                raw_queries: &raw_words,
+            },
+            FriVerifierQueryLane {
                 verifier_id: LEFT_RECURSION_VERIFIER_ID,
                 raw_queries: &raw_words,
             },
@@ -303,6 +321,7 @@ fn fri_route_bridge_closes_between_control_and_input_airs() {
 
     let references = fixture.reference_lanes_circuits();
     let witnesses = [
+        fixture.routed_segment_circuit(),
         fixture.routed_segment_circuit(),
         build_fri_verifier_reference(&fixture.profile).expect("left reference is valid"),
         build_fri_verifier_reference(&fixture.profile).expect("right reference is valid"),
@@ -359,6 +378,14 @@ fn fri_route_bridge_closes_between_control_and_input_airs() {
         &query_relations,
         &deep_relations,
         &fri_merkle_relations,
+    ) + non_route_semantic_terms(
+        POSEIDON2_VERIFIER_ID,
+        &witnesses[1],
+        &verifier_input_relations,
+        &randomness_relations,
+        &query_relations,
+        &deep_relations,
+        &fri_merkle_relations,
     );
 
     let mut traces = CircuitTraces::default();
@@ -371,6 +398,15 @@ fn fri_route_bridge_closes_between_control_and_input_airs() {
         segment_witness.circuit,
     )
     .expect("valid segment FRI circuit lowers");
+    let poseidon2_reference = circuit_lanes(&references)[1];
+    let poseidon2_witness = circuit_lanes(&witnesses)[1];
+    lower_fri_verifier_circuit(
+        &mut traces,
+        poseidon2_reference.circuit_id,
+        poseidon2_reference.circuit,
+        poseidon2_witness.circuit,
+    )
+    .expect("valid Poseidon2 FRI circuit lowers");
     let traces = traces
         .into_air_traces()
         .expect("lowered FRI verifier schedules fit their traces");
@@ -397,7 +433,13 @@ fn fri_route_bridge_closes_between_control_and_input_airs() {
         segment_reference.circuit,
         &circuit_relations,
     )
-    .expect("segment reference outputs are zero");
+    .expect("segment reference outputs are zero")
+        + public_fri_verifier_terms(
+            poseidon2_reference.circuit_id,
+            poseidon2_reference.circuit,
+            &circuit_relations,
+        )
+        .expect("Poseidon2 reference outputs are zero");
 
     assert!(
         (control_sum
@@ -419,8 +461,30 @@ fn control_schedule_terms(
     control_relations: &ControlRelations,
     query_relations: &QueryPositionRelations,
 ) -> SecureField {
+    lane_control_schedule_terms(
+        fixture,
+        &fixture.vm_plan,
+        SEGMENT_VERIFIER_ID,
+        control_relations,
+        query_relations,
+    ) + lane_control_schedule_terms(
+        fixture,
+        &fixture.poseidon2_plan,
+        POSEIDON2_VERIFIER_ID,
+        control_relations,
+        query_relations,
+    )
+}
+
+fn lane_control_schedule_terms(
+    fixture: &Fixture,
+    plan: &VerifierControlPlan,
+    verifier_id: u32,
+    control_relations: &ControlRelations,
+    query_relations: &QueryPositionRelations,
+) -> SecureField {
     let mut total = SecureField::zero();
-    for (sequence, step) in fixture.vm_plan.steps().iter().copied().enumerate() {
+    for (sequence, step) in plan.steps().iter().copied().enumerate() {
         let route = match step {
             VerifierStep::EvaluateDeepQuotient { .. } => None,
             VerifierStep::FoldFri { layer, query, .. } => {
@@ -435,7 +499,7 @@ fn control_schedule_terms(
         total += inverse_term(
             &control_relations.step,
             &[
-                M31::from(SEGMENT_VERIFIER_ID),
+                M31::from(verifier_id),
                 M31::from(u32::try_from(sequence).expect("fixture sequence fits u32")),
                 M31::from(encoded.tag()),
                 M31::from(encoded.args()[0]),
@@ -449,7 +513,7 @@ fn control_schedule_terms(
             total += inverse_term(
                 &query_relations.position,
                 &[
-                    M31::from(SEGMENT_VERIFIER_ID),
+                    M31::from(verifier_id),
                     M31::from(kind.as_u32()),
                     M31::from(item),
                     M31::from(query),

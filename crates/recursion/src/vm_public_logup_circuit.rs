@@ -102,6 +102,7 @@ pub enum VmPublicLogupInputSource {
     ClaimByte { word_index: u32, byte_index: u32 },
     RelationChallengeWord { challenge: u32, word_index: u32 },
     ClaimedSumWord { item_index: u32, limb_index: u32 },
+    SharedRelationSumWord { limb_index: u32 },
     SegmentSelector,
 }
 
@@ -163,6 +164,7 @@ pub struct VmPublicLogupWitness<'a> {
     pub claim_words: &'a [M31Word],
     pub relation_challenges: VmPublicLogupChallengeWords,
     pub claimed_sums: &'a [SecureField],
+    pub shared_relation_sum: SecureField,
 }
 
 struct TrackedBuilder {
@@ -374,6 +376,7 @@ pub fn build_vm_public_logup_reference(
             claim_words: &claim,
             relation_challenges: VmPublicLogupChallengeWords::inactive_reference(),
             claimed_sums: &claimed_sums,
+            shared_relation_sum: SecureField::zero(),
         },
     )
 }
@@ -567,7 +570,17 @@ pub fn build_vm_public_logup_circuit(
         });
         total += segment.clone() * compose_secure(values);
     }
-    builder.circuit.constrain_zero(total);
+    let shared_relation_sum = compose_secure(core::array::from_fn(|limb_index| {
+        builder.input(
+            VmPublicLogupInputSource::SharedRelationSumWord {
+                limb_index: u32::try_from(limb_index).expect("secure-field limb index fits u32"),
+            },
+            witness.shared_relation_sum.to_m31_array()[limb_index].0,
+        )
+    }));
+    builder
+        .circuit
+        .constrain_zero(total - segment * shared_relation_sum);
     Ok(builder.finish(shape, claimed_sum_count, public_term_count))
 }
 
@@ -672,6 +685,7 @@ mod tests {
                 claim_words: &claim,
                 relation_challenges: VmPublicLogupChallengeWords::from_relations(relations),
                 claimed_sums,
+                shared_relation_sum: SecureField::zero(),
             },
         )
         .expect("fixture public denominators are nonzero")
@@ -800,6 +814,7 @@ mod tests {
                 claim_words: &claim,
                 relation_challenges: swapped,
                 claimed_sums: &[claimed_sum],
+                shared_relation_sum: SecureField::zero(),
             },
         )
         .expect("swapped fixture denominators remain nonzero");
@@ -829,6 +844,7 @@ mod tests {
                     claim_words: &claim,
                     relation_challenges: challenges,
                     claimed_sums: &[SecureField::zero()],
+                    shared_relation_sum: SecureField::zero(),
                 },
             )
             .is_ok()
@@ -854,6 +870,7 @@ mod tests {
                     claim_words: &claim,
                     relation_challenges: challenges,
                     claimed_sums: &[SecureField::zero()],
+                    shared_relation_sum: SecureField::zero(),
                 },
             ),
             Err(VmPublicLogupCircuitError::ZeroDenominator { term: 69 })

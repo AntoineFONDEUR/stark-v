@@ -733,8 +733,8 @@ mod tests {
         let _lock = TEST_MUTEX.lock().unwrap();
         reset_display_options();
 
-        let clk = vec![1u32, 2, 3];
-        let pc = vec![0x1000u32, 0x1004, 0x1008];
+        let clk = [1u32, 2, 3];
+        let pc = [0x1000u32, 0x1004, 0x1008];
 
         let table = slices_to_table(&[("clk", &clk[..]), ("pc", &pc[..])]);
         let output = table.to_string();

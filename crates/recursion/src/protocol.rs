@@ -9,8 +9,8 @@
 use core::fmt;
 
 use air::digest::{
-    HashSuiteDigest, M31Word, ProtocolId, RecursionAirProgramDigest, RecursionPreprocessingDigest,
-    VmAirProgramDigest, VmPreprocessingDigest,
+    HashSuiteDigest, M31Word, Poseidon2AirProgramDigest, ProtocolId, RecursionAirProgramDigest,
+    RecursionPreprocessingDigest, VmAirProgramDigest, VmPreprocessingDigest,
 };
 use prover::poseidon2_channel::poseidon2_hash_m31_words;
 use stwo::core::fri::FriConfig;
@@ -194,11 +194,6 @@ impl<const N_TABLES: usize, const N_TREES: usize, const N_FRI_LAYERS: usize>
         if N_TREES == 0 {
             return Err(ProofShapeError::EmptyTreeLayout);
         }
-        // STWO emits no preprocessed query positions when tree zero has height
-        // zero, while the fixed current protocol wire carries one trace path per tree/query.
-        if self.tree_heights[0] == M31Word::ZERO {
-            return Err(ProofShapeError::EmptyPreprocessedTreeUnsupported);
-        }
         validate_nonzero_shape_count("claimed sums", self.claimed_sum_count)?;
         validate_nonzero_shape_count("sampled values", self.sampled_value_count)?;
         validate_nonzero_shape_count("queried values", self.queried_value_count)?;
@@ -206,12 +201,16 @@ impl<const N_TABLES: usize, const N_TREES: usize, const N_FRI_LAYERS: usize>
         let config = pcs.config();
         let n_queries = config.fri_config.n_queries;
         validate_shape_count("raw queries", n_queries, self.raw_query_count)?;
-        let expected_trace_paths =
-            N_TREES
-                .checked_mul(n_queries)
-                .ok_or(ProofShapeError::ArithmeticOverflow {
-                    field: "trace path count",
-                })?;
+        let authenticated_tree_count = self
+            .tree_heights
+            .iter()
+            .filter(|height| **height != M31Word::ZERO)
+            .count();
+        let expected_trace_paths = authenticated_tree_count.checked_mul(n_queries).ok_or(
+            ProofShapeError::ArithmeticOverflow {
+                field: "trace path count",
+            },
+        )?;
         validate_shape_count("trace paths", expected_trace_paths, self.trace_path_count)?;
 
         let queried_value_count = shape_word_as_usize("queried values", self.queried_value_count)?;
@@ -386,6 +385,7 @@ pub struct ProtocolManifest<
     pub vm_preprocessing: VmPreprocessingDigest,
     pub recursion_preprocessing: RecursionPreprocessingDigest,
     pub vm_air_program: VmAirProgramDigest,
+    pub poseidon2_air_program: Poseidon2AirProgramDigest,
     pub recursion_air_program: RecursionAirProgramDigest,
     pub vm_pcs: PcsParameters,
     pub recursion_pcs: PcsParameters,
@@ -550,6 +550,7 @@ pub enum CanonicalTag {
     RecursionPreprocessing = 5,
     VmAirProgram = 6,
     RecursionAirProgram = 7,
+    Poseidon2AirProgram = 12,
     VmPcs = 8,
     RecursionPcs = 9,
     VmProofShape = 10,
@@ -714,6 +715,11 @@ impl<
             output,
             CanonicalTag::VmAirProgram,
             self.vm_air_program.digest().words(),
+        );
+        append_digest(
+            output,
+            CanonicalTag::Poseidon2AirProgram,
+            self.poseidon2_air_program.digest().words(),
         );
         append_digest(
             output,
@@ -1081,6 +1087,7 @@ mod tests {
         VmPreprocessing,
         RecursionPreprocessing,
         VmAirProgram,
+        Poseidon2AirProgram,
         RecursionAirProgram,
         VmInteractionPowBits,
         VmPowBits,
@@ -1169,6 +1176,7 @@ mod tests {
             vm_preprocessing: VmPreprocessingDigest::from(digest(20)),
             recursion_preprocessing: RecursionPreprocessingDigest::from(digest(30)),
             vm_air_program: VmAirProgramDigest::from(digest(40)),
+            poseidon2_air_program: Poseidon2AirProgramDigest::from(digest(45)),
             recursion_air_program: RecursionAirProgramDigest::from(digest(50)),
             vm_pcs: pcs(60),
             recursion_pcs: pcs(70),
@@ -1226,6 +1234,7 @@ mod tests {
             vm_preprocessing: VmPreprocessingDigest::from(digest(20)),
             recursion_preprocessing: RecursionPreprocessingDigest::from(digest(30)),
             vm_air_program: VmAirProgramDigest::from(digest(40)),
+            poseidon2_air_program: Poseidon2AirProgramDigest::from(digest(45)),
             recursion_air_program: RecursionAirProgramDigest::from(digest(50)),
             vm_pcs: valid_pcs(),
             recursion_pcs: valid_pcs(),
@@ -1260,6 +1269,11 @@ mod tests {
             ManifestField::VmAirProgram => {
                 value.vm_air_program = VmAirProgramDigest::from(replace_first_word(
                     value.vm_air_program.into_digest(),
+                ));
+            }
+            ManifestField::Poseidon2AirProgram => {
+                value.poseidon2_air_program = Poseidon2AirProgramDigest::from(replace_first_word(
+                    value.poseidon2_air_program.into_digest(),
                 ));
             }
             ManifestField::RecursionAirProgram => {
@@ -1522,6 +1536,7 @@ mod tests {
     #[case::vm_preprocessing(ManifestField::VmPreprocessing)]
     #[case::recursion_preprocessing(ManifestField::RecursionPreprocessing)]
     #[case::vm_air_program(ManifestField::VmAirProgram)]
+    #[case::poseidon2_air_program(ManifestField::Poseidon2AirProgram)]
     #[case::recursion_air_program(ManifestField::RecursionAirProgram)]
     #[case::vm_interaction_pow_bits(ManifestField::VmInteractionPowBits)]
     #[case::vm_pow_bits(ManifestField::VmPowBits)]

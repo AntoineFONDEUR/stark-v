@@ -23,7 +23,8 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::relation;
 
 use super::control_air::{
-    LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
+    LEFT_RECURSION_VERIFIER_ID, POSEIDON2_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID,
+    SEGMENT_VERIFIER_ID,
 };
 use super::protocol::{FixedProofShape, ProofShapeError, ValidatedPcsParameters};
 use super::verifier_randomness_air::{VerifierRandomnessKind, VerifierRandomnessRelations};
@@ -140,6 +141,7 @@ pub struct QueryPositionPreprocessed {
     raw_rows: Vec<RawRow>,
     mapping_rows: Vec<MappingRow>,
     vm_query_count: usize,
+    poseidon2_query_count: usize,
     recursion_query_count: usize,
 }
 
@@ -149,22 +151,31 @@ impl QueryPositionPreprocessed {
         const VM_TABLES: usize,
         const VM_TREES: usize,
         const VM_FRI_LAYERS: usize,
+        const POSEIDON2_TABLES: usize,
+        const POSEIDON2_TREES: usize,
+        const POSEIDON2_FRI_LAYERS: usize,
         const RECURSION_TABLES: usize,
         const RECURSION_TREES: usize,
         const RECURSION_FRI_LAYERS: usize,
     >(
         vm_pcs: ValidatedPcsParameters,
         vm_shape: &FixedProofShape<VM_TABLES, VM_TREES, VM_FRI_LAYERS>,
+        poseidon2_pcs: ValidatedPcsParameters,
+        poseidon2_shape: &FixedProofShape<POSEIDON2_TABLES, POSEIDON2_TREES, POSEIDON2_FRI_LAYERS>,
         recursion_pcs: ValidatedPcsParameters,
         recursion_shape: &FixedProofShape<RECURSION_TABLES, RECURSION_TREES, RECURSION_FRI_LAYERS>,
     ) -> Result<Self, QueryPositionError> {
         let vm_validated = vm_shape
             .validate(vm_pcs)
             .map_err(QueryPositionError::VmShape)?;
+        let poseidon2_validated = poseidon2_shape
+            .validate(poseidon2_pcs)
+            .map_err(QueryPositionError::Poseidon2Shape)?;
         let recursion_validated = recursion_shape
             .validate(recursion_pcs)
             .map_err(QueryPositionError::RecursionShape)?;
         let vm_query_count = vm_pcs.config().fri_config.n_queries;
+        let poseidon2_query_count = poseidon2_pcs.config().fri_config.n_queries;
         let recursion_query_count = recursion_pcs.config().fri_config.n_queries;
 
         let mut raw_rows = Vec::new();
@@ -179,6 +190,17 @@ impl QueryPositionPreprocessed {
             vm_validated.lifting_log_size(),
             &vm_shape.tree_heights.map(M31Word::as_u32),
             &vm_shape.fri_layer_fold_widths.map(M31Word::as_u32),
+        )?;
+        append_profile_rows(
+            &mut raw_rows,
+            &mut mapping_rows,
+            POSEIDON2_VERIFIER_ID,
+            1,
+            0,
+            poseidon2_query_count,
+            poseidon2_validated.lifting_log_size(),
+            &poseidon2_shape.tree_heights.map(M31Word::as_u32),
+            &poseidon2_shape.fri_layer_fold_widths.map(M31Word::as_u32),
         )?;
         for verifier_id in [LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID] {
             append_profile_rows(
@@ -200,6 +222,7 @@ impl QueryPositionPreprocessed {
             raw_rows,
             mapping_rows,
             vm_query_count,
+            poseidon2_query_count,
             recursion_query_count,
         })
     }
@@ -218,6 +241,10 @@ impl QueryPositionPreprocessed {
 
     pub const fn recursion_query_count(&self) -> usize {
         self.recursion_query_count
+    }
+
+    pub const fn poseidon2_query_count(&self) -> usize {
+        self.poseidon2_query_count
     }
 
     /// Evaluates one trusted semantic route for witness materialization.
@@ -303,7 +330,8 @@ fn append_profile_rows<const N_TREES: usize, const N_FRI_LAYERS: usize>(
     tree_heights: &[u32; N_TREES],
     fri_fold_widths: &[u32; N_FRI_LAYERS],
 ) -> Result<(), QueryPositionError> {
-    let mapping_count = N_TREES
+    let authenticated_tree_count = tree_heights.iter().filter(|height| **height != 0).count();
+    let mapping_count = authenticated_tree_count
         .checked_add(
             N_FRI_LAYERS
                 .checked_mul(2)
@@ -323,6 +351,9 @@ fn append_profile_rows<const N_TREES: usize, const N_FRI_LAYERS: usize>(
         });
 
         for (tree, height) in tree_heights.iter().copied().enumerate() {
+            if height == 0 {
+                continue;
+            }
             let position_weights = if tree == 0 {
                 preprocessed_tree_weights(lifting_log_size, height)?
             } else {
@@ -861,7 +892,10 @@ where
 /// Raw query words selected by the public universal proof kind.
 #[derive(Clone, Copy)]
 pub enum UniversalRawQueryWitness<'a> {
-    Segment(&'a [M31Word]),
+    Segment {
+        vm: &'a [M31Word],
+        poseidon2: &'a [M31Word],
+    },
     Binary {
         left: &'a [M31Word],
         right: &'a [M31Word],
@@ -908,11 +942,14 @@ fn validate_witness_counts(
     witness: UniversalRawQueryWitness<'_>,
 ) -> Result<(), QueryPositionError> {
     match witness {
-        UniversalRawQueryWitness::Segment(queries) => validate_query_count(
-            SEGMENT_VERIFIER_ID,
-            preprocessed.vm_query_count,
-            queries.len(),
-        ),
+        UniversalRawQueryWitness::Segment { vm, poseidon2 } => {
+            validate_query_count(SEGMENT_VERIFIER_ID, preprocessed.vm_query_count, vm.len())?;
+            validate_query_count(
+                POSEIDON2_VERIFIER_ID,
+                preprocessed.poseidon2_query_count,
+                poseidon2.len(),
+            )
+        }
         UniversalRawQueryWitness::Binary { left, right } => {
             validate_query_count(
                 LEFT_RECURSION_VERIFIER_ID,
@@ -951,17 +988,22 @@ fn query_word(
     query: u32,
 ) -> Result<Option<M31Word>, QueryPositionError> {
     let queries = match (witness, verifier_id) {
-        (UniversalRawQueryWitness::Segment(queries), SEGMENT_VERIFIER_ID) => Some(queries),
+        (UniversalRawQueryWitness::Segment { vm, .. }, SEGMENT_VERIFIER_ID) => Some(vm),
+        (UniversalRawQueryWitness::Segment { poseidon2, .. }, POSEIDON2_VERIFIER_ID) => {
+            Some(poseidon2)
+        }
         (UniversalRawQueryWitness::Binary { left, .. }, LEFT_RECURSION_VERIFIER_ID) => Some(left),
         (UniversalRawQueryWitness::Binary { right, .. }, RIGHT_RECURSION_VERIFIER_ID) => {
             Some(right)
         }
         (UniversalRawQueryWitness::Empty, SEGMENT_VERIFIER_ID)
+        | (UniversalRawQueryWitness::Empty, POSEIDON2_VERIFIER_ID)
         | (UniversalRawQueryWitness::Empty, LEFT_RECURSION_VERIFIER_ID)
         | (UniversalRawQueryWitness::Empty, RIGHT_RECURSION_VERIFIER_ID)
-        | (UniversalRawQueryWitness::Segment(_), LEFT_RECURSION_VERIFIER_ID)
-        | (UniversalRawQueryWitness::Segment(_), RIGHT_RECURSION_VERIFIER_ID)
-        | (UniversalRawQueryWitness::Binary { .. }, SEGMENT_VERIFIER_ID) => None,
+        | (UniversalRawQueryWitness::Segment { .. }, LEFT_RECURSION_VERIFIER_ID)
+        | (UniversalRawQueryWitness::Segment { .. }, RIGHT_RECURSION_VERIFIER_ID)
+        | (UniversalRawQueryWitness::Binary { .. }, SEGMENT_VERIFIER_ID)
+        | (UniversalRawQueryWitness::Binary { .. }, POSEIDON2_VERIFIER_ID) => None,
         (_, verifier_id) => {
             return Err(QueryPositionError::UnknownVerifierId { verifier_id });
         }
@@ -1046,6 +1088,7 @@ pub fn gen_mapping_interaction_trace(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum QueryPositionError {
     VmShape(ProofShapeError),
+    Poseidon2Shape(ProofShapeError),
     RecursionShape(ProofShapeError),
     RowCountOverflow,
     LogSizeOutOfRange {
@@ -1155,7 +1198,7 @@ mod tests {
     }
 
     fn preprocessing() -> QueryPositionPreprocessed {
-        QueryPositionPreprocessed::new(pcs(), &shape(), pcs(), &shape())
+        QueryPositionPreprocessed::new(pcs(), &shape(), pcs(), &shape(), pcs(), &shape())
             .expect("fixture query geometry is valid")
     }
 
@@ -1175,7 +1218,10 @@ mod tests {
         let mut mappings = QueryMappingTable::new();
         let (vm, left, right) = queries();
         let witness = match kind {
-            ProofKind::SegmentLeaf => UniversalRawQueryWitness::Segment(&vm),
+            ProofKind::SegmentLeaf => UniversalRawQueryWitness::Segment {
+                vm: &vm,
+                poseidon2: &vm,
+            },
             ProofKind::BinaryNode => UniversalRawQueryWitness::Binary {
                 left: &left,
                 right: &right,
@@ -1335,7 +1381,10 @@ mod tests {
             &mut bits,
             &mut mappings,
             &preprocessing,
-            UniversalRawQueryWitness::Segment(&vm),
+            UniversalRawQueryWitness::Segment {
+                vm: &vm,
+                poseidon2: &vm,
+            },
         )
         .expect("fixture raw queries materialize");
         let mut channel = Poseidon2M31Channel::default();

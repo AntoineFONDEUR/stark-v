@@ -48,7 +48,8 @@ const NODE_ID_COLUMN: usize = 7;
 const USE_COUNT_COLUMN: usize = 8;
 const SOURCE_INDEX_0_COLUMN: usize = 9;
 const SOURCE_INDEX_1_COLUMN: usize = 10;
-const PREPROCESSED_COLUMN_COUNT: usize = 11;
+const SHARED_RELATION_SUM_MASK_COLUMN: usize = 11;
+const PREPROCESSED_COLUMN_COUNT: usize = 12;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PreprocessedRow {
@@ -192,6 +193,10 @@ impl VmPublicLogupInputPreprocessed {
             ));
             columns[SELECTOR_MASK_COLUMN][index] =
                 u32::from(row.source == VmPublicLogupInputSource::SegmentSelector);
+            columns[SHARED_RELATION_SUM_MASK_COLUMN][index] = u32::from(matches!(
+                row.source,
+                VmPublicLogupInputSource::SharedRelationSumWord { .. }
+            ));
             columns[CIRCUIT_ID_COLUMN][index] = row.circuit_id;
             columns[NODE_ID_COLUMN][index] = row.node_id;
             columns[USE_COUNT_COLUMN][index] = row.use_count;
@@ -254,6 +259,12 @@ fn validate_source(
             }
             Ok((item_index, limb_index))
         }
+        VmPublicLogupInputSource::SharedRelationSumWord { limb_index } => {
+            if limb_index >= QM31_LIMBS {
+                return Err(VmPublicLogupInputError::ClaimedSumLimbOutOfRange { limb_index });
+            }
+            Ok((0, limb_index))
+        }
         VmPublicLogupInputSource::SegmentSelector => {
             *selector_count = selector_count
                 .checked_add(1)
@@ -297,6 +308,7 @@ fn expected_input_count(
         .checked_add(byte_inputs)
         .and_then(|count| count.checked_add(3 * CHALLENGE_WORDS as usize))
         .and_then(|count| count.checked_add(claimed_sum_inputs))
+        .and_then(|count| count.checked_add(QM31_LIMBS as usize))
         .and_then(|count| count.checked_add(1))
         .ok_or(VmPublicLogupInputError::RowCountOverflow)
 }
@@ -349,9 +361,11 @@ stwo_macros::define_air_fns! {
         use_count: "recursion_vm_public_logup_input_use_count",
         source_index_0: "recursion_vm_public_logup_input_source_index_0",
         source_index_1: "recursion_vm_public_logup_input_source_index_1",
+        shared_relation_sum_mask: "recursion_vm_public_logup_input_shared_relation_sum_mask",
     },
     embedded_params: [
         segment_active, claim_scope, verifier_id, challenge_scope, claimed_sum_kind,
+        shared_relation_sum_kind,
     ],
 
     relation claim_word(3);
@@ -364,8 +378,9 @@ stwo_macros::define_air_fns! {
         value,
         row_mask, claim_word_mask, claim_byte_mask, challenge_mask,
         claimed_sum_mask, selector_mask, circuit_id, node_id, use_count,
-        source_index_0, source_index_1,
+        source_index_0, source_index_1, shared_relation_sum_mask,
         segment_active, claim_scope, verifier_id, challenge_scope, claimed_sum_kind,
+        shared_relation_sum_kind,
     ) {
         let witness_mask = row_mask - selector_mask;
 
@@ -384,6 +399,9 @@ stwo_macros::define_air_fns! {
         );
         consume(segment_active * claimed_sum_mask) verifier_input_word(
             verifier_id, claimed_sum_kind, source_index_0, source_index_1, value,
+        );
+        consume(segment_active * shared_relation_sum_mask) verifier_input_word(
+            verifier_id, shared_relation_sum_kind, source_index_0, source_index_1, value,
         );
         emit(segment_active * row_mask * use_count) wire(
             circuit_id, node_id, value, 0, 0, 0,
@@ -411,6 +429,7 @@ pub fn eval_for_proof_kind(
         verifier_id: BaseField::from(SEGMENT_VERIFIER_ID),
         challenge_scope: BaseField::from(VM_PUBLIC_LOGUP_CHALLENGE_SCOPE),
         claimed_sum_kind: BaseField::from(VerifierInputKind::ClaimedSum.as_u32()),
+        shared_relation_sum_kind: BaseField::from(VerifierInputKind::SharedRelationSum.as_u32()),
         relations: VmPublicLogupInputComponentRelations::new(
             claim_relations,
             challenge_relations,
@@ -441,6 +460,7 @@ pub fn gen_interaction_trace(
         BaseField::from(SEGMENT_VERIFIER_ID),
         BaseField::from(VM_PUBLIC_LOGUP_CHALLENGE_SCOPE),
         BaseField::from(VerifierInputKind::ClaimedSum.as_u32()),
+        BaseField::from(VerifierInputKind::SharedRelationSum.as_u32()),
         &VmPublicLogupInputComponentRelations::new(
             claim_relations,
             challenge_relations,
@@ -649,6 +669,7 @@ mod tests {
                 claim_words: &claim,
                 relation_challenges: challenges,
                 claimed_sums: &claimed_sums,
+                shared_relation_sum: SecureField::zero(),
             },
         )
         .expect("fixture circuit has safe selected denominators");

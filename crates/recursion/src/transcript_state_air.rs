@@ -23,7 +23,8 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::relation;
 
 use super::control_air::{
-    LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
+    LEFT_RECURSION_VERIFIER_ID, POSEIDON2_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID,
+    SEGMENT_VERIFIER_ID,
 };
 use super::transcript::{HashPurpose, RecordingTranscriptBackend, TranscriptTrace};
 use super::transcript_binding_air::{
@@ -107,16 +108,20 @@ pub struct TranscriptStatePreprocessed {
     log_size: u32,
     rows: Vec<PreprocessedRow>,
     vm_layout: TranscriptLayout,
+    poseidon2_layout: TranscriptLayout,
     recursion_layout: TranscriptLayout,
 }
 
 impl TranscriptStatePreprocessed {
     pub fn new(calls: &TranscriptCallPreprocessed) -> Result<Self, TranscriptStateError> {
         let vm_layout = calls.vm_layout().clone();
+        let poseidon2_layout = calls.poseidon2_layout().clone();
         let recursion_layout = calls.recursion_layout().clone();
         let row_count = vm_layout
             .frames()
             .len()
+            .checked_add(poseidon2_layout.frames().len())
+            .ok_or(TranscriptStateError::RowCountOverflow)?
             .checked_add(
                 recursion_layout
                     .frames()
@@ -136,6 +141,7 @@ impl TranscriptStatePreprocessed {
 
         let mut rows = Vec::with_capacity(row_count);
         append_layout_rows(&mut rows, &vm_layout, SEGMENT_VERIFIER_ID, 1, 0)?;
+        append_layout_rows(&mut rows, &poseidon2_layout, POSEIDON2_VERIFIER_ID, 1, 0)?;
         append_layout_rows(
             &mut rows,
             &recursion_layout,
@@ -154,6 +160,7 @@ impl TranscriptStatePreprocessed {
             log_size,
             rows,
             vm_layout,
+            poseidon2_layout,
             recursion_layout,
         })
     }
@@ -485,23 +492,26 @@ pub fn push_frame_states(
     preprocessed: &TranscriptStatePreprocessed,
     witness: UniversalTranscriptWitness<'_>,
 ) -> Result<(), TranscriptStateError> {
-    let (segment, left, right) = match witness {
-        UniversalTranscriptWitness::Segment(execution) => (
-            Some(validated_trace(&preprocessed.vm_layout, execution)?),
+    let (segment, poseidon2, left, right) = match witness {
+        UniversalTranscriptWitness::Segment { vm, poseidon2 } => (
+            Some(validated_trace(&preprocessed.vm_layout, vm)?),
+            Some(validated_trace(&preprocessed.poseidon2_layout, poseidon2)?),
             None,
             None,
         ),
         UniversalTranscriptWitness::Binary { left, right } => (
             None,
+            None,
             Some(validated_trace(&preprocessed.recursion_layout, left)?),
             Some(validated_trace(&preprocessed.recursion_layout, right)?),
         ),
-        UniversalTranscriptWitness::Empty => (None, None, None),
+        UniversalTranscriptWitness::Empty => (None, None, None, None),
     };
 
     for row in &preprocessed.rows {
         let trace = match row.verifier_id {
             SEGMENT_VERIFIER_ID => segment,
+            POSEIDON2_VERIFIER_ID => poseidon2,
             LEFT_RECURSION_VERIFIER_ID => left,
             RIGHT_RECURSION_VERIFIER_ID => right,
             verifier_id => return Err(TranscriptStateError::UnknownVerifierId { verifier_id }),

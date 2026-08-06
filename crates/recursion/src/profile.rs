@@ -9,8 +9,8 @@
 use core::fmt;
 
 use air::digest::{
-    Digest8, HashSuiteDigest, M31Word, RecursionAirProgramDigest, RecursionPreprocessingDigest,
-    VmAirProgramDigest, VmPreprocessingDigest,
+    Digest8, HashSuiteDigest, M31Word, Poseidon2AirProgramDigest, RecursionAirProgramDigest,
+    RecursionPreprocessingDigest, VmAirProgramDigest, VmPreprocessingDigest,
 };
 use prover::components::{COMPONENT_COUNT, COMPONENT_NAMES};
 use prover::poseidon2_channel::poseidon2_hash_m31_words;
@@ -28,7 +28,7 @@ use crate::recursion_air_program::{
     universal_preprocessed_column_ids,
 };
 use crate::universal_relations::UNIVERSAL_RELATION_COUNT;
-use crate::vm_air_program::{VM_AIR_COMPONENT_COUNT, VmAirProgram};
+use crate::vm_air_program::{Poseidon2AirProgram, VM_AIR_COMPONENT_COUNT, VmAirProgram};
 use crate::vm_pcs_layout::VmPcsLayout;
 use crate::vm_public_claim::VmPublicClaimShape;
 use crate::vm_public_logup_circuit::build_vm_public_logup_reference;
@@ -86,11 +86,11 @@ pub const VM_DYNAMIC_COMPONENT_LOG_SIZE: u32 = 6;
 /// these tables require more rows than its instruction tables.
 pub const VM_COMMITMENT_COMPONENT_LOG_SIZE: u32 = 11;
 /// VM table count compiled from the checked-in component roster.
-pub const VM_TABLE_COUNT: usize = 1757;
+pub const VM_TABLE_COUNT: usize = 1304;
 /// VM OODS samples compiled from the checked-in component roster.
-pub const VM_SAMPLED_VALUE_COUNT: usize = 1865;
+pub const VM_SAMPLED_VALUE_COUNT: usize = 1408;
 /// VM AIR constraints compiled from the checked-in component roster.
-pub const VM_AIR_INSTRUCTION_COUNT: usize = 924;
+pub const VM_AIR_INSTRUCTION_COUNT: usize = 492;
 /// VM preprocessing columns in canonical commitment order.
 pub const VM_PREPROCESSED_COLUMN_COUNT: usize = 14;
 /// Flat authenticated VM values across every raw query.
@@ -98,14 +98,31 @@ pub const VM_QUERY_VALUE_COUNT: usize = VM_TABLE_COUNT * FRI_QUERY_COUNT;
 /// One trace path exists for every commitment tree and query.
 pub const VM_TRACE_PATH_COUNT: usize = COMMITMENT_TREE_COUNT * FRI_QUERY_COUNT;
 
+/// Frozen capacity of the detached Poseidon2 table.
+pub const POSEIDON2_COMPONENT_LOG_SIZE: u32 = 11;
+/// Detached Poseidon2 committed columns across all four trees.
+pub const POSEIDON2_TABLE_COUNT: usize = 461;
+/// Detached Poseidon2 OODS samples in STWO order.
+pub const POSEIDON2_SAMPLED_VALUE_COUNT: usize = 465;
+/// Detached Poseidon2 constraints compiled from the direct DSL component.
+pub const POSEIDON2_AIR_INSTRUCTION_COUNT: usize = 432;
+/// The detached composition degree produces three FRI layers.
+pub const POSEIDON2_FRI_LAYER_COUNT: usize = 3;
+/// The detached proof authenticates three nonempty commitment trees.
+pub const POSEIDON2_TRACE_PATH_COUNT: usize = 3 * FRI_QUERY_COUNT;
+/// Flat detached queried values across every raw query.
+pub const POSEIDON2_QUERY_VALUE_COUNT: usize = POSEIDON2_TABLE_COUNT * FRI_QUERY_COUNT;
+/// Largest detached trace or FRI authentication path.
+pub const POSEIDON2_MAX_MERKLE_DEPTH: usize = 12;
+
 /// Universal table count compiled from the checked-in component roster.
-pub const RECURSION_TABLE_COUNT: usize = 2196;
+pub const RECURSION_TABLE_COUNT: usize = 2221;
 /// Universal OODS samples compiled from the checked-in component roster.
-pub const RECURSION_SAMPLED_VALUE_COUNT: usize = 2340;
+pub const RECURSION_SAMPLED_VALUE_COUNT: usize = 2365;
 /// Universal AIR constraints compiled from the checked-in component roster.
-pub const RECURSION_AIR_INSTRUCTION_COUNT: usize = 1313;
+pub const RECURSION_AIR_INSTRUCTION_COUNT: usize = 1319;
 /// Universal preprocessing columns in canonical commitment order.
-pub const RECURSION_PREPROCESSED_COLUMN_COUNT: usize = 577;
+pub const RECURSION_PREPROCESSED_COLUMN_COUNT: usize = 587;
 /// Flat authenticated recursion values across every raw query.
 pub const RECURSION_QUERY_VALUE_COUNT: usize = RECURSION_TABLE_COUNT * FRI_QUERY_COUNT;
 /// One recursion trace path exists for every commitment tree and query.
@@ -113,7 +130,7 @@ pub const RECURSION_TRACE_PATH_COUNT: usize = COMMITMENT_TREE_COUNT * FRI_QUERY_
 
 /// Canonical protocol identifier limbs for cross-language conformance.
 pub const PROTOCOL_ID_WORDS: [u32; 8] = [
-    996130352, 439599105, 1840972074, 322360417, 2002034527, 739270897, 775019197, 1167228932,
+    1367177019, 1287613895, 1066887904, 1957561640, 1756805490, 987259214, 2076002296, 748188730,
 ];
 /// Digest of all ordered VM preprocessing identifiers and log sizes.
 pub const VM_PREPROCESSING_WORDS: [u32; 8] = [
@@ -121,7 +138,7 @@ pub const VM_PREPROCESSING_WORDS: [u32; 8] = [
 ];
 /// Digest of all ordered universal preprocessing identifiers and log sizes.
 pub const RECURSION_PREPROCESSING_WORDS: [u32; 8] = [
-    1631792279, 1428956174, 841758055, 1480077960, 892931837, 546857174, 222299338, 151671612,
+    688718528, 1094194459, 551156854, 1954590462, 871724839, 1809913092, 834828251, 1240016990,
 ];
 
 /// Manifest type whose array dimensions are the actual AIR layouts.
@@ -156,6 +173,20 @@ pub type VmProofWire = FixedStarkProofWire<
     MAX_FRI_FOLD_WIDTH,
     LAST_LAYER_COEFFICIENT_COUNT,
     VM_MAX_MERKLE_DEPTH,
+>;
+
+/// Fixed wire accepted for the detached Poseidon2 constituent.
+pub type Poseidon2ProofWire = FixedStarkProofWire<
+    COMMITMENT_TREE_COUNT,
+    1,
+    POSEIDON2_SAMPLED_VALUE_COUNT,
+    POSEIDON2_QUERY_VALUE_COUNT,
+    POSEIDON2_TRACE_PATH_COUNT,
+    POSEIDON2_FRI_LAYER_COUNT,
+    FRI_QUERY_COUNT,
+    MAX_FRI_FOLD_WIDTH,
+    LAST_LAYER_COEFFICIENT_COUNT,
+    POSEIDON2_MAX_MERKLE_DEPTH,
 >;
 
 /// Fixed STARK payload produced by the universal recursion AIR.
@@ -216,6 +247,9 @@ type FrozenVerifierPlans = BoundVerifierPlans<
 pub struct FrozenProtocolProfile {
     public_claim_shape: VmPublicClaimShape,
     vm_program: VmAirProgram,
+    poseidon2_program: Poseidon2AirProgram,
+    poseidon2_proof_shape:
+        FixedProofShape<POSEIDON2_TABLE_COUNT, COMMITMENT_TREE_COUNT, POSEIDON2_FRI_LAYER_COUNT>,
     recursion_program: RecursionAirProgram,
     vm_layout: VmPcsLayout,
     plans: FrozenVerifierPlans,
@@ -228,6 +262,21 @@ impl FrozenProtocolProfile {
 
     pub const fn vm_program(&self) -> &VmAirProgram {
         &self.vm_program
+    }
+
+    pub const fn poseidon2_program(&self) -> &Poseidon2AirProgram {
+        &self.poseidon2_program
+    }
+
+    pub const fn poseidon2_proof_shape(
+        &self,
+    ) -> &FixedProofShape<POSEIDON2_TABLE_COUNT, COMMITMENT_TREE_COUNT, POSEIDON2_FRI_LAYER_COUNT>
+    {
+        &self.poseidon2_proof_shape
+    }
+
+    pub const fn poseidon2_plan(&self) -> &VerifierControlPlan {
+        self.plans.poseidon2()
     }
 
     pub const fn recursion_program(&self) -> &RecursionAirProgram {
@@ -307,6 +356,9 @@ fn build_frozen_protocol_profile(
     let vm_program = VmAirProgram::new(vm_component_log_sizes())
         .map_err(|error| ProfileError::at("VM AIR program", error))?;
     validate_vm_program_constants(&vm_program)?;
+    let poseidon2_program = Poseidon2AirProgram::new(POSEIDON2_COMPONENT_LOG_SIZE)
+        .map_err(|error| ProfileError::at("Poseidon2 AIR program", error))?;
+    validate_poseidon2_program_constants(&poseidon2_program)?;
 
     let recursion_ids = recursion_preprocessed_column_ids();
     let recursion_program =
@@ -323,6 +375,12 @@ fn build_frozen_protocol_profile(
         VM_AIR_COMPONENT_COUNT,
         VM_SAMPLED_VALUE_COUNT,
     )?;
+    let poseidon2_proof_shape =
+        derive_proof_shape::<POSEIDON2_TABLE_COUNT, POSEIDON2_FRI_LAYER_COUNT>(
+            poseidon2_program.column_log_sizes(),
+            1,
+            POSEIDON2_SAMPLED_VALUE_COUNT,
+        )?;
     let recursion_proof_shape =
         derive_proof_shape::<RECURSION_TABLE_COUNT, RECURSION_FRI_LAYER_COUNT>(
             recursion_program.column_log_sizes(),
@@ -359,10 +417,26 @@ fn build_frozen_protocol_profile(
         count_u32("recursion relation closures", UNIVERSAL_RELATION_COUNT)?,
     )
     .map_err(|error| ProfileError::at("recursion verifier program", error))?;
+    let poseidon2_spec = VerifierProgramSpec::new(
+        VerifierSchema::Poseidon2,
+        count_u32(
+            "Poseidon2 relation challenges",
+            Relations::DESCRIPTORS.len(),
+        )?,
+        0,
+        count_u32(
+            "Poseidon2 AIR instructions",
+            poseidon2_program.air_instruction_count(),
+        )?,
+        count_u32("Poseidon2 relation closures", Relations::DESCRIPTORS.len())?,
+    )
+    .map_err(|error| ProfileError::at("Poseidon2 verifier program", error))?;
     let vm_plan = VerifierControlPlan::new(vm_spec, pcs, &vm_proof_shape)
         .map_err(|error| ProfileError::at("VM verifier plan", error))?;
     let recursion_plan = VerifierControlPlan::new(recursion_spec, pcs, &recursion_proof_shape)
         .map_err(|error| ProfileError::at("recursion verifier plan", error))?;
+    let poseidon2_plan = VerifierControlPlan::new(poseidon2_spec, pcs, &poseidon2_proof_shape)
+        .map_err(|error| ProfileError::at("Poseidon2 verifier plan", error))?;
 
     let vm_preprocessed_ids = vm_preprocessed_column_ids();
     let vm_preprocessed_log_sizes = PreProcessedTrace::column_log_sizes();
@@ -384,6 +458,7 @@ fn build_frozen_protocol_profile(
             RECURSION_PREPROCESSING_HASH_DOMAIN,
         )?),
         vm_air_program: VmAirProgramDigest::from(vm_plan.digest()),
+        poseidon2_air_program: Poseidon2AirProgramDigest::from(poseidon2_plan.digest()),
         recursion_air_program: RecursionAirProgramDigest::from(recursion_plan.digest()),
         vm_pcs: pcs,
         recursion_pcs: pcs,
@@ -393,11 +468,13 @@ fn build_frozen_protocol_profile(
     let manifest = manifest
         .validate()
         .map_err(|error| ProfileError::at("protocol manifest", error))?;
-    let plans = FrozenVerifierPlans::new(manifest, vm_plan, recursion_plan)
+    let plans = FrozenVerifierPlans::new(manifest, vm_plan, poseidon2_plan, recursion_plan)
         .map_err(|error| ProfileError::at("verifier plan binding", error))?;
     Ok(FrozenProtocolProfile {
         public_claim_shape,
         vm_program,
+        poseidon2_program,
+        poseidon2_proof_shape,
         recursion_program,
         vm_layout,
         plans,
@@ -420,7 +497,7 @@ pub fn vm_component_log_sizes() -> [u32; COMPONENT_COUNT] {
 /// Returns the fixed universal component capacities in canonical roster order.
 pub fn recursion_component_log_sizes() -> UniversalComponentLogSizes {
     [
-        14, 13, 13, 9, 16, 15, 4, 4, 7, 7, 11, 11, 14, 11, 11, 17, 15, 12, 18, 12, 10, 14, 5, 18,
+        15, 13, 13, 10, 16, 15, 4, 4, 7, 8, 11, 11, 14, 11, 11, 17, 15, 12, 18, 12, 10, 14, 6, 18,
         21, 16, 14, 13, 13, 18, 22, 16, 22, 16, 19, 16,
     ]
 }
@@ -472,10 +549,10 @@ fn derive_proof_shape<const N_TABLES: usize, const N_FRI_LAYERS: usize>(
     let tree_heights = column_log_sizes
         .iter()
         .map(|tree| {
-            tree.iter()
-                .copied()
-                .max()
-                .ok_or_else(|| ProfileError::at("commitment tree height", "empty tree"))?
+            let Some(max_log_size) = tree.iter().copied().max() else {
+                return Ok(M31Word::ZERO);
+            };
+            max_log_size
                 .checked_add(u32::from(FRI_LOG_BLOWUP_FACTOR))
                 .ok_or_else(|| ProfileError::at("commitment tree height", "overflow"))
                 .and_then(profile_word)
@@ -499,7 +576,14 @@ fn derive_proof_shape<const N_TABLES: usize, const N_FRI_LAYERS: usize>(
         claimed_sum_count: count_word("claimed sums", claimed_sum_count)?,
         sampled_value_count: count_word("sampled values", sampled_value_count)?,
         queried_value_count: count_word("queried values", queried_value_count)?,
-        trace_path_count: count_word("trace paths", COMMITMENT_TREE_COUNT * FRI_QUERY_COUNT)?,
+        trace_path_count: count_word(
+            "trace paths",
+            tree_heights
+                .iter()
+                .filter(|height| **height != M31Word::ZERO)
+                .count()
+                * FRI_QUERY_COUNT,
+        )?,
         raw_query_count: count_word("raw queries", FRI_QUERY_COUNT)?,
         last_layer_coefficient_count: count_word(
             "last-layer coefficients",
@@ -566,6 +650,28 @@ fn validate_vm_program_constants(program: &VmAirProgram) -> Result<(), ProfileEr
     } else {
         Err(ProfileError::mismatch(
             "VM generated dimensions",
+            format_args!("{expected:?}"),
+            format_args!("{actual:?}"),
+        ))
+    }
+}
+
+fn validate_poseidon2_program_constants(program: &Poseidon2AirProgram) -> Result<(), ProfileError> {
+    let actual = [
+        program.column_log_sizes().iter().flatten().count(),
+        program.sample_coordinates().len(),
+        program.air_instruction_count(),
+    ];
+    let expected = [
+        POSEIDON2_TABLE_COUNT,
+        POSEIDON2_SAMPLED_VALUE_COUNT,
+        POSEIDON2_AIR_INSTRUCTION_COUNT,
+    ];
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(ProfileError::mismatch(
+            "Poseidon2 generated dimensions",
             format_args!("{expected:?}"),
             format_args!("{actual:?}"),
         ))
@@ -756,7 +862,7 @@ mod tests {
         ];
         assert_eq!(
             actual,
-            [1757, 4, 1865, 20, 924, 14, 2196, 4, 2340, 22, 1313, 577, 36]
+            [1304, 4, 1408, 20, 492, 14, 2221, 4, 2365, 22, 1319, 587, 36]
         );
     }
 
@@ -791,12 +897,12 @@ mod tests {
             digest(VM_PREPROCESSING_WORDS),
             digest(RECURSION_PREPROCESSING_WORDS),
             digest([
-                1940684376, 1216409119, 2128749894, 302174351, 1395663902, 39884388, 39687935,
-                2112168674,
+                1983445676, 968955614, 116714448, 2134308119, 592931182, 1668912947, 1306710633,
+                662508267,
             ]),
             digest([
-                1257248829, 1216201935, 354922115, 2062314934, 1132069174, 1088399207, 325143630,
-                1511814991,
+                2069739185, 1656291528, 337902103, 12002415, 1437175451, 992675095, 1850827234,
+                375452118,
             ]),
         ];
         assert_eq!(actual, expected);
@@ -804,7 +910,7 @@ mod tests {
 
     #[test]
     fn serialized_root_size_is_derived_from_the_recursion_shape() {
-        assert_eq!(ROOT_PROOF_BYTE_SIZE, 3_459_396);
+        assert_eq!(ROOT_PROOF_BYTE_SIZE, 3_479_096);
     }
 
     #[test]

@@ -34,9 +34,9 @@ pub mod verifier;
 pub use errors::VerificationError;
 pub use preprocessed::{Preprocessing, preprocess, preprocess_with_channel};
 pub use prover::{
-    NativeVmClaimTranscript, VmClaimTranscript, VmTranscriptProofResult, VmTranscriptProvingError,
-    prove_rv32im, prove_rv32im_with_channel, prove_rv32im_with_channel_at_log_sizes,
-    prove_rv32im_with_channel_at_log_sizes_and_transcript,
+    NativeVmClaimTranscript, SegmentProofChannels, VmClaimTranscript, VmTranscriptProofResult,
+    VmTranscriptProvingError, prove_rv32im, prove_rv32im_with_channel,
+    prove_rv32im_with_channel_at_log_sizes, prove_rv32im_with_channel_at_log_sizes_and_transcript,
 };
 pub use public_data::PublicData;
 pub use verifier::{verify_rv32im, verify_rv32im_with_channel};
@@ -61,12 +61,15 @@ use crate::components::ClaimedSum;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InteractionClaim {
     pub claimed_sum: ClaimedSum,
+    /// Aggregate VM deficit discharged by the standalone Poseidon2 proof.
+    pub shared_relation_sum: stwo::core::fields::qm31::SecureField,
     pub log_sizes: Vec<u32>,
 }
 
 impl InteractionClaim {
     pub fn mix_into(&self, channel: &mut impl Channel) {
         self.claimed_sum.mix_into(channel);
+        channel.mix_felts(&[self.shared_relation_sum]);
         channel.mix_u64(self.log_sizes.len() as u64);
         for log_size in &self.log_sizes {
             channel.mix_u64(*log_size as u64);
@@ -74,7 +77,7 @@ impl InteractionClaim {
     }
 }
 
-/// RV32IM proof bundle.
+/// RV32IM constituent proof whose shared deficit requires a hash proof.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Proof<H: MerkleHasherLifted> {
     pub claim: components::Claim,
@@ -87,5 +90,12 @@ pub struct Proof<H: MerkleHasherLifted> {
     /// proof. Ordinary proving and every serialized VM proof omit it.
     #[serde(skip, default)]
     pub stark_aux: Option<CommitmentSchemeProofAux<H>>,
-    pub interaction_pow: u64,
+}
+
+/// Complete proof artifact for one VM segment and its Poseidon2 work.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SegmentProof<H: MerkleHasherLifted> {
+    pub vm: Proof<H>,
+    pub poseidon2: poseidon2_precompile::Poseidon2PrecompileProof<H>,
+    pub joint_interaction: precompile::JointInteractionProof,
 }

@@ -29,8 +29,8 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 
 use crate::circuit::CircuitTraces;
 use crate::control_air::{
-    ControlPreprocessed, LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID,
-    SEGMENT_VERIFIER_ID,
+    ControlPreprocessed, LEFT_RECURSION_VERIFIER_ID, POSEIDON2_VERIFIER_ID,
+    RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
 };
 use crate::fri_merkle_air::{
     FriMerkleOpeningSet, FriMerklePreprocessed, UniversalFriMerkleWitness,
@@ -52,7 +52,7 @@ use crate::pcs_deep_circuit::{
 use crate::pcs_deep_input_air::{PcsDeepCircuitLane, PcsDeepInputPreprocessed};
 use crate::pow::PowKind;
 use crate::profile::{
-    FrozenProtocolProfile, RECURSION_MAX_MERKLE_DEPTH, RootProofWire,
+    FrozenProtocolProfile, POSEIDON2_COMPONENT_LOG_SIZE, RECURSION_MAX_MERKLE_DEPTH, RootProofWire,
     recursion_component_log_sizes, recursion_preprocessed_column_ids,
 };
 use crate::protocol::CanonicalWords;
@@ -85,20 +85,22 @@ use crate::transcript::{RecordingTranscriptBackend, TranscriptTrace};
 use crate::transcript_binding_air::{TranscriptCallPreprocessed, UniversalTranscriptWitness};
 use crate::transcript_payload_air::TranscriptPayloadPreprocessed;
 use crate::transcript_program::{
-    VerifierPublicClaim, VerifierTranscriptExecution, execute_fixed_transcript,
+    JointInteractionContext, VerifierPublicClaim, VerifierTranscriptExecution,
+    derive_interaction_seed, execute_fixed_transcript, execute_fixed_transcript_with_joint,
 };
 use crate::transcript_state_air::TranscriptStatePreprocessed;
 use crate::transcript_word_air::TranscriptWordPreprocessed;
 use crate::universal_relations::{UNIVERSAL_RELATION_COUNT, UniversalRelations};
 use crate::verifier_randomness_air::VerifierRandomnessPreprocessed;
 use crate::vm_air_composition_circuit::{
-    VmAirCompositionCircuit, VmAirCompositionWitness, build_vm_air_composition_circuit,
+    VmAirCompositionCircuit, VmAirCompositionWitness, build_poseidon2_air_composition_circuit,
+    build_poseidon2_air_composition_reference, build_vm_air_composition_circuit,
     build_vm_air_composition_reference,
 };
 use crate::vm_air_composition_control_air::VmAirCompositionControlPreprocessed;
 use crate::vm_air_composition_input_air::{
     CircuitAnchorLane, CircuitAnchorMode, RecursionCompositionInputLane,
-    VmAirCompositionInputPreprocessed,
+    SegmentCompositionInputLane, VmAirCompositionInputPreprocessed,
 };
 use crate::vm_public_claim::{
     public_input_digest_from_claim, public_output_digest_from_claim,
@@ -216,29 +218,96 @@ pub(crate) fn prepare_segment_leaf(
     let claim_digest =
         vm_public_claim_digest_from_words(leaf.public_claim_words(), profile.public_claim_shape())
             .map_err(|error| stage("VM public-claim digest", error))?;
-    let transcript = execute_fixed_transcript(
+    let vm_public_claim = VerifierPublicClaim::Vm(claim_digest);
+    let poseidon2_public_claim = VerifierPublicClaim::Poseidon2([M31Word::from(
+        u16::try_from(POSEIDON2_COMPONENT_LOG_SIZE)
+            .expect("the fixed Poseidon2 log size fits one canonical word"),
+    )]);
+    let seeds = [
+        derive_interaction_seed(
+            RecordingTranscriptBackend::default(),
+            profile.vm_plan(),
+            profile.manifest().protocol_id(),
+            leaf.statement(),
+            vm_public_claim,
+            leaf.proof(),
+        )
+        .map_err(|error| stage("VM interaction seed", error))?,
+        derive_interaction_seed(
+            RecordingTranscriptBackend::default(),
+            profile.poseidon2_plan(),
+            profile.manifest().protocol_id(),
+            leaf.statement(),
+            poseidon2_public_claim,
+            leaf.poseidon2_proof(),
+        )
+        .map_err(|error| stage("Poseidon2 interaction seed", error))?,
+    ];
+    let joint = JointInteractionContext {
+        seeds,
+        shared_relation_sum: Some(SecureField::from(leaf.shared_relation_sum())),
+    };
+    let vm_transcript = execute_fixed_transcript_with_joint(
         RecordingTranscriptBackend::default(),
         profile.vm_plan(),
         profile.manifest().protocol_id(),
         leaf.statement(),
-        VerifierPublicClaim::Vm(claim_digest),
+        vm_public_claim,
         leaf.proof(),
+        joint,
     )
     .map_err(|error| stage("VM verifier transcript", error))?;
-    let relation_challenges = relation_challenge_words(&transcript, Relations::DESCRIPTORS.len())?;
+    let poseidon2_transcript = execute_fixed_transcript_with_joint(
+        RecordingTranscriptBackend::default(),
+        profile.poseidon2_plan(),
+        profile.manifest().protocol_id(),
+        leaf.statement(),
+        poseidon2_public_claim,
+        leaf.poseidon2_proof(),
+        joint,
+    )
+    .map_err(|error| stage("Poseidon2 verifier transcript", error))?;
+    let relation_challenges =
+        relation_challenge_words(&vm_transcript, Relations::DESCRIPTORS.len())?;
     let composition_randomness = secure_draw_words(
-        &transcript,
+        &vm_transcript,
         VerifierStep::DrawCompositionRandomness,
         "composition randomness",
     )?;
-    let oods_seed = secure_draw_words(&transcript, VerifierStep::DrawOodsPoint, "OODS point")?;
+    let oods_seed = secure_draw_words(&vm_transcript, VerifierStep::DrawOodsPoint, "OODS point")?;
     let deep_randomness = secure_draw_words(
-        &transcript,
+        &vm_transcript,
         VerifierStep::DrawDeepRandomness,
         "DEEP randomness",
     )?;
-    let fri_alphas = fri_alpha_values(&transcript, preprocessing.fri_profiles[0].layer_count())?;
-    let raw_queries = raw_query_words(&transcript, preprocessing.query_position.vm_query_count())?;
+    let fri_alphas = fri_alpha_values(&vm_transcript, preprocessing.fri_profiles[0].layer_count())?;
+    let raw_queries = raw_query_words(
+        &vm_transcript,
+        preprocessing.query_position.vm_query_count(),
+    )?;
+    let poseidon2_raw_queries = raw_query_words(
+        &poseidon2_transcript,
+        preprocessing.query_position.poseidon2_query_count(),
+    )?;
+    let poseidon2_composition_randomness = secure_draw_words(
+        &poseidon2_transcript,
+        VerifierStep::DrawCompositionRandomness,
+        "Poseidon2 composition randomness",
+    )?;
+    let poseidon2_oods_seed = secure_draw_words(
+        &poseidon2_transcript,
+        VerifierStep::DrawOodsPoint,
+        "Poseidon2 OODS point",
+    )?;
+    let poseidon2_deep_randomness = secure_draw_words(
+        &poseidon2_transcript,
+        VerifierStep::DrawDeepRandomness,
+        "Poseidon2 DEEP randomness",
+    )?;
+    let poseidon2_fri_alphas = fri_alpha_values(
+        &poseidon2_transcript,
+        preprocessing.fri_profiles[1].layer_count(),
+    )?;
 
     let statement_words: StatementWords =
         leaf.statement()
@@ -312,6 +381,7 @@ pub(crate) fn prepare_segment_leaf(
                 relation_challenges[3],
             ),
             claimed_sums: &proof_claimed_sums,
+            shared_relation_sum: SecureField::from(leaf.shared_relation_sum()),
         },
     )
     .map_err(|error| stage("VM public-LogUp circuit", error))?;
@@ -352,7 +422,11 @@ pub(crate) fn prepare_segment_leaf(
         .collect::<Vec<_>>();
     let mut fri_opening =
         FriMerkleOpeningSet::from_wire(&raw_queries, &leaf.proof().fri_layers[..]);
-    let fri_routes = fri_routes(
+    let mut poseidon2_fri_opening = FriMerkleOpeningSet::from_wire(
+        &poseidon2_raw_queries,
+        &leaf.poseidon2_proof().fri_layers[..],
+    );
+    let vm_fri_routes = fri_routes(
         &preprocessing.query_position,
         SEGMENT_VERIFIER_ID,
         &raw_queries,
@@ -410,7 +484,7 @@ pub(crate) fn prepare_segment_leaf(
     )
     .map_err(|error| stage("VM PCS DEEP circuit", error))?;
     ensure_zero_outputs("VM PCS DEEP circuit", pcs_circuit.nonzero_output_count())?;
-    let last_layer_positions = last_layer_positions(
+    let vm_last_layer_positions = last_layer_positions(
         &preprocessing.query_position,
         SEGMENT_VERIFIER_ID,
         &raw_queries,
@@ -430,9 +504,9 @@ pub(crate) fn prepare_segment_leaf(
             authenticated_values: &authenticated_values,
             fri_alphas: &fri_alphas,
             raw_queries: &raw_queries,
-            fri_positions: &fri_routes.positions,
-            fri_offsets: &fri_routes.offsets,
-            last_layer_positions: &last_layer_positions,
+            fri_positions: &vm_fri_routes.positions,
+            fri_offsets: &vm_fri_routes.offsets,
+            last_layer_positions: &vm_last_layer_positions,
             last_layer_coefficients: &last_layer_coefficients,
         },
     )
@@ -442,21 +516,162 @@ pub(crate) fn prepare_segment_leaf(
         fri_circuit.nonzero_output_count(),
     )?;
 
+    let poseidon2_sampled_values = leaf
+        .poseidon2_proof()
+        .sampled_values
+        .iter()
+        .copied()
+        .map(SecureField::from)
+        .collect::<Vec<_>>();
+    let poseidon2_claimed_sums = leaf
+        .poseidon2_proof()
+        .claimed_sums
+        .iter()
+        .copied()
+        .map(SecureField::from)
+        .collect::<Vec<_>>();
+    let poseidon2_composition_circuit = build_poseidon2_air_composition_circuit(
+        POSEIDON2_COMPONENT_LOG_SIZE,
+        VmAirCompositionWitness {
+            segment_selector: true,
+            sampled_values: &poseidon2_sampled_values,
+            claimed_sums: &poseidon2_claimed_sums,
+            relation_challenges: &relation_challenges,
+            composition_randomness: poseidon2_composition_randomness,
+            oods_point: poseidon2_oods_seed,
+        },
+    )
+    .map_err(|error| stage("Poseidon2 AIR-composition circuit", error))?;
+    ensure_zero_outputs(
+        "Poseidon2 AIR-composition circuit",
+        poseidon2_composition_circuit.nonzero_output_count(),
+    )?;
+    let poseidon2_queried_values = leaf
+        .poseidon2_proof()
+        .queried_values
+        .iter()
+        .copied()
+        .map(|word| BaseField::from(word.as_u32()))
+        .collect::<Vec<_>>();
+    let poseidon2_fri_routes = fri_routes(
+        &preprocessing.query_position,
+        POSEIDON2_VERIFIER_ID,
+        &poseidon2_raw_queries,
+        preprocessing.fri_profiles[1].layer_count(),
+    )?;
+    let poseidon2_deep_answers = native_deep_answers(
+        &preprocessing.pcs_profiles[1],
+        &poseidon2_sampled_values,
+        &poseidon2_queried_values,
+        poseidon2_oods_seed,
+        poseidon2_deep_randomness,
+        &poseidon2_raw_queries,
+    )?;
+    let mut poseidon2_authenticated_values = poseidon2_fri_opening
+        .layers
+        .iter()
+        .map(|layer| {
+            layer
+                .queries
+                .iter()
+                .flat_map(|query| query.values.iter().copied())
+                .map(SecureField::from)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    restore_authenticated_query_values(
+        &preprocessing.fri_profiles[1],
+        &poseidon2_deep_answers,
+        &mut poseidon2_authenticated_values,
+        &poseidon2_fri_alphas,
+        &poseidon2_raw_queries,
+    )
+    .map_err(|error| stage("Poseidon2 FRI query reconstruction", error))?;
+    for (layer, values) in poseidon2_fri_opening
+        .layers
+        .iter_mut()
+        .zip(&poseidon2_authenticated_values)
+    {
+        for (slot, value) in layer
+            .queries
+            .iter_mut()
+            .flat_map(|query| query.values.iter_mut())
+            .zip(values)
+        {
+            *slot = (*value).into();
+        }
+    }
+    let poseidon2_pcs_circuit = build_pcs_deep_circuit(
+        &preprocessing.pcs_profiles[1],
+        PcsDeepWitness {
+            active: true,
+            sampled_values: &poseidon2_sampled_values,
+            queried_values: &poseidon2_queried_values,
+            oods_seed: poseidon2_oods_seed,
+            deep_randomness: poseidon2_deep_randomness,
+            raw_queries: &poseidon2_raw_queries,
+            answers: &poseidon2_deep_answers,
+        },
+    )
+    .map_err(|error| stage("Poseidon2 PCS DEEP circuit", error))?;
+    ensure_zero_outputs(
+        "Poseidon2 PCS DEEP circuit",
+        poseidon2_pcs_circuit.nonzero_output_count(),
+    )?;
+    let poseidon2_last_layer_positions = last_layer_positions(
+        &preprocessing.query_position,
+        POSEIDON2_VERIFIER_ID,
+        &poseidon2_raw_queries,
+    )?;
+    let poseidon2_last_layer_coefficients = leaf
+        .poseidon2_proof()
+        .last_layer_coefficients
+        .iter()
+        .copied()
+        .map(SecureField::from)
+        .collect::<Vec<_>>();
+    let poseidon2_fri_circuit = build_fri_verifier_circuit(
+        &preprocessing.fri_profiles[1],
+        FriVerifierWitness {
+            active: true,
+            deep_answers: &poseidon2_deep_answers,
+            authenticated_values: &poseidon2_authenticated_values,
+            fri_alphas: &poseidon2_fri_alphas,
+            raw_queries: &poseidon2_raw_queries,
+            fri_positions: &poseidon2_fri_routes.positions,
+            fri_offsets: &poseidon2_fri_routes.offsets,
+            last_layer_positions: &poseidon2_last_layer_positions,
+            last_layer_coefficients: &poseidon2_last_layer_coefficients,
+        },
+    )
+    .map_err(|error| stage("Poseidon2 FRI verifier circuit", error))?;
+    ensure_zero_outputs(
+        "Poseidon2 FRI verifier circuit",
+        poseidon2_fri_circuit.nonzero_output_count(),
+    )?;
+
     assemble_universal_components(
         profile,
         preprocessing,
         component_log_sizes,
         UniversalAssemblyBranch::Segment {
             leaf,
-            transcript: Box::new(transcript),
+            vm_transcript: Box::new(vm_transcript),
+            poseidon2_transcript: Box::new(poseidon2_transcript),
+            interaction_seeds: seeds,
             raw_queries,
+            poseidon2_raw_queries,
             fri_opening,
+            poseidon2_fri_opening: Box::new(poseidon2_fri_opening),
             statement_circuit: Box::new(statement_circuit),
             vm_claim_circuit: Box::new(vm_claim_circuit),
             vm_public_logup_circuit: Box::new(vm_public_logup_circuit),
             vm_composition_circuit: Box::new(vm_composition_circuit),
+            poseidon2_composition_circuit: Box::new(poseidon2_composition_circuit),
             pcs_circuit: Box::new(pcs_circuit),
+            poseidon2_pcs_circuit: Box::new(poseidon2_pcs_circuit),
             fri_circuit: Box::new(fri_circuit),
+            poseidon2_fri_circuit: Box::new(poseidon2_fri_circuit),
         },
     )
 }
@@ -528,6 +743,7 @@ pub(crate) fn prepare_binary_node(
                 [M31Word::ZERO; 8],
             ),
             claimed_sums: &zero_claimed_sums,
+            shared_relation_sum: SecureField::zero(),
         },
     )
     .map_err(|error| stage("inactive VM public-LogUp circuit", error))?;
@@ -630,7 +846,7 @@ fn prepare_recursion_child(
         VerifierStep::DrawDeepRandomness,
         "recursion DEEP randomness",
     )?;
-    let fri_alphas = fri_alpha_values(&transcript, preprocessing.fri_profiles[1].layer_count())?;
+    let fri_alphas = fri_alpha_values(&transcript, preprocessing.fri_profiles[2].layer_count())?;
     let raw_queries = raw_query_words(
         &transcript,
         preprocessing.query_position.recursion_query_count(),
@@ -683,10 +899,10 @@ fn prepare_recursion_child(
         &preprocessing.query_position,
         verifier_id,
         &raw_queries,
-        preprocessing.fri_profiles[1].layer_count(),
+        preprocessing.fri_profiles[2].layer_count(),
     )?;
     let deep_answers = native_deep_answers(
-        &preprocessing.pcs_profiles[1],
+        &preprocessing.pcs_profiles[2],
         &sampled_values,
         &queried_values,
         oods_seed,
@@ -706,7 +922,7 @@ fn prepare_recursion_child(
         })
         .collect::<Vec<_>>();
     restore_authenticated_query_values(
-        &preprocessing.fri_profiles[1],
+        &preprocessing.fri_profiles[2],
         &deep_answers,
         &mut authenticated_values,
         &fri_alphas,
@@ -724,7 +940,7 @@ fn prepare_recursion_child(
         }
     }
     let pcs_circuit = build_pcs_deep_circuit(
-        &preprocessing.pcs_profiles[1],
+        &preprocessing.pcs_profiles[2],
         PcsDeepWitness {
             active: true,
             sampled_values: &sampled_values,
@@ -750,7 +966,7 @@ fn prepare_recursion_child(
         .map(SecureField::from)
         .collect::<Vec<_>>();
     let fri_circuit = build_fri_verifier_circuit(
-        &preprocessing.fri_profiles[1],
+        &preprocessing.fri_profiles[2],
         FriVerifierWitness {
             active: true,
             deep_answers: &deep_answers,
@@ -903,6 +1119,7 @@ pub(crate) fn prepare_empty_leaf(
                 [M31Word::ZERO; 8],
             ),
             claimed_sums: &zero_claimed_sums,
+            shared_relation_sum: SecureField::zero(),
         },
     )
     .map_err(|error| stage("inactive VM public-LogUp circuit", error))?;
@@ -922,15 +1139,22 @@ pub(crate) fn prepare_empty_leaf(
 enum UniversalAssemblyBranch<'a> {
     Segment {
         leaf: &'a VmSegmentLeafWire,
-        transcript: Box<VerifierTranscriptExecution<RecordingTranscriptBackend>>,
+        vm_transcript: Box<VerifierTranscriptExecution<RecordingTranscriptBackend>>,
+        poseidon2_transcript: Box<VerifierTranscriptExecution<RecordingTranscriptBackend>>,
+        interaction_seeds: [SecureField; 2],
         raw_queries: Vec<M31Word>,
+        poseidon2_raw_queries: Vec<M31Word>,
         fri_opening: FriMerkleOpeningSet,
+        poseidon2_fri_opening: Box<FriMerkleOpeningSet>,
         statement_circuit: Box<StatementSemanticsCircuit>,
         vm_claim_circuit: Box<VmPublicClaimSemanticsCircuit>,
         vm_public_logup_circuit: Box<VmPublicLogupCircuit>,
         vm_composition_circuit: Box<VmAirCompositionCircuit>,
+        poseidon2_composition_circuit: Box<VmAirCompositionCircuit>,
         pcs_circuit: Box<PcsDeepCircuit>,
+        poseidon2_pcs_circuit: Box<PcsDeepCircuit>,
         fri_circuit: Box<FriVerifierCircuit>,
+        poseidon2_fri_circuit: Box<FriVerifierCircuit>,
     },
     Binary {
         statement: Box<SpanStatement>,
@@ -1275,10 +1499,10 @@ fn lower_all_fixed_circuits(
     statement: &StatementSemanticsCircuit,
     vm_claim: &VmPublicClaimSemanticsCircuit,
     vm_public_logup: &VmPublicLogupCircuit,
-    vm_composition: &VmAirCompositionCircuit,
+    segment_composition: [SegmentCompositionInputLane<'_>; 2],
     recursion_composition: [RecursionCompositionInputLane<'_>; 2],
-    pcs: [PcsDeepCircuitLane<'_>; 3],
-    fri: [FriVerifierCircuitLane<'_>; 3],
+    pcs: [PcsDeepCircuitLane<'_>; 4],
+    fri: [FriVerifierCircuitLane<'_>; 4],
     stage_name: &'static str,
 ) -> Result<(), UniversalWitnessError> {
     crate::statement_semantics_lowering::lower_statement_semantics_circuit(
@@ -1303,13 +1527,15 @@ fn lower_all_fixed_circuits(
             vm_public_logup,
         )
         .map_err(|error| stage(stage_name, error))?;
-        crate::vm_air_composition_lowering::lower_vm_air_composition_circuit(
-            traces,
-            VM_COMPOSITION_CIRCUIT_ID,
-            vm_composition,
-            vm_composition,
-        )
-        .map_err(|error| stage(stage_name, error))?;
+        for lane in segment_composition {
+            crate::vm_air_composition_lowering::lower_vm_air_composition_circuit(
+                traces,
+                lane.circuit_id,
+                lane.circuit,
+                lane.circuit,
+            )
+            .map_err(|error| stage(stage_name, error))?;
+        }
     }
     if proof_kind == ProofKind::BinaryNode {
         for lane in recursion_composition {
@@ -1323,8 +1549,8 @@ fn lower_all_fixed_circuits(
         }
     }
     let active_pcs = match proof_kind {
-        ProofKind::SegmentLeaf => &pcs[..1],
-        ProofKind::BinaryNode => &pcs[1..],
+        ProofKind::SegmentLeaf => &pcs[..2],
+        ProofKind::BinaryNode => &pcs[2..],
         ProofKind::EmptyLeaf => &pcs[..0],
     };
     for lane in active_pcs {
@@ -1337,8 +1563,8 @@ fn lower_all_fixed_circuits(
         .map_err(|error| stage(stage_name, error))?;
     }
     let active_fri = match proof_kind {
-        ProofKind::SegmentLeaf => &fri[..1],
-        ProofKind::BinaryNode => &fri[1..],
+        ProofKind::SegmentLeaf => &fri[..2],
+        ProofKind::BinaryNode => &fri[2..],
         ProofKind::EmptyLeaf => &fri[..0],
     };
     for lane in active_fri {
@@ -1616,9 +1842,12 @@ fn generate_universal_interactions(
         );
     (interaction_components[17], claimed_sums[17]) =
         crate::vm_public_logup_control_air::gen_interaction_trace(
+            &original_components[17],
             &preprocessed_components[17],
             proof_kind,
             &relations.control,
+            &relations.verifier_input,
+            &relations.verifier_randomness,
         );
     (interaction_components[18], claimed_sums[18]) =
         crate::vm_air_composition_input_air::gen_interaction_trace(
@@ -1847,9 +2076,14 @@ fn assemble_universal_components(
     let statement = branch.statement();
     let statement_circuit = branch.statement_circuit();
     let transcript_witness = match &branch {
-        UniversalAssemblyBranch::Segment { transcript, .. } => {
-            UniversalTranscriptWitness::Segment(transcript)
-        }
+        UniversalAssemblyBranch::Segment {
+            vm_transcript,
+            poseidon2_transcript,
+            ..
+        } => UniversalTranscriptWitness::Segment {
+            vm: vm_transcript,
+            poseidon2: poseidon2_transcript,
+        },
         UniversalAssemblyBranch::Binary {
             left_child,
             right_child,
@@ -1861,11 +2095,22 @@ fn assemble_universal_components(
         UniversalAssemblyBranch::Empty { .. } => UniversalTranscriptWitness::Empty,
     };
     let transcript_lanes = match &branch {
-        UniversalAssemblyBranch::Segment { transcript, .. } => vec![(
-            SEGMENT_VERIFIER_ID,
-            profile.vm_plan(),
-            transcript.backend().trace(),
-        )],
+        UniversalAssemblyBranch::Segment {
+            vm_transcript,
+            poseidon2_transcript,
+            ..
+        } => vec![
+            (
+                SEGMENT_VERIFIER_ID,
+                profile.vm_plan(),
+                vm_transcript.backend().trace(),
+            ),
+            (
+                POSEIDON2_VERIFIER_ID,
+                profile.poseidon2_plan(),
+                poseidon2_transcript.backend().trace(),
+            ),
+        ],
         UniversalAssemblyBranch::Binary {
             left_child,
             right_child,
@@ -2049,6 +2294,30 @@ fn assemble_universal_components(
         proof_kind,
     )
     .map_err(|error| stage("VM public-LogUp inputs", error))?;
+    let mut public_logup_control_table =
+        crate::vm_public_logup_control_air::VmPublicLogupControlTable::new();
+    let segment_joint_binding = match &branch {
+        UniversalAssemblyBranch::Segment {
+            leaf,
+            interaction_seeds,
+            ..
+        } => Some(
+            crate::vm_public_logup_control_air::SegmentJointBindingWitness {
+                interaction_seeds: *interaction_seeds,
+                interaction_pow: leaf.proof().interaction_pow,
+                shared_relation_sum: SecureField::from(leaf.shared_relation_sum()),
+                poseidon2_claimed_sum: SecureField::from(leaf.poseidon2_proof().claimed_sums[0]),
+            },
+        ),
+        UniversalAssemblyBranch::Binary { .. } | UniversalAssemblyBranch::Empty { .. } => None,
+    };
+    crate::vm_public_logup_control_air::push_vm_public_logup_control(
+        &mut public_logup_control_table,
+        &preprocessing.vm_public_logup_control,
+        proof_kind,
+        segment_joint_binding,
+    )
+    .map_err(|error| stage("public-LogUp control and segment binding", error))?;
     let mut composition_table =
         crate::vm_air_composition_input_air::VmAirCompositionInputTable::new();
     let recursion_references = preprocessing.recursion_composition_references.lanes();
@@ -2065,24 +2334,49 @@ fn assemble_universal_components(
             recursion_references
         }
     };
-    crate::vm_air_composition_input_air::push_air_composition_inputs(
+    let segment_references = [
+        SegmentCompositionInputLane {
+            verifier_id: SEGMENT_VERIFIER_ID,
+            circuit_id: VM_COMPOSITION_CIRCUIT_ID,
+            circuit: &preprocessing.vm_composition_reference,
+        },
+        SegmentCompositionInputLane {
+            verifier_id: POSEIDON2_VERIFIER_ID,
+            circuit_id: POSEIDON2_COMPOSITION_CIRCUIT_ID,
+            circuit: &preprocessing.poseidon2_composition_reference,
+        },
+    ];
+    let segment_witnesses = match &branch {
+        UniversalAssemblyBranch::Segment {
+            vm_composition_circuit,
+            poseidon2_composition_circuit,
+            ..
+        } => [
+            SegmentCompositionInputLane {
+                verifier_id: SEGMENT_VERIFIER_ID,
+                circuit_id: VM_COMPOSITION_CIRCUIT_ID,
+                circuit: vm_composition_circuit,
+            },
+            SegmentCompositionInputLane {
+                verifier_id: POSEIDON2_VERIFIER_ID,
+                circuit_id: POSEIDON2_COMPOSITION_CIRCUIT_ID,
+                circuit: poseidon2_composition_circuit,
+            },
+        ],
+        UniversalAssemblyBranch::Binary { .. } | UniversalAssemblyBranch::Empty { .. } => {
+            segment_references
+        }
+    };
+    crate::vm_air_composition_input_air::push_segment_air_composition_inputs(
         &mut composition_table,
         &preprocessing.vm_composition_input,
-        &preprocessing.vm_composition_reference,
-        match &branch {
-            UniversalAssemblyBranch::Segment {
-                vm_composition_circuit,
-                ..
-            } => vm_composition_circuit,
-            UniversalAssemblyBranch::Binary { .. } | UniversalAssemblyBranch::Empty { .. } => {
-                &preprocessing.vm_composition_reference
-            }
-        },
+        &segment_references,
+        &segment_witnesses,
         &recursion_references,
         &recursion_witnesses,
         proof_kind,
     )
-    .map_err(|error| stage("VM AIR-composition inputs", error))?;
+    .map_err(|error| stage("segment AIR-composition inputs", error))?;
 
     let mut query_bits_table = crate::query_position_air::QueryBitsTable::new();
     let mut query_mapping_table = crate::query_position_air::QueryMappingTable::new();
@@ -2091,9 +2385,14 @@ fn assemble_universal_components(
         &mut query_mapping_table,
         &preprocessing.query_position,
         match &branch {
-            UniversalAssemblyBranch::Segment { raw_queries, .. } => {
-                UniversalRawQueryWitness::Segment(raw_queries)
-            }
+            UniversalAssemblyBranch::Segment {
+                raw_queries,
+                poseidon2_raw_queries,
+                ..
+            } => UniversalRawQueryWitness::Segment {
+                vm: raw_queries,
+                poseidon2: poseidon2_raw_queries,
+            },
             UniversalAssemblyBranch::Binary {
                 left_child,
                 right_child,
@@ -2107,12 +2406,19 @@ fn assemble_universal_components(
     )
     .map_err(|error| stage("query positions", error))?;
 
-    let (left_fri_commitments, right_fri_commitments) = match &branch {
-        UniversalAssemblyBranch::Segment { fri_opening, .. } => (
+    let (left_fri_commitments, poseidon2_fri_commitments, right_fri_commitments) = match &branch {
+        UniversalAssemblyBranch::Segment {
+            leaf, fri_opening, ..
+        } => (
             fri_opening
                 .layers
                 .iter()
                 .map(|layer| layer.commitment)
+                .collect::<Vec<_>>(),
+            leaf.poseidon2_proof()
+                .fri_layers
+                .iter()
+                .map(|layer| layer.commitment())
                 .collect::<Vec<_>>(),
             Vec::new(),
         ),
@@ -2127,6 +2433,7 @@ fn assemble_universal_components(
                 .iter()
                 .map(|layer| layer.commitment)
                 .collect(),
+            Vec::new(),
             right_child
                 .fri_opening
                 .layers
@@ -2134,7 +2441,7 @@ fn assemble_universal_components(
                 .map(|layer| layer.commitment)
                 .collect(),
         ),
-        UniversalAssemblyBranch::Empty { .. } => (Vec::new(), Vec::new()),
+        UniversalAssemblyBranch::Empty { .. } => (Vec::new(), Vec::new(), Vec::new()),
     };
     let mut merkle_root_table = crate::merkle_root_air::MerkleRootTable::new();
     crate::merkle_root_air::push_merkle_roots(
@@ -2142,12 +2449,16 @@ fn assemble_universal_components(
         &preprocessing.merkle_root,
         match &branch {
             UniversalAssemblyBranch::Segment { leaf, .. } => {
-                crate::merkle_root_air::UniversalMerkleRootWitness::Segment(
-                    crate::merkle_root_air::MerkleRootSet {
+                crate::merkle_root_air::UniversalMerkleRootWitness::Segment {
+                    vm: crate::merkle_root_air::MerkleRootSet {
                         trace: &leaf.proof().commitments,
                         fri: &left_fri_commitments,
                     },
-                )
+                    poseidon2: crate::merkle_root_air::MerkleRootSet {
+                        trace: &leaf.poseidon2_proof().commitments,
+                        fri: &poseidon2_fri_commitments,
+                    },
+                }
             }
             UniversalAssemblyBranch::Binary { left, right, .. } => {
                 crate::merkle_root_air::UniversalMerkleRootWitness::Binary {
@@ -2176,11 +2487,20 @@ fn assemble_universal_components(
         &preprocessing.query_position,
         match &branch {
             UniversalAssemblyBranch::Segment {
-                leaf, raw_queries, ..
-            } => UniversalTraceOpeningWitness::Segment(TraceOpeningSet {
-                queried_values: &leaf.proof().queried_values[..],
+                leaf,
                 raw_queries,
-            }),
+                poseidon2_raw_queries,
+                ..
+            } => UniversalTraceOpeningWitness::Segment {
+                vm: TraceOpeningSet {
+                    queried_values: &leaf.proof().queried_values[..],
+                    raw_queries,
+                },
+                poseidon2: TraceOpeningSet {
+                    queried_values: &leaf.poseidon2_proof().queried_values[..],
+                    raw_queries: poseidon2_raw_queries,
+                },
+            },
             UniversalAssemblyBranch::Binary {
                 left,
                 right,
@@ -2212,18 +2532,33 @@ fn assemble_universal_components(
             Vec::new()
         }
     };
+    let poseidon2_trace_paths = match &branch {
+        UniversalAssemblyBranch::Segment { leaf, .. } => leaf
+            .poseidon2_proof()
+            .trace_paths
+            .iter()
+            .map(widen_merkle_path)
+            .collect::<Result<Vec<_>, _>>()?,
+        UniversalAssemblyBranch::Binary { .. } | UniversalAssemblyBranch::Empty { .. } => {
+            Vec::new()
+        }
+    };
     let mut merkle_path_table = merkle_path::MerklePathTable::new();
     crate::trace_merkle_air::push_trace_merkle_paths(
         &mut merkle_path_table,
         &mut poseidon2,
         &trace_claims,
         match &branch {
-            UniversalAssemblyBranch::Segment { leaf, .. } => {
-                UniversalTracePathWitness::Segment(TracePathSet {
+            UniversalAssemblyBranch::Segment { leaf, .. } => UniversalTracePathWitness::Segment {
+                vm: TracePathSet {
                     roots: &leaf.proof().commitments,
                     paths: &segment_trace_paths,
-                })
-            }
+                },
+                poseidon2: TracePathSet {
+                    roots: &leaf.poseidon2_proof().commitments,
+                    paths: &poseidon2_trace_paths,
+                },
+            },
             UniversalAssemblyBranch::Binary { left, right, .. } => {
                 UniversalTracePathWitness::Binary {
                     left: TracePathSet {
@@ -2243,14 +2578,23 @@ fn assemble_universal_components(
 
     let pcs_references = preprocessing.pcs_references.lanes();
     let pcs_witnesses = match &branch {
-        UniversalAssemblyBranch::Segment { pcs_circuit, .. } => [
+        UniversalAssemblyBranch::Segment {
+            pcs_circuit,
+            poseidon2_pcs_circuit,
+            ..
+        } => [
             PcsDeepCircuitLane {
                 verifier_id: SEGMENT_VERIFIER_ID,
                 circuit_id: PCS_CIRCUIT_IDS[0],
                 circuit: pcs_circuit,
             },
-            pcs_references[1],
+            PcsDeepCircuitLane {
+                verifier_id: POSEIDON2_VERIFIER_ID,
+                circuit_id: PCS_CIRCUIT_IDS[1],
+                circuit: poseidon2_pcs_circuit,
+            },
             pcs_references[2],
+            pcs_references[3],
         ],
         UniversalAssemblyBranch::Binary {
             left_child,
@@ -2258,14 +2602,15 @@ fn assemble_universal_components(
             ..
         } => [
             pcs_references[0],
+            pcs_references[1],
             PcsDeepCircuitLane {
                 verifier_id: LEFT_RECURSION_VERIFIER_ID,
-                circuit_id: PCS_CIRCUIT_IDS[1],
+                circuit_id: PCS_CIRCUIT_IDS[2],
                 circuit: &left_child.pcs_circuit,
             },
             PcsDeepCircuitLane {
                 verifier_id: RIGHT_RECURSION_VERIFIER_ID,
-                circuit_id: PCS_CIRCUIT_IDS[2],
+                circuit_id: PCS_CIRCUIT_IDS[3],
                 circuit: &right_child.pcs_circuit,
             },
         ],
@@ -2293,9 +2638,14 @@ fn assemble_universal_components(
         &preprocessing.fri_merkle,
         &preprocessing.query_position,
         match &branch {
-            UniversalAssemblyBranch::Segment { fri_opening, .. } => {
-                UniversalFriMerkleWitness::Segment(fri_opening)
-            }
+            UniversalAssemblyBranch::Segment {
+                fri_opening,
+                poseidon2_fri_opening,
+                ..
+            } => UniversalFriMerkleWitness::Segment {
+                vm: fri_opening,
+                poseidon2: poseidon2_fri_opening,
+            },
             UniversalAssemblyBranch::Binary {
                 left_child,
                 right_child,
@@ -2310,6 +2660,8 @@ fn assemble_universal_components(
     .map_err(|error| stage("FRI Merkle authentication", error))?;
 
     let inactive_vm_queries = vec![M31Word::ZERO; preprocessing.query_position.vm_query_count()];
+    let inactive_poseidon2_queries =
+        vec![M31Word::ZERO; preprocessing.query_position.poseidon2_query_count()];
     let inactive_recursion_queries =
         vec![M31Word::ZERO; preprocessing.query_position.recursion_query_count()];
     let query_lanes =
@@ -2320,6 +2672,17 @@ fn assemble_universal_components(
                     UniversalAssemblyBranch::Segment { raw_queries, .. } => raw_queries,
                     UniversalAssemblyBranch::Binary { .. }
                     | UniversalAssemblyBranch::Empty { .. } => &inactive_vm_queries,
+                },
+            },
+            FriVerifierQueryLane {
+                verifier_id: POSEIDON2_VERIFIER_ID,
+                raw_queries: match &branch {
+                    UniversalAssemblyBranch::Segment {
+                        poseidon2_raw_queries,
+                        ..
+                    } => poseidon2_raw_queries,
+                    UniversalAssemblyBranch::Binary { .. }
+                    | UniversalAssemblyBranch::Empty { .. } => &inactive_poseidon2_queries,
                 },
             },
             FriVerifierQueryLane {
@@ -2350,14 +2713,23 @@ fn assemble_universal_components(
     .map_err(|error| stage("FRI verifier control", error))?;
     let fri_references = preprocessing.fri_references.lanes();
     let fri_witnesses = match &branch {
-        UniversalAssemblyBranch::Segment { fri_circuit, .. } => [
+        UniversalAssemblyBranch::Segment {
+            fri_circuit,
+            poseidon2_fri_circuit,
+            ..
+        } => [
             FriVerifierCircuitLane {
                 verifier_id: SEGMENT_VERIFIER_ID,
                 circuit_id: FRI_CIRCUIT_IDS[0],
                 circuit: fri_circuit,
             },
-            fri_references[1],
+            FriVerifierCircuitLane {
+                verifier_id: POSEIDON2_VERIFIER_ID,
+                circuit_id: FRI_CIRCUIT_IDS[1],
+                circuit: poseidon2_fri_circuit,
+            },
             fri_references[2],
+            fri_references[3],
         ],
         UniversalAssemblyBranch::Binary {
             left_child,
@@ -2365,14 +2737,15 @@ fn assemble_universal_components(
             ..
         } => [
             fri_references[0],
+            fri_references[1],
             FriVerifierCircuitLane {
                 verifier_id: LEFT_RECURSION_VERIFIER_ID,
-                circuit_id: FRI_CIRCUIT_IDS[1],
+                circuit_id: FRI_CIRCUIT_IDS[2],
                 circuit: &left_child.fri_circuit,
             },
             FriVerifierCircuitLane {
                 verifier_id: RIGHT_RECURSION_VERIFIER_ID,
-                circuit_id: FRI_CIRCUIT_IDS[2],
+                circuit_id: FRI_CIRCUIT_IDS[3],
                 circuit: &right_child.fri_circuit,
             },
         ],
@@ -2400,6 +2773,7 @@ fn assemble_universal_components(
         vm_claim_circuit,
         vm_public_logup_circuit,
         vm_composition_circuit,
+        poseidon2_composition_circuit,
         ..
     } = &branch
     {
@@ -2424,6 +2798,13 @@ fn assemble_universal_components(
             vm_composition_circuit,
         )
         .map_err(|error| stage("VM AIR-composition circuit lowering", error))?;
+        crate::vm_air_composition_lowering::lower_vm_air_composition_circuit(
+            &mut circuit_traces,
+            POSEIDON2_COMPOSITION_CIRCUIT_ID,
+            &preprocessing.poseidon2_composition_reference,
+            poseidon2_composition_circuit,
+        )
+        .map_err(|error| stage("Poseidon2 AIR-composition circuit lowering", error))?;
     }
     if let UniversalAssemblyBranch::Binary {
         left_child,
@@ -2450,8 +2831,8 @@ fn assemble_universal_components(
         }
     }
     let active_pcs = match proof_kind {
-        ProofKind::SegmentLeaf => 0..1,
-        ProofKind::BinaryNode => 1..3,
+        ProofKind::SegmentLeaf => 0..2,
+        ProofKind::BinaryNode => 2..4,
         ProofKind::EmptyLeaf => 0..0,
     };
     for lane in active_pcs {
@@ -2466,8 +2847,8 @@ fn assemble_universal_components(
         .map_err(|error| stage("PCS DEEP circuit lowering", error))?;
     }
     let active_fri = match proof_kind {
-        ProofKind::SegmentLeaf => 0..1,
-        ProofKind::BinaryNode => 1..3,
+        ProofKind::SegmentLeaf => 0..2,
+        ProofKind::BinaryNode => 2..4,
         ProofKind::EmptyLeaf => 0..0,
     };
     for lane in active_fri {
@@ -2545,6 +2926,10 @@ fn assemble_universal_components(
     original_components[16] = table_trace(
         public_logup_table.into_witness_with_log_size(component_log_sizes[16]),
         "VM public-LogUp capacity",
+    )?;
+    original_components[17] = table_trace(
+        public_logup_control_table.into_witness_with_log_size(component_log_sizes[17]),
+        "public-LogUp control capacity",
     )?;
     original_components[18] = table_trace(
         composition_table.into_witness_with_log_size(component_log_sizes[18]),
@@ -2653,13 +3038,15 @@ const STATEMENT_CIRCUIT_ID: u32 = 1;
 const VM_CLAIM_CIRCUIT_ID: u32 = 2;
 const VM_PUBLIC_LOGUP_CIRCUIT_ID: u32 = 3;
 const VM_COMPOSITION_CIRCUIT_ID: u32 = 4;
-const LEFT_RECURSION_COMPOSITION_CIRCUIT_ID: u32 = 5;
-const RIGHT_RECURSION_COMPOSITION_CIRCUIT_ID: u32 = 6;
-const PCS_CIRCUIT_IDS: [u32; 3] = [10, 11, 12];
-const FRI_CIRCUIT_IDS: [u32; 3] = [20, 21, 22];
+const POSEIDON2_COMPOSITION_CIRCUIT_ID: u32 = 5;
+const LEFT_RECURSION_COMPOSITION_CIRCUIT_ID: u32 = 6;
+const RIGHT_RECURSION_COMPOSITION_CIRCUIT_ID: u32 = 7;
+const PCS_CIRCUIT_IDS: [u32; 4] = [10, 11, 12, 13];
+const FRI_CIRCUIT_IDS: [u32; 4] = [20, 21, 22, 23];
 
 struct PcsCircuitSet {
-    segment: PcsDeepCircuit,
+    vm: PcsDeepCircuit,
+    poseidon2: PcsDeepCircuit,
     left: PcsDeepCircuit,
     right: PcsDeepCircuit,
 }
@@ -2689,21 +3076,26 @@ impl RecursionCompositionCircuitSet {
 }
 
 impl PcsCircuitSet {
-    fn lanes(&self) -> [PcsDeepCircuitLane<'_>; 3] {
+    fn lanes(&self) -> [PcsDeepCircuitLane<'_>; 4] {
         [
             PcsDeepCircuitLane {
                 verifier_id: SEGMENT_VERIFIER_ID,
                 circuit_id: PCS_CIRCUIT_IDS[0],
-                circuit: &self.segment,
+                circuit: &self.vm,
+            },
+            PcsDeepCircuitLane {
+                verifier_id: POSEIDON2_VERIFIER_ID,
+                circuit_id: PCS_CIRCUIT_IDS[1],
+                circuit: &self.poseidon2,
             },
             PcsDeepCircuitLane {
                 verifier_id: LEFT_RECURSION_VERIFIER_ID,
-                circuit_id: PCS_CIRCUIT_IDS[1],
+                circuit_id: PCS_CIRCUIT_IDS[2],
                 circuit: &self.left,
             },
             PcsDeepCircuitLane {
                 verifier_id: RIGHT_RECURSION_VERIFIER_ID,
-                circuit_id: PCS_CIRCUIT_IDS[2],
+                circuit_id: PCS_CIRCUIT_IDS[3],
                 circuit: &self.right,
             },
         ]
@@ -2711,27 +3103,33 @@ impl PcsCircuitSet {
 }
 
 struct FriCircuitSet {
-    segment: FriVerifierCircuit,
+    vm: FriVerifierCircuit,
+    poseidon2: FriVerifierCircuit,
     left: FriVerifierCircuit,
     right: FriVerifierCircuit,
 }
 
 impl FriCircuitSet {
-    fn lanes(&self) -> [FriVerifierCircuitLane<'_>; 3] {
+    fn lanes(&self) -> [FriVerifierCircuitLane<'_>; 4] {
         [
             FriVerifierCircuitLane {
                 verifier_id: SEGMENT_VERIFIER_ID,
                 circuit_id: FRI_CIRCUIT_IDS[0],
-                circuit: &self.segment,
+                circuit: &self.vm,
+            },
+            FriVerifierCircuitLane {
+                verifier_id: POSEIDON2_VERIFIER_ID,
+                circuit_id: FRI_CIRCUIT_IDS[1],
+                circuit: &self.poseidon2,
             },
             FriVerifierCircuitLane {
                 verifier_id: LEFT_RECURSION_VERIFIER_ID,
-                circuit_id: FRI_CIRCUIT_IDS[1],
+                circuit_id: FRI_CIRCUIT_IDS[2],
                 circuit: &self.left,
             },
             FriVerifierCircuitLane {
                 verifier_id: RIGHT_RECURSION_VERIFIER_ID,
-                circuit_id: FRI_CIRCUIT_IDS[2],
+                circuit_id: FRI_CIRCUIT_IDS[3],
                 circuit: &self.right,
             },
         ]
@@ -2759,17 +3157,18 @@ pub(crate) struct UniversalPreprocessing {
     vm_public_logup_input: VmPublicLogupInputPreprocessed,
     vm_public_logup_control: VmPublicLogupControlPreprocessed,
     vm_composition_reference: VmAirCompositionCircuit,
+    poseidon2_composition_reference: VmAirCompositionCircuit,
     recursion_composition_references: RecursionCompositionCircuitSet,
     vm_composition_input: VmAirCompositionInputPreprocessed,
     vm_composition_control: VmAirCompositionControlPreprocessed,
     query_position: QueryPositionPreprocessed,
     merkle_root: MerkleRootPreprocessed,
     trace_merkle: TraceMerklePreprocessed,
-    pcs_profiles: [PcsDeepProfile; 2],
+    pcs_profiles: [PcsDeepProfile; 3],
     pcs_references: PcsCircuitSet,
     pcs_input: PcsDeepInputPreprocessed,
     fri_merkle: FriMerklePreprocessed,
-    fri_profiles: [FriVerifierProfile; 2],
+    fri_profiles: [FriVerifierProfile; 3],
     fri_references: FriCircuitSet,
     fri_control: FriVerifierControlPreprocessed,
     fri_input: FriVerifierInputPreprocessed,
@@ -2781,24 +3180,34 @@ pub(crate) struct UniversalPreprocessing {
 impl UniversalPreprocessing {
     pub(crate) fn new(profile: &FrozenProtocolProfile) -> Result<Self, UniversalWitnessError> {
         let vm_plan = profile.vm_plan();
+        let poseidon2_plan = profile.poseidon2_plan();
         let recursion_plan = profile.recursion_plan();
         let manifest = profile.manifest();
         let raw_manifest = manifest.manifest();
-        let control = ControlPreprocessed::new(vm_plan, recursion_plan)
+        let control = ControlPreprocessed::new(vm_plan, poseidon2_plan, recursion_plan)
             .map_err(|error| stage("control preprocessing", error))?;
-        let transcript_calls = TranscriptCallPreprocessed::new(vm_plan, recursion_plan)
-            .map_err(|error| stage("transcript-call preprocessing", error))?;
+        let transcript_calls =
+            TranscriptCallPreprocessed::new(vm_plan, poseidon2_plan, recursion_plan)
+                .map_err(|error| stage("transcript-call preprocessing", error))?;
         let transcript_state = TranscriptStatePreprocessed::new(&transcript_calls)
             .map_err(|error| stage("transcript-state preprocessing", error))?;
         let transcript_word = TranscriptWordPreprocessed::new(&transcript_calls)
             .map_err(|error| stage("transcript-word preprocessing", error))?;
-        let transcript_payload =
-            TranscriptPayloadPreprocessed::new(&transcript_calls, manifest.protocol_id())
-                .map_err(|error| stage("transcript-payload preprocessing", error))?;
+        let poseidon2_log_size = M31Word::from(
+            u16::try_from(POSEIDON2_COMPONENT_LOG_SIZE)
+                .expect("the fixed Poseidon2 log size fits one canonical word"),
+        );
+        let transcript_payload = TranscriptPayloadPreprocessed::new(
+            &transcript_calls,
+            manifest.protocol_id(),
+            poseidon2_log_size,
+        )
+        .map_err(|error| stage("transcript-payload preprocessing", error))?;
         let relation_challenge = RelationChallengePreprocessed::new(vm_plan, recursion_plan)
             .map_err(|error| stage("relation-challenge preprocessing", error))?;
-        let verifier_randomness = VerifierRandomnessPreprocessed::new(vm_plan, recursion_plan)
-            .map_err(|error| stage("verifier-randomness preprocessing", error))?;
+        let verifier_randomness =
+            VerifierRandomnessPreprocessed::new(vm_plan, poseidon2_plan, recursion_plan)
+                .map_err(|error| stage("verifier-randomness preprocessing", error))?;
         let statement_input = StatementInputPreprocessed::new(&transcript_calls)
             .map_err(|error| stage("statement-input preprocessing", error))?;
 
@@ -2862,6 +3271,9 @@ impl UniversalPreprocessing {
         let vm_composition_reference =
             build_vm_air_composition_reference(crate::profile::vm_component_log_sizes())
                 .map_err(|error| stage("VM composition reference", error))?;
+        let poseidon2_composition_reference =
+            build_poseidon2_air_composition_reference(POSEIDON2_COMPONENT_LOG_SIZE)
+                .map_err(|error| stage("Poseidon2 composition reference", error))?;
         let recursion_composition_references = RecursionCompositionCircuitSet {
             left: build_recursion_air_composition_reference(
                 recursion_component_log_sizes(),
@@ -2877,9 +3289,10 @@ impl UniversalPreprocessing {
         let recursion_air_instruction_count =
             u32::try_from(profile.recursion_program().air_instruction_count())
                 .map_err(|error| stage("recursion AIR instruction count", error))?;
-        let vm_composition_control = VmAirCompositionControlPreprocessed::new(
+        let vm_composition_control = VmAirCompositionControlPreprocessed::new_with_poseidon2(
             vm_plan,
             vm_composition_reference.profile(),
+            Some((poseidon2_plan, poseidon2_composition_reference.profile())),
             recursion_plan,
             recursion_air_instruction_count,
             raw_manifest
@@ -2892,6 +3305,8 @@ impl UniversalPreprocessing {
         let query_position = QueryPositionPreprocessed::new(
             manifest.vm_pcs(),
             &raw_manifest.vm_proof_shape,
+            manifest.vm_pcs(),
+            profile.poseidon2_proof_shape(),
             manifest.recursion_pcs(),
             &raw_manifest.recursion_proof_shape,
         )
@@ -2899,6 +3314,8 @@ impl UniversalPreprocessing {
         let merkle_root = MerkleRootPreprocessed::new(
             manifest.vm_pcs(),
             &raw_manifest.vm_proof_shape,
+            manifest.vm_pcs(),
+            profile.poseidon2_proof_shape(),
             manifest.recursion_pcs(),
             &raw_manifest.recursion_proof_shape,
         )
@@ -2907,6 +3324,9 @@ impl UniversalPreprocessing {
             vm_plan,
             &raw_manifest.vm_proof_shape,
             &profile.vm_program().column_log_sizes().0,
+            poseidon2_plan,
+            profile.poseidon2_proof_shape(),
+            &profile.poseidon2_program().column_log_sizes().0,
             recursion_plan,
             &raw_manifest.recursion_proof_shape,
             &profile.recursion_program().column_log_sizes().0,
@@ -2915,10 +3335,18 @@ impl UniversalPreprocessing {
 
         let vm_pcs_profile = PcsDeepProfile::from_vm(profile.vm_program(), profile.vm_layout())
             .map_err(|error| stage("VM PCS circuit profile", error))?;
+        let poseidon2_pcs_profile = PcsDeepProfile::from_poseidon2(
+            profile.poseidon2_program(),
+            manifest.vm_pcs(),
+            profile.poseidon2_proof_shape(),
+        )
+        .map_err(|error| stage("Poseidon2 PCS circuit profile", error))?;
         let recursion_pcs_profile = recursion_pcs_profile(profile)?;
         let pcs_references = PcsCircuitSet {
-            segment: build_pcs_deep_reference(&vm_pcs_profile)
-                .map_err(|error| stage("segment PCS reference", error))?,
+            vm: build_pcs_deep_reference(&vm_pcs_profile)
+                .map_err(|error| stage("VM PCS reference", error))?,
+            poseidon2: build_pcs_deep_reference(&poseidon2_pcs_profile)
+                .map_err(|error| stage("Poseidon2 PCS reference", error))?,
             left: build_pcs_deep_reference(&recursion_pcs_profile)
                 .map_err(|error| stage("left PCS reference", error))?,
             right: build_pcs_deep_reference(&recursion_pcs_profile)
@@ -2930,6 +3358,8 @@ impl UniversalPreprocessing {
         let fri_merkle = FriMerklePreprocessed::new(
             vm_plan,
             &raw_manifest.vm_proof_shape,
+            poseidon2_plan,
+            profile.poseidon2_proof_shape(),
             recursion_plan,
             &raw_manifest.recursion_proof_shape,
         )
@@ -2937,14 +3367,19 @@ impl UniversalPreprocessing {
         let vm_fri_profile =
             FriVerifierProfile::from_shape(manifest.vm_pcs(), &raw_manifest.vm_proof_shape)
                 .map_err(|error| stage("VM FRI profile", error))?;
+        let poseidon2_fri_profile =
+            FriVerifierProfile::from_shape(manifest.vm_pcs(), profile.poseidon2_proof_shape())
+                .map_err(|error| stage("Poseidon2 FRI profile", error))?;
         let recursion_fri_profile = FriVerifierProfile::from_shape(
             manifest.recursion_pcs(),
             &raw_manifest.recursion_proof_shape,
         )
         .map_err(|error| stage("recursion FRI profile", error))?;
         let fri_references = FriCircuitSet {
-            segment: build_fri_verifier_reference(&vm_fri_profile)
-                .map_err(|error| stage("segment FRI reference", error))?,
+            vm: build_fri_verifier_reference(&vm_fri_profile)
+                .map_err(|error| stage("VM FRI reference", error))?,
+            poseidon2: build_fri_verifier_reference(&poseidon2_fri_profile)
+                .map_err(|error| stage("Poseidon2 FRI reference", error))?,
             left: build_fri_verifier_reference(&recursion_fri_profile)
                 .map_err(|error| stage("left FRI reference", error))?,
             right: build_fri_verifier_reference(&recursion_fri_profile)
@@ -2955,6 +3390,11 @@ impl UniversalPreprocessing {
                 verifier_id: SEGMENT_VERIFIER_ID,
                 plan: vm_plan,
                 profile: &vm_fri_profile,
+            },
+            FriVerifierControlLane {
+                verifier_id: POSEIDON2_VERIFIER_ID,
+                plan: poseidon2_plan,
+                profile: &poseidon2_fri_profile,
             },
             FriVerifierControlLane {
                 verifier_id: LEFT_RECURSION_VERIFIER_ID,
@@ -2972,9 +3412,19 @@ impl UniversalPreprocessing {
             .map_err(|error| stage("FRI input preprocessing", error))?;
 
         let vm_composition_input =
-            VmAirCompositionInputPreprocessed::new_with_anchors_and_recursion_inputs(
-                &vm_composition_reference,
-                VM_COMPOSITION_CIRCUIT_ID,
+            VmAirCompositionInputPreprocessed::new_with_segment_and_recursion_inputs(
+                &[
+                    SegmentCompositionInputLane {
+                        verifier_id: SEGMENT_VERIFIER_ID,
+                        circuit_id: VM_COMPOSITION_CIRCUIT_ID,
+                        circuit: &vm_composition_reference,
+                    },
+                    SegmentCompositionInputLane {
+                        verifier_id: POSEIDON2_VERIFIER_ID,
+                        circuit_id: POSEIDON2_COMPOSITION_CIRCUIT_ID,
+                        circuit: &poseidon2_composition_reference,
+                    },
+                ],
                 &recursion_composition_references.lanes(),
                 &[
                     CircuitAnchorLane {
@@ -3004,31 +3454,41 @@ impl UniversalPreprocessing {
                     },
                     CircuitAnchorLane {
                         circuit_id: PCS_CIRCUIT_IDS[0],
-                        circuit: pcs_references.segment.circuit(),
+                        circuit: pcs_references.vm.circuit(),
                         active_in: CircuitAnchorMode::SEGMENT,
                     },
                     CircuitAnchorLane {
                         circuit_id: PCS_CIRCUIT_IDS[1],
+                        circuit: pcs_references.poseidon2.circuit(),
+                        active_in: CircuitAnchorMode::SEGMENT,
+                    },
+                    CircuitAnchorLane {
+                        circuit_id: PCS_CIRCUIT_IDS[2],
                         circuit: pcs_references.left.circuit(),
                         active_in: CircuitAnchorMode::BINARY,
                     },
                     CircuitAnchorLane {
-                        circuit_id: PCS_CIRCUIT_IDS[2],
+                        circuit_id: PCS_CIRCUIT_IDS[3],
                         circuit: pcs_references.right.circuit(),
                         active_in: CircuitAnchorMode::BINARY,
                     },
                     CircuitAnchorLane {
                         circuit_id: FRI_CIRCUIT_IDS[0],
-                        circuit: fri_references.segment.circuit(),
+                        circuit: fri_references.vm.circuit(),
                         active_in: CircuitAnchorMode::SEGMENT,
                     },
                     CircuitAnchorLane {
                         circuit_id: FRI_CIRCUIT_IDS[1],
+                        circuit: fri_references.poseidon2.circuit(),
+                        active_in: CircuitAnchorMode::SEGMENT,
+                    },
+                    CircuitAnchorLane {
+                        circuit_id: FRI_CIRCUIT_IDS[2],
                         circuit: fri_references.left.circuit(),
                         active_in: CircuitAnchorMode::BINARY,
                     },
                     CircuitAnchorLane {
-                        circuit_id: FRI_CIRCUIT_IDS[2],
+                        circuit_id: FRI_CIRCUIT_IDS[3],
                         circuit: fri_references.right.circuit(),
                         active_in: CircuitAnchorMode::BINARY,
                     },
@@ -3050,7 +3510,18 @@ impl UniversalPreprocessing {
                 &statement_reference,
                 &vm_claim_reference,
                 &vm_public_logup_reference,
-                &vm_composition_reference,
+                [
+                    SegmentCompositionInputLane {
+                        verifier_id: SEGMENT_VERIFIER_ID,
+                        circuit_id: VM_COMPOSITION_CIRCUIT_ID,
+                        circuit: &vm_composition_reference,
+                    },
+                    SegmentCompositionInputLane {
+                        verifier_id: POSEIDON2_VERIFIER_ID,
+                        circuit_id: POSEIDON2_COMPOSITION_CIRCUIT_ID,
+                        circuit: &poseidon2_composition_reference,
+                    },
+                ],
                 recursion_composition_references.lanes(),
                 pcs_references.lanes(),
                 fri_references.lanes(),
@@ -3106,17 +3577,18 @@ impl UniversalPreprocessing {
             vm_public_logup_input,
             vm_public_logup_control,
             vm_composition_reference,
+            poseidon2_composition_reference,
             recursion_composition_references,
             vm_composition_input,
             vm_composition_control,
             query_position,
             merkle_root,
             trace_merkle,
-            pcs_profiles: [vm_pcs_profile, recursion_pcs_profile],
+            pcs_profiles: [vm_pcs_profile, poseidon2_pcs_profile, recursion_pcs_profile],
             pcs_references,
             pcs_input,
             fri_merkle,
-            fri_profiles: [vm_fri_profile, recursion_fri_profile],
+            fri_profiles: [vm_fri_profile, poseidon2_fri_profile, recursion_fri_profile],
             fri_references,
             fri_control,
             fri_input,
@@ -3295,6 +3767,13 @@ impl UniversalPreprocessing {
                 &self.vm_composition_reference,
             )
             .map_err(|error| stage("VM composition reference lowering", error))?;
+            crate::vm_air_composition_lowering::lower_vm_air_composition_circuit(
+                &mut traces,
+                POSEIDON2_COMPOSITION_CIRCUIT_ID,
+                &self.poseidon2_composition_reference,
+                &self.poseidon2_composition_reference,
+            )
+            .map_err(|error| stage("Poseidon2 composition reference lowering", error))?;
         }
         if proof_kind == ProofKind::BinaryNode {
             for lane in self.recursion_composition_references.lanes() {
@@ -3309,9 +3788,9 @@ impl UniversalPreprocessing {
         }
         let pcs_lanes = self.pcs_references.lanes();
         let pcs_lanes = if proof_kind == ProofKind::SegmentLeaf {
-            &pcs_lanes[..1]
+            &pcs_lanes[..2]
         } else {
-            &pcs_lanes[1..]
+            &pcs_lanes[2..]
         };
         for lane in pcs_lanes {
             crate::pcs_deep_lowering::lower_pcs_deep_circuit(
@@ -3324,9 +3803,9 @@ impl UniversalPreprocessing {
         }
         let fri_lanes = self.fri_references.lanes();
         let fri_lanes = if proof_kind == ProofKind::SegmentLeaf {
-            &fri_lanes[..1]
+            &fri_lanes[..2]
         } else {
-            &fri_lanes[1..]
+            &fri_lanes[2..]
         };
         for lane in fri_lanes {
             crate::fri_verifier_lowering::lower_fri_verifier_circuit(
@@ -3518,13 +3997,16 @@ mod tests {
         let preprocessing =
             UniversalPreprocessing::new(&profile).expect("universal preprocessing is valid");
         let capacities = recursion_component_log_sizes();
-        assert!(
-            preprocessing
-                .structural_log_sizes()
-                .into_iter()
-                .zip(capacities)
-                .all(|(required, capacity)| required <= capacity)
-        );
+        let exceeded = preprocessing
+            .structural_log_sizes()
+            .into_iter()
+            .zip(capacities)
+            .enumerate()
+            .filter_map(|(component, (required, capacity))| {
+                (required > capacity).then_some((component, required, capacity))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(exceeded, Vec::new());
     }
 
     #[test]

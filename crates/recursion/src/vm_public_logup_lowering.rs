@@ -211,6 +211,7 @@ mod tests {
                 claim_words: &claim,
                 relation_challenges: VmPublicLogupChallengeWords::from_relations(&vm_relations),
                 claimed_sums: &[claimed_sum],
+                shared_relation_sum: SecureField::zero(),
             },
         )
         .expect("fixture selected denominators are nonzero");
@@ -323,6 +324,15 @@ mod tests {
                         M31::from(limb_index),
                         value,
                     ]),
+                    VmPublicLogupInputSource::SharedRelationSumWord { limb_index } => {
+                        verifier_input_relations.input_word.combine(&[
+                            M31::from(SEGMENT_VERIFIER_ID),
+                            M31::from(VerifierInputKind::SharedRelationSum.as_u32()),
+                            M31::zero(),
+                            M31::from(limb_index),
+                            value,
+                        ])
+                    }
                     VmPublicLogupInputSource::SegmentSelector => return None,
                 };
                 Some(denominator.inverse())

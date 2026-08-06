@@ -11,6 +11,10 @@ pub enum VerificationError {
     PreprocessingCommitmentMismatch,
     #[error("Invalid logup sum.")]
     InvalidLogupSum,
+    #[error("VM shared-relation claim does not match its committed interactions.")]
+    InvalidSharedRelationClaim,
+    #[error("VM and Poseidon2 shared-relation claims do not cancel.")]
+    SharedRelationMismatch,
     #[error("Interaction proof of work failed.")]
     InteractionProofOfWork,
     #[error(transparent)]

@@ -8,7 +8,7 @@
 
 use core::fmt;
 
-use crate::profile::{FrozenProtocolProfile, vm_component_log_sizes};
+use crate::profile::{FrozenProtocolProfile, POSEIDON2_COMPONENT_LOG_SIZE, vm_component_log_sizes};
 use crate::profiled_channel::{
     ProfiledChannelError, ProfiledPoseidon2M31Channel, ProfiledPoseidon2M31MerkleChannel,
     RecursionVmClaimTranscript,
@@ -29,7 +29,7 @@ use crate::vm_public_claim::{VmPublicClaimError, public_input_digest, public_out
 use air::digest::{Digest8, IoDigest, MemoryDigest, ProgramDigest, VmPublicClaimDigest};
 use prover::poseidon2_channel::Poseidon2M31MerkleHasher;
 use prover::{
-    Preprocessing, PublicData, VmTranscriptProvingError,
+    Preprocessing, PublicData, SegmentProofChannels, VmTranscriptProvingError,
     prove_rv32im_with_channel_at_log_sizes_and_transcript,
 };
 #[cfg(feature = "parallel")]
@@ -386,6 +386,11 @@ fn prove_segment_task(
         &task.statement,
     )?;
     let transcript = RecursionVmClaimTranscript::new(task.claim_digest);
+    let poseidon2_channel = ProfiledPoseidon2M31Channel::for_poseidon2_proof(
+        profile.poseidon2_plan(),
+        profile.manifest().protocol_id(),
+        &task.statement,
+    )?;
     let (proof, channel) = prove_rv32im_with_channel_at_log_sizes_and_transcript::<
         ProfiledPoseidon2M31MerkleChannel,
         _,
@@ -394,10 +399,15 @@ fn prove_segment_task(
         profile.manifest().vm_pcs().config(),
         vm_preprocessing,
         vm_component_log_sizes(),
-        channel,
+        POSEIDON2_COMPONENT_LOG_SIZE,
+        SegmentProofChannels {
+            vm: channel,
+            poseidon2: poseidon2_channel,
+        },
         &transcript,
     )?;
-    channel.finish()?;
+    channel.vm.finish()?;
+    channel.poseidon2.finish()?;
     let leaf = adapt_vm_segment_leaf(profile, &proof, &task.metadata, job)?;
     Ok(prove_segment_leaf(profile, recursion_preprocessing, &leaf)?)
 }

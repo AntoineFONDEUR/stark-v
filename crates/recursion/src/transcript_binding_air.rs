@@ -23,7 +23,8 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::relation;
 
 use super::control_air::{
-    ControlRelations, LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
+    ControlRelations, LEFT_RECURSION_VERIFIER_ID, POSEIDON2_VERIFIER_ID,
+    RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
 };
 use super::kernel::{VerifierControlPlan, VerifierSchema};
 use super::transcript::{HashPurpose, RecordingTranscriptBackend, SpongeRow, TranscriptError};
@@ -113,14 +114,17 @@ pub struct TranscriptCallPreprocessed {
     log_size: u32,
     rows: Vec<PreprocessedRow>,
     vm_plan: VerifierControlPlan,
+    poseidon2_plan: VerifierControlPlan,
     recursion_plan: VerifierControlPlan,
     vm_layout: TranscriptLayout,
+    poseidon2_layout: TranscriptLayout,
     recursion_layout: TranscriptLayout,
 }
 
 impl TranscriptCallPreprocessed {
     pub fn new(
         vm: &VerifierControlPlan,
+        poseidon2: &VerifierControlPlan,
         recursion: &VerifierControlPlan,
     ) -> Result<Self, TranscriptBindingError> {
         if vm.schema() != VerifierSchema::Vm {
@@ -128,6 +132,13 @@ impl TranscriptCallPreprocessed {
                 lane: "segment",
                 expected: VerifierSchema::Vm,
                 actual: vm.schema(),
+            });
+        }
+        if poseidon2.schema() != VerifierSchema::Poseidon2 {
+            return Err(TranscriptBindingError::SchemaMismatch {
+                lane: "Poseidon2 segment",
+                expected: VerifierSchema::Poseidon2,
+                actual: poseidon2.schema(),
             });
         }
         if recursion.schema() != VerifierSchema::Recursion {
@@ -139,11 +150,15 @@ impl TranscriptCallPreprocessed {
         }
 
         let vm_layout = TranscriptLayout::new(vm).map_err(TranscriptBindingError::Layout)?;
+        let poseidon2_layout =
+            TranscriptLayout::new(poseidon2).map_err(TranscriptBindingError::Layout)?;
         let recursion_layout =
             TranscriptLayout::new(recursion).map_err(TranscriptBindingError::Layout)?;
         let row_count = vm_layout
             .calls()
             .len()
+            .checked_add(poseidon2_layout.calls().len())
+            .ok_or(TranscriptBindingError::RowCountOverflow)?
             .checked_add(
                 recursion_layout
                     .calls()
@@ -163,6 +178,7 @@ impl TranscriptCallPreprocessed {
 
         let mut rows = Vec::with_capacity(row_count);
         append_layout_rows(&mut rows, &vm_layout, SEGMENT_VERIFIER_ID, 1, 0)?;
+        append_layout_rows(&mut rows, &poseidon2_layout, POSEIDON2_VERIFIER_ID, 1, 0)?;
         append_layout_rows(
             &mut rows,
             &recursion_layout,
@@ -181,8 +197,10 @@ impl TranscriptCallPreprocessed {
             log_size,
             rows,
             vm_plan: vm.clone(),
+            poseidon2_plan: poseidon2.clone(),
             recursion_plan: recursion.clone(),
             vm_layout,
+            poseidon2_layout,
             recursion_layout,
         })
     }
@@ -199,6 +217,14 @@ impl TranscriptCallPreprocessed {
         &self.vm_plan
     }
 
+    pub const fn poseidon2_layout(&self) -> &TranscriptLayout {
+        &self.poseidon2_layout
+    }
+
+    pub const fn poseidon2_plan(&self) -> &VerifierControlPlan {
+        &self.poseidon2_plan
+    }
+
     pub const fn recursion_layout(&self) -> &TranscriptLayout {
         &self.recursion_layout
     }
@@ -209,7 +235,9 @@ impl TranscriptCallPreprocessed {
 
     pub fn active_call_count(&self, kind: ProofKind) -> usize {
         match kind {
-            ProofKind::SegmentLeaf => self.vm_layout.calls().len(),
+            ProofKind::SegmentLeaf => {
+                self.vm_layout.calls().len() + self.poseidon2_layout.calls().len()
+            }
             ProofKind::BinaryNode => 2 * self.recursion_layout.calls().len(),
             ProofKind::EmptyLeaf => 0,
         }
@@ -512,7 +540,10 @@ pub fn gen_interaction_trace(
 /// Mode-indexed transcript executions accepted by the universal table.
 #[derive(Clone, Copy)]
 pub enum UniversalTranscriptWitness<'a> {
-    Segment(&'a VerifierTranscriptExecution<RecordingTranscriptBackend>),
+    Segment {
+        vm: &'a VerifierTranscriptExecution<RecordingTranscriptBackend>,
+        poseidon2: &'a VerifierTranscriptExecution<RecordingTranscriptBackend>,
+    },
     Binary {
         left: &'a VerifierTranscriptExecution<RecordingTranscriptBackend>,
         right: &'a VerifierTranscriptExecution<RecordingTranscriptBackend>,
@@ -523,7 +554,7 @@ pub enum UniversalTranscriptWitness<'a> {
 impl UniversalTranscriptWitness<'_> {
     pub const fn proof_kind(&self) -> ProofKind {
         match self {
-            Self::Segment(_) => ProofKind::SegmentLeaf,
+            Self::Segment { .. } => ProofKind::SegmentLeaf,
             Self::Binary { .. } => ProofKind::BinaryNode,
             Self::Empty => ProofKind::EmptyLeaf,
         }
@@ -536,23 +567,26 @@ pub fn push_call_bindings(
     preprocessed: &TranscriptCallPreprocessed,
     witness: UniversalTranscriptWitness<'_>,
 ) -> Result<(), TranscriptBindingError> {
-    let (segment, left, right) = match witness {
-        UniversalTranscriptWitness::Segment(execution) => (
-            Some(validated_rows(&preprocessed.vm_layout, execution)?),
+    let (segment, poseidon2, left, right) = match witness {
+        UniversalTranscriptWitness::Segment { vm, poseidon2 } => (
+            Some(validated_rows(&preprocessed.vm_layout, vm)?),
+            Some(validated_rows(&preprocessed.poseidon2_layout, poseidon2)?),
             None,
             None,
         ),
         UniversalTranscriptWitness::Binary { left, right } => (
             None,
+            None,
             Some(validated_rows(&preprocessed.recursion_layout, left)?),
             Some(validated_rows(&preprocessed.recursion_layout, right)?),
         ),
-        UniversalTranscriptWitness::Empty => (None, None, None),
+        UniversalTranscriptWitness::Empty => (None, None, None, None),
     };
 
     for row in &preprocessed.rows {
         let lane = match row.verifier_id {
             SEGMENT_VERIFIER_ID => segment.as_ref(),
+            POSEIDON2_VERIFIER_ID => poseidon2.as_ref(),
             LEFT_RECURSION_VERIFIER_ID => left.as_ref(),
             RIGHT_RECURSION_VERIFIER_ID => right.as_ref(),
             verifier_id => {

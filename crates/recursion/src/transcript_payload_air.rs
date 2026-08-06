@@ -24,7 +24,8 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::relation;
 
 use super::control_air::{
-    LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
+    LEFT_RECURSION_VERIFIER_ID, POSEIDON2_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID,
+    SEGMENT_VERIFIER_ID,
 };
 use super::kernel::{VerifierControlPlan, VerifierSchema, VerifierStep};
 use super::protocol::CanonicalWords;
@@ -98,7 +99,10 @@ pub enum VerifierInputKind {
     InteractionPowNonce = 9,
     PcsPowNonce = 10,
     VmPublicClaimDigest = 11,
-    VmAirClaimedSum = 12,
+    AirClaimedSum = 12,
+    Poseidon2LogSize = 13,
+    JointInteractionSeed = 14,
+    SharedRelationSum = 15,
 }
 
 impl VerifierInputKind {
@@ -125,7 +129,10 @@ impl PayloadSource {
                 | VerifierInputKind::SampledValue
                 | VerifierInputKind::FriCommitment
                 | VerifierInputKind::LastLayerCoefficient
+                | VerifierInputKind::InteractionPowNonce
                 | VerifierInputKind::VmPublicClaimDigest
+                | VerifierInputKind::JointInteractionSeed
+                | VerifierInputKind::SharedRelationSum
         )
     }
 
@@ -139,12 +146,15 @@ impl PayloadSource {
             | VerifierInputKind::ClaimedSum
             | VerifierInputKind::FriCommitment
             | VerifierInputKind::LastLayerCoefficient
-            | VerifierInputKind::VmPublicClaimDigest => 1,
+            | VerifierInputKind::InteractionPowNonce
+            | VerifierInputKind::VmPublicClaimDigest
+            | VerifierInputKind::JointInteractionSeed => 1,
+            VerifierInputKind::SharedRelationSum => 2,
             VerifierInputKind::Protocol
             | VerifierInputKind::PcsParameters
-            | VerifierInputKind::InteractionPowNonce
             | VerifierInputKind::PcsPowNonce
-            | VerifierInputKind::VmAirClaimedSum => 0,
+            | VerifierInputKind::AirClaimedSum
+            | VerifierInputKind::Poseidon2LogSize => 0,
         }
     }
 }
@@ -167,17 +177,19 @@ struct PreprocessedRow {
 struct LaneContext<'a> {
     plan: &'a VerifierControlPlan,
     protocol_words: &'a [M31Word; DIGEST_WORDS],
+    poseidon2_log_size: M31Word,
     verifier_id: u32,
     segment_mask: u32,
     binary_mask: u32,
 }
 
-/// Universal payload-source layout for one protocol and two verifier plans.
+/// Universal payload-source layout for one protocol and three verifier plans.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TranscriptPayloadPreprocessed {
     log_size: u32,
     rows: Vec<PreprocessedRow>,
     vm_layout: TranscriptLayout,
+    poseidon2_layout: TranscriptLayout,
     recursion_layout: TranscriptLayout,
 }
 
@@ -185,12 +197,17 @@ impl TranscriptPayloadPreprocessed {
     pub fn new(
         calls: &TranscriptCallPreprocessed,
         protocol_id: ProtocolId,
+        poseidon2_log_size: M31Word,
     ) -> Result<Self, TranscriptPayloadError> {
         let vm_layout = calls.vm_layout().clone();
+        let poseidon2_layout = calls.poseidon2_layout().clone();
         let recursion_layout = calls.recursion_layout().clone();
         let vm_count = payload_count(&vm_layout)?;
+        let poseidon2_count = payload_count(&poseidon2_layout)?;
         let recursion_count = payload_count(&recursion_layout)?;
         let row_count = vm_count
+            .checked_add(poseidon2_count)
+            .ok_or(TranscriptPayloadError::RowCountOverflow)?
             .checked_add(
                 recursion_count
                     .checked_mul(2)
@@ -214,7 +231,20 @@ impl TranscriptPayloadPreprocessed {
             LaneContext {
                 plan: calls.vm_plan(),
                 protocol_words: &protocol_words,
+                poseidon2_log_size,
                 verifier_id: SEGMENT_VERIFIER_ID,
+                segment_mask: 1,
+                binary_mask: 0,
+            },
+        )?;
+        append_layout_rows(
+            &mut rows,
+            &poseidon2_layout,
+            LaneContext {
+                plan: calls.poseidon2_plan(),
+                protocol_words: &protocol_words,
+                poseidon2_log_size,
+                verifier_id: POSEIDON2_VERIFIER_ID,
                 segment_mask: 1,
                 binary_mask: 0,
             },
@@ -225,6 +255,7 @@ impl TranscriptPayloadPreprocessed {
             LaneContext {
                 plan: calls.recursion_plan(),
                 protocol_words: &protocol_words,
+                poseidon2_log_size,
                 verifier_id: LEFT_RECURSION_VERIFIER_ID,
                 segment_mask: 0,
                 binary_mask: 1,
@@ -236,6 +267,7 @@ impl TranscriptPayloadPreprocessed {
             LaneContext {
                 plan: calls.recursion_plan(),
                 protocol_words: &protocol_words,
+                poseidon2_log_size,
                 verifier_id: RIGHT_RECURSION_VERIFIER_ID,
                 segment_mask: 0,
                 binary_mask: 1,
@@ -245,6 +277,7 @@ impl TranscriptPayloadPreprocessed {
             log_size,
             rows,
             vm_layout,
+            poseidon2_layout,
             recursion_layout,
         })
     }
@@ -312,7 +345,7 @@ impl TranscriptPayloadPreprocessed {
             columns[INPUT_USE_COUNT_COLUMN][index] = row.source.input_relation_use_count();
             columns[CONSTANT_COLUMN][index] = row.source.constant.unwrap_or(M31Word::ZERO).as_u32();
             columns[VM_AIR_CLAIMED_SUM_MASK_COLUMN][index] = u32::from(
-                row.verifier_id == SEGMENT_VERIFIER_ID
+                matches!(row.verifier_id, SEGMENT_VERIFIER_ID | POSEIDON2_VERIFIER_ID)
                     && row.source.kind == VerifierInputKind::ClaimedSum,
             );
         }
@@ -379,7 +412,13 @@ fn append_layout_rows(
                 tag: encoded.tag(),
                 args: encoded.args(),
                 payload_index: index,
-                source: payload_source(lane.plan, lane.protocol_words, operation.step(), index)?,
+                source: payload_source(
+                    lane.plan,
+                    lane.protocol_words,
+                    lane.poseidon2_log_size,
+                    operation.step(),
+                    index,
+                )?,
                 hash_id: frame.hash_id(),
                 word_index,
             });
@@ -401,6 +440,7 @@ fn append_layout_rows(
 fn payload_source(
     plan: &VerifierControlPlan,
     protocol_words: &[M31Word; DIGEST_WORDS],
+    poseidon2_log_size: M31Word,
     step: VerifierStep,
     payload_index: u32,
 ) -> Result<PayloadSource, TranscriptPayloadError> {
@@ -438,6 +478,17 @@ fn payload_source(
             require_payload_width("interaction PoW nonce", payload_index, QM31_WORDS)?;
             dynamic(VerifierInputKind::InteractionPowNonce, 0, payload_index)
         }
+        VerifierStep::AbsorbJointInteractionSeeds => {
+            indexed_qm31_source(VerifierInputKind::JointInteractionSeed, payload_index, 2)?
+        }
+        VerifierStep::AbsorbJointInteractionNonce { .. } => {
+            require_payload_width("joint interaction nonce", payload_index, QM31_WORDS)?;
+            dynamic(VerifierInputKind::InteractionPowNonce, 0, payload_index)
+        }
+        VerifierStep::AbsorbSharedRelationSum => {
+            require_payload_width("shared relation sum", payload_index, QM31_WORDS)?;
+            dynamic(VerifierInputKind::SharedRelationSum, 0, payload_index)
+        }
         VerifierStep::AbsorbClaimedSums { count } => {
             indexed_qm31_source(VerifierInputKind::ClaimedSum, payload_index, count)?
         }
@@ -457,23 +508,36 @@ fn payload_source(
             require_payload_width("PCS PoW nonce", payload_index, QM31_WORDS)?;
             dynamic(VerifierInputKind::PcsPowNonce, 0, payload_index)
         }
-        VerifierStep::AbsorbPublicClaim => {
-            if plan.schema() != VerifierSchema::Vm {
+        VerifierStep::AbsorbPublicClaim => match plan.schema() {
+            VerifierSchema::Vm => {
+                require_payload_width(
+                    "VM public claim digest",
+                    payload_index,
+                    DIGEST_WORDS as u32,
+                )?;
+                dynamic(VerifierInputKind::VmPublicClaimDigest, 0, payload_index)
+            }
+            VerifierSchema::Poseidon2 => {
+                require_payload_width("Poseidon2 log size", payload_index, 1)?;
+                constant(VerifierInputKind::Poseidon2LogSize, poseidon2_log_size)
+            }
+            VerifierSchema::Recursion => {
                 return Err(TranscriptPayloadError::UnexpectedPayload {
                     step,
                     payload_index,
                 });
             }
-            require_payload_width("VM public claim digest", payload_index, DIGEST_WORDS as u32)?;
-            dynamic(VerifierInputKind::VmPublicClaimDigest, 0, payload_index)
-        }
-        VerifierStep::DrawRelationChallenge { .. }
+        },
+        VerifierStep::DrawInteractionSeed
+        | VerifierStep::DrawRelationChallenge { .. }
         | VerifierStep::DrawCompositionRandomness
         | VerifierStep::DrawOodsPoint
         | VerifierStep::DrawDeepRandomness
         | VerifierStep::DrawFriAlpha { .. }
         | VerifierStep::DrawQueryBlock { .. }
         | VerifierStep::AccumulatePublicLogupTerm { .. }
+        | VerifierStep::AssertVmSharedRelation
+        | VerifierStep::AssertSegmentSharedRelationZero
         | VerifierStep::AssertGlobalLogupZero
         | VerifierStep::EvaluateAirInstruction { .. }
         | VerifierStep::AssertComposition { .. }
@@ -636,7 +700,7 @@ pub fn eval_for_proof_kind(
         log_size,
         segment_active: BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
         binary_active: BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
-        vm_air_claimed_sum_kind: BaseField::from(VerifierInputKind::VmAirClaimedSum.as_u32()),
+        vm_air_claimed_sum_kind: BaseField::from(VerifierInputKind::AirClaimedSum.as_u32()),
         relations: TranscriptPayloadRelations::new(word_relations, input_relations),
     }
 }
@@ -657,7 +721,7 @@ pub fn gen_interaction_trace(
         preprocessed,
         BaseField::from(u32::from(proof_kind == ProofKind::SegmentLeaf)),
         BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
-        BaseField::from(VerifierInputKind::VmAirClaimedSum.as_u32()),
+        BaseField::from(VerifierInputKind::AirClaimedSum.as_u32()),
         &TranscriptPayloadRelations::new(word_relations, input_relations),
     )
 }
@@ -669,23 +733,26 @@ pub fn push_transcript_payloads(
     preprocessed: &TranscriptPayloadPreprocessed,
     witness: UniversalTranscriptWitness<'_>,
 ) -> Result<(), TranscriptPayloadError> {
-    let (segment, left, right) = match witness {
-        UniversalTranscriptWitness::Segment(execution) => (
-            Some(validated_trace(&preprocessed.vm_layout, execution)?),
+    let (segment, poseidon2, left, right) = match witness {
+        UniversalTranscriptWitness::Segment { vm, poseidon2 } => (
+            Some(validated_trace(&preprocessed.vm_layout, vm)?),
+            Some(validated_trace(&preprocessed.poseidon2_layout, poseidon2)?),
             None,
             None,
         ),
         UniversalTranscriptWitness::Binary { left, right } => (
             None,
+            None,
             Some(validated_trace(&preprocessed.recursion_layout, left)?),
             Some(validated_trace(&preprocessed.recursion_layout, right)?),
         ),
-        UniversalTranscriptWitness::Empty => (None, None, None),
+        UniversalTranscriptWitness::Empty => (None, None, None, None),
     };
 
     for row in &preprocessed.rows {
         let trace = match row.verifier_id {
             SEGMENT_VERIFIER_ID => segment,
+            POSEIDON2_VERIFIER_ID => poseidon2,
             LEFT_RECURSION_VERIFIER_ID => left,
             RIGHT_RECURSION_VERIFIER_ID => right,
             verifier_id => return Err(TranscriptPayloadError::UnknownVerifierId { verifier_id }),
@@ -898,5 +965,61 @@ mod tests {
             constant: None,
         };
         assert_eq!(source.input_relation_use_count(), 2);
+    }
+
+    #[test]
+    fn interaction_nonce_payloads_are_exposed_to_the_joint_binder() {
+        let source = PayloadSource {
+            kind: VerifierInputKind::InteractionPowNonce,
+            item_index: 0,
+            limb_index: 0,
+            constant: None,
+        };
+        assert_eq!(
+            (
+                source.requires_input_relation(),
+                source.input_relation_use_count()
+            ),
+            (true, 1),
+        );
+    }
+
+    #[test]
+    fn shared_relation_sum_feeds_public_logup_and_joint_cancellation() {
+        let source = PayloadSource {
+            kind: VerifierInputKind::SharedRelationSum,
+            item_index: 0,
+            limb_index: 0,
+            constant: None,
+        };
+        assert_eq!(source.input_relation_use_count(), 2);
+    }
+
+    #[test]
+    fn poseidon2_log_size_is_a_verifier_owned_constant() {
+        let plan = crate::transcript_program::tests::plan_for_schema(VerifierSchema::Poseidon2, 1);
+        let log_size = M31Word::from(11_u16);
+        let source = payload_source(
+            &plan,
+            &[M31Word::ZERO; DIGEST_WORDS],
+            log_size,
+            VerifierStep::AbsorbPublicClaim,
+            0,
+        )
+        .expect("the fixed Poseidon2 claim has one word");
+        assert_eq!(
+            (
+                source.kind,
+                source.constant,
+                source.requires_input_relation(),
+                source.input_relation_use_count(),
+            ),
+            (
+                VerifierInputKind::Poseidon2LogSize,
+                Some(log_size),
+                false,
+                0
+            ),
+        );
     }
 }

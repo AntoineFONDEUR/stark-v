@@ -28,7 +28,8 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::relation;
 
 use super::control_air::{
-    ControlRelations, LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
+    ControlRelations, LEFT_RECURSION_VERIFIER_ID, POSEIDON2_VERIFIER_ID,
+    RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
 };
 use super::kernel::{VerifierControlPlan, VerifierSchema, VerifierStep};
 use super::merkle_root_air::{MerkleRootError, fri_tree_id};
@@ -192,7 +193,7 @@ struct LayerGeometry {
     path_depth: u32,
 }
 
-/// Fixed leaf, local-subtree, and routed-anchor layouts for three verifier lanes.
+/// Fixed leaf, local-subtree, and routed-anchor layouts for four verifier lanes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FriMerklePreprocessed {
     leaf_log_size: u32,
@@ -203,9 +204,12 @@ pub struct FriMerklePreprocessed {
     anchor_rows: Vec<AnchorRow>,
     vm_query_count: usize,
     vm_layer_count: usize,
+    poseidon2_query_count: usize,
+    poseidon2_layer_count: usize,
     recursion_query_count: usize,
     recursion_layer_count: usize,
     vm_layers: Vec<LayerGeometry>,
+    poseidon2_layers: Vec<LayerGeometry>,
     recursion_layers: Vec<LayerGeometry>,
 }
 
@@ -214,12 +218,17 @@ impl FriMerklePreprocessed {
         const VM_TABLES: usize,
         const VM_TREES: usize,
         const VM_FRI_LAYERS: usize,
+        const POSEIDON2_TABLES: usize,
+        const POSEIDON2_TREES: usize,
+        const POSEIDON2_FRI_LAYERS: usize,
         const RECURSION_TABLES: usize,
         const RECURSION_TREES: usize,
         const RECURSION_FRI_LAYERS: usize,
     >(
         vm_plan: &VerifierControlPlan,
         vm_shape: &FixedProofShape<VM_TABLES, VM_TREES, VM_FRI_LAYERS>,
+        poseidon2_plan: &VerifierControlPlan,
+        poseidon2_shape: &FixedProofShape<POSEIDON2_TABLES, POSEIDON2_TREES, POSEIDON2_FRI_LAYERS>,
         recursion_plan: &VerifierControlPlan,
         recursion_shape: &FixedProofShape<RECURSION_TABLES, RECURSION_TREES, RECURSION_FRI_LAYERS>,
     ) -> Result<Self, FriMerkleError> {
@@ -229,6 +238,12 @@ impl FriMerklePreprocessed {
             VerifierSchema::Recursion,
             recursion_plan,
             recursion_shape,
+        )?;
+        let poseidon2 = validated_geometry(
+            "Poseidon2",
+            VerifierSchema::Poseidon2,
+            poseidon2_plan,
+            poseidon2_shape,
         )?;
         let mut leaf_rows = Vec::new();
         let mut node_rows = Vec::new();
@@ -240,6 +255,16 @@ impl FriMerklePreprocessed {
             vm_plan,
             &vm,
             SEGMENT_VERIFIER_ID,
+            1,
+            0,
+        )?;
+        append_lane_rows(
+            &mut leaf_rows,
+            &mut node_rows,
+            &mut anchor_rows,
+            poseidon2_plan,
+            &poseidon2,
+            POSEIDON2_VERIFIER_ID,
             1,
             0,
         )?;
@@ -264,9 +289,12 @@ impl FriMerklePreprocessed {
             anchor_rows,
             vm_query_count: vm.query_count,
             vm_layer_count: vm.layers.len(),
+            poseidon2_query_count: poseidon2.query_count,
+            poseidon2_layer_count: poseidon2.layers.len(),
             recursion_query_count: recursion.query_count,
             recursion_layer_count: recursion.layers.len(),
             vm_layers: vm.layers,
+            poseidon2_layers: poseidon2.layers,
             recursion_layers: recursion.layers,
         })
     }
@@ -401,6 +429,7 @@ fn validated_geometry<const N_TABLES: usize, const N_TREES: usize, const N_FRI_L
     shape.validate(pcs).map_err(|error| match schema {
         VerifierSchema::Vm => FriMerkleError::VmShape(error),
         VerifierSchema::Recursion => FriMerkleError::RecursionShape(error),
+        VerifierSchema::Poseidon2 => FriMerkleError::Poseidon2Shape(error),
     })?;
     let mut layers = Vec::with_capacity(N_FRI_LAYERS);
     for layer in 0..N_FRI_LAYERS {
@@ -1352,7 +1381,10 @@ impl FriMerkleOpeningSet {
 /// FRI openings selected by the public universal proof kind.
 #[derive(Clone, Copy)]
 pub enum UniversalFriMerkleWitness<'a> {
-    Segment(&'a FriMerkleOpeningSet),
+    Segment {
+        vm: &'a FriMerkleOpeningSet,
+        poseidon2: &'a FriMerkleOpeningSet,
+    },
     Binary {
         left: &'a FriMerkleOpeningSet,
         right: &'a FriMerkleOpeningSet,
@@ -1388,13 +1420,28 @@ fn validate_opening_witness(
             actual: query_preprocessed.recursion_query_count(),
         });
     }
+    if preprocessed.poseidon2_query_count != query_preprocessed.poseidon2_query_count() {
+        return Err(FriMerkleError::QueryPreprocessedCountMismatch {
+            profile: "Poseidon2",
+            expected: preprocessed.poseidon2_query_count,
+            actual: query_preprocessed.poseidon2_query_count(),
+        });
+    }
     match witness {
-        UniversalFriMerkleWitness::Segment(opening) => validate_opening_set(
-            SEGMENT_VERIFIER_ID,
-            preprocessed.vm_query_count,
-            &preprocessed.vm_layers,
-            opening,
-        ),
+        UniversalFriMerkleWitness::Segment { vm, poseidon2 } => {
+            validate_opening_set(
+                SEGMENT_VERIFIER_ID,
+                preprocessed.vm_query_count,
+                &preprocessed.vm_layers,
+                vm,
+            )?;
+            validate_opening_set(
+                POSEIDON2_VERIFIER_ID,
+                preprocessed.poseidon2_query_count,
+                &preprocessed.poseidon2_layers,
+                poseidon2,
+            )
+        }
         UniversalFriMerkleWitness::Binary { left, right } => {
             validate_opening_set(
                 LEFT_RECURSION_VERIFIER_ID,
@@ -1483,7 +1530,10 @@ fn select_opening(
     verifier_id: u32,
 ) -> Result<Option<&FriMerkleOpeningSet>, FriMerkleError> {
     match (witness, verifier_id) {
-        (UniversalFriMerkleWitness::Segment(opening), SEGMENT_VERIFIER_ID) => Ok(Some(opening)),
+        (UniversalFriMerkleWitness::Segment { vm, .. }, SEGMENT_VERIFIER_ID) => Ok(Some(vm)),
+        (UniversalFriMerkleWitness::Segment { poseidon2, .. }, POSEIDON2_VERIFIER_ID) => {
+            Ok(Some(poseidon2))
+        }
         (UniversalFriMerkleWitness::Binary { left, .. }, LEFT_RECURSION_VERIFIER_ID) => {
             Ok(Some(left))
         }
@@ -1491,11 +1541,13 @@ fn select_opening(
             Ok(Some(right))
         }
         (UniversalFriMerkleWitness::Empty, SEGMENT_VERIFIER_ID)
+        | (UniversalFriMerkleWitness::Empty, POSEIDON2_VERIFIER_ID)
         | (UniversalFriMerkleWitness::Empty, LEFT_RECURSION_VERIFIER_ID)
         | (UniversalFriMerkleWitness::Empty, RIGHT_RECURSION_VERIFIER_ID)
-        | (UniversalFriMerkleWitness::Segment(_), LEFT_RECURSION_VERIFIER_ID)
-        | (UniversalFriMerkleWitness::Segment(_), RIGHT_RECURSION_VERIFIER_ID)
-        | (UniversalFriMerkleWitness::Binary { .. }, SEGMENT_VERIFIER_ID) => Ok(None),
+        | (UniversalFriMerkleWitness::Segment { .. }, LEFT_RECURSION_VERIFIER_ID)
+        | (UniversalFriMerkleWitness::Segment { .. }, RIGHT_RECURSION_VERIFIER_ID)
+        | (UniversalFriMerkleWitness::Binary { .. }, SEGMENT_VERIFIER_ID)
+        | (UniversalFriMerkleWitness::Binary { .. }, POSEIDON2_VERIFIER_ID) => Ok(None),
         (_, verifier_id) => Err(FriMerkleError::UnknownVerifierId { verifier_id }),
     }
 }
@@ -1507,6 +1559,7 @@ fn layer_geometry(
 ) -> Result<LayerGeometry, FriMerkleError> {
     let geometry = match verifier_id {
         SEGMENT_VERIFIER_ID => &preprocessed.vm_layers,
+        POSEIDON2_VERIFIER_ID => &preprocessed.poseidon2_layers,
         LEFT_RECURSION_VERIFIER_ID | RIGHT_RECURSION_VERIFIER_ID => &preprocessed.recursion_layers,
         _ => return Err(FriMerkleError::UnknownVerifierId { verifier_id }),
     };
@@ -1943,6 +1996,7 @@ pub enum FriMerkleError {
     },
     Pcs(PcsParameterError),
     VmShape(ProofShapeError),
+    Poseidon2Shape(ProofShapeError),
     RecursionShape(ProofShapeError),
     TreeNamespace(MerkleRootError),
     QueryPosition(QueryPositionError),
@@ -2144,11 +2198,14 @@ mod tests {
 
     fn preprocessing() -> (FriMerklePreprocessed, QueryPositionPreprocessed) {
         let vm = plan(VerifierSchema::Vm);
+        let poseidon2 = plan(VerifierSchema::Poseidon2);
         let recursion = plan(VerifierSchema::Recursion);
-        let fri = FriMerklePreprocessed::new(&vm, &shape(), &recursion, &shape())
-            .expect("fixture FRI Merkle geometry is valid");
-        let query = QueryPositionPreprocessed::new(pcs(), &shape(), pcs(), &shape())
-            .expect("fixture query geometry is valid");
+        let fri =
+            FriMerklePreprocessed::new(&vm, &shape(), &poseidon2, &shape(), &recursion, &shape())
+                .expect("fixture FRI Merkle geometry is valid");
+        let query =
+            QueryPositionPreprocessed::new(pcs(), &shape(), pcs(), &shape(), pcs(), &shape())
+                .expect("fixture query geometry is valid");
         (fri, query)
     }
 
@@ -2346,6 +2403,7 @@ mod tests {
     ) -> FriMerkleOpeningSet {
         let geometry = match verifier_id {
             SEGMENT_VERIFIER_ID => &preprocessing.vm_layers,
+            POSEIDON2_VERIFIER_ID => &preprocessing.poseidon2_layers,
             LEFT_RECURSION_VERIFIER_ID | RIGHT_RECURSION_VERIFIER_ID => {
                 &preprocessing.recursion_layers
             }
@@ -2408,6 +2466,7 @@ mod tests {
         path: MerklePathTable,
         poseidon2: Poseidon2Table,
         vm: FriMerkleOpeningSet,
+        poseidon2_opening: FriMerkleOpeningSet,
     }
 
     fn materialize(kind: ProofKind) -> Materialized {
@@ -2418,6 +2477,13 @@ mod tests {
             SEGMENT_VERIFIER_ID,
             10,
             M31Word::from(183_u16),
+        );
+        let poseidon2_opening = opening_set(
+            &preprocessing,
+            &query_preprocessing,
+            POSEIDON2_VERIFIER_ID,
+            500,
+            M31Word::from(173_u16),
         );
         let left = opening_set(
             &preprocessing,
@@ -2434,7 +2500,10 @@ mod tests {
             M31Word::from(99_u16),
         );
         let witness = match kind {
-            ProofKind::SegmentLeaf => UniversalFriMerkleWitness::Segment(&vm),
+            ProofKind::SegmentLeaf => UniversalFriMerkleWitness::Segment {
+                vm: &vm,
+                poseidon2: &poseidon2_opening,
+            },
             ProofKind::BinaryNode => UniversalFriMerkleWitness::Binary {
                 left: &left,
                 right: &right,
@@ -2466,6 +2535,7 @@ mod tests {
             path,
             poseidon2,
             vm,
+            poseidon2_opening,
         }
     }
 
@@ -2652,10 +2722,21 @@ mod tests {
             .expect("fixture VM verifier plan is valid");
         let recursion_plan = VerifierControlPlan::new(recursion_spec, parameters, &shape)
             .expect("fixture recursion verifier plan is valid");
-        let preprocessing = FriMerklePreprocessed::new(&vm_plan, &shape, &recursion_plan, &shape)
-            .expect("single-layer FRI Merkle geometry is valid");
+        let poseidon2_spec = VerifierProgramSpec::new(VerifierSchema::Poseidon2, 1, 1, 1, 1)
+            .expect("fixture Poseidon2 verifier program is valid");
+        let poseidon2_plan = VerifierControlPlan::new(poseidon2_spec, parameters, &shape)
+            .expect("fixture Poseidon2 verifier plan is valid");
+        let preprocessing = FriMerklePreprocessed::new(
+            &vm_plan,
+            &shape,
+            &poseidon2_plan,
+            &shape,
+            &recursion_plan,
+            &shape,
+        )
+        .expect("single-layer FRI Merkle geometry is valid");
         let query_preprocessing =
-            QueryPositionPreprocessed::new(validated, &shape, validated, &shape)
+            QueryPositionPreprocessed::new(validated, &shape, validated, &shape, validated, &shape)
                 .expect("single-layer query geometry is valid");
         let opening = opening_set(
             &preprocessing,
@@ -2673,14 +2754,17 @@ mod tests {
             &mut Poseidon2Table::new(),
             &preprocessing,
             &query_preprocessing,
-            UniversalFriMerkleWitness::Segment(&opening),
+            UniversalFriMerkleWitness::Segment {
+                vm: &opening,
+                poseidon2: &opening,
+            },
         )
         .expect("single-layer FRI opening authenticates");
         let actual = preprocessing
             .leaf_rows
             .iter()
             .enumerate()
-            .filter(|(_, row)| row.segment_mask == 1 && row.last)
+            .filter(|(_, row)| row.verifier_id == SEGMENT_VERIFIER_ID && row.last)
             .map(|(row, _)| {
                 Poseidon2M31Hash([
                     leaf.output_0[row],
@@ -2735,7 +2819,10 @@ mod tests {
             &mut Poseidon2Table::new(),
             &preprocessing,
             &query_preprocessing,
-            UniversalFriMerkleWitness::Segment(&vm),
+            UniversalFriMerkleWitness::Segment {
+                vm: &vm,
+                poseidon2: &vm,
+            },
         );
         assert!(matches!(
             result,
@@ -2790,7 +2877,10 @@ mod tests {
             &mut Poseidon2Table::new(),
             &preprocessing,
             &query_preprocessing,
-            UniversalFriMerkleWitness::Segment(&vm),
+            UniversalFriMerkleWitness::Segment {
+                vm: &vm,
+                poseidon2: &vm,
+            },
         );
         let expected = match tamper {
             ShapeTamper::RawQueries => {
@@ -2888,6 +2978,16 @@ mod tests {
             &materialized.preprocessing,
             &materialized.query_preprocessing,
             &materialized.vm,
+            SEGMENT_VERIFIER_ID,
+            &control_relations,
+            &query_relations,
+            &fri_relations,
+            &recursion_relations,
+        ) + external_relation_sum(
+            &materialized.preprocessing,
+            &materialized.query_preprocessing,
+            &materialized.poseidon2_opening,
+            POSEIDON2_VERIFIER_ID,
             &control_relations,
             &query_relations,
             &fri_relations,
@@ -2901,6 +3001,7 @@ mod tests {
         preprocessing: &FriMerklePreprocessed,
         query_preprocessing: &QueryPositionPreprocessed,
         opening: &FriMerkleOpeningSet,
+        verifier_id: u32,
         control_relations: &ControlRelations,
         query_relations: &QueryPositionRelations,
         fri_relations: &FriMerkleRelations,
@@ -2927,7 +3028,7 @@ mod tests {
                                         |sum, (word, value)| {
                                             let denominator: QM31 =
                                                 fri_relations.value_word.combine(&[
-                                                    M31::from(SEGMENT_VERIFIER_ID),
+                                                    M31::from(verifier_id),
                                                     M31::from(layer as u32),
                                                     M31::from(query as u32),
                                                     M31::from(offset as u32),
@@ -2943,7 +3044,7 @@ mod tests {
         preprocessing
             .anchor_rows
             .iter()
-            .filter(|row| row.segment_mask == 1)
+            .filter(|row| row.verifier_id == verifier_id)
             .fold(values, |sum, row| {
                 let raw = opening.raw_queries[row.query as usize];
                 let (position, offset) = query_preprocessing

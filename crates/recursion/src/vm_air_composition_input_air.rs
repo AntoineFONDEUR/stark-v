@@ -21,7 +21,7 @@ use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::CircleEvaluation;
 use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 
-use super::control_air::SEGMENT_VERIFIER_ID;
+use super::control_air::{POSEIDON2_VERIFIER_ID, SEGMENT_VERIFIER_ID};
 use super::recursion_air_composition_circuit::{
     RecursionAirCompositionCircuit, RecursionAirCompositionInputSource,
 };
@@ -72,7 +72,8 @@ const STATEMENT_WORD_MASK_COLUMN: usize = 27;
 const VERIFIER_ID_COLUMN: usize = 28;
 const STATEMENT_SCOPE_COLUMN: usize = 29;
 const RECURSION_CLAIMED_SUM_MASK_COLUMN: usize = 30;
-const PREPROCESSED_COLUMN_COUNT: usize = 31;
+const CHALLENGE_VERIFIER_ID_COLUMN: usize = 31;
+const PREPROCESSED_COLUMN_COUNT: usize = 32;
 
 /// Universal modes in which one fixed arithmetic-circuit anchor is active.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -123,6 +124,14 @@ pub struct RecursionCompositionInputLane<'a> {
     pub circuit: &'a RecursionAirCompositionCircuit,
 }
 
+/// One segment AIR composition graph and the verifier lane that owns its inputs.
+#[derive(Clone, Copy)]
+pub struct SegmentCompositionInputLane<'a> {
+    pub verifier_id: u32,
+    pub circuit_id: u32,
+    pub circuit: &'a VmAirCompositionCircuit,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AnchorKind {
     None,
@@ -132,7 +141,10 @@ enum AnchorKind {
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 enum CompositionInputSource {
-    Vm(VmAirCompositionInputSource),
+    Segment {
+        verifier_id: u32,
+        source: VmAirCompositionInputSource,
+    },
     Recursion {
         verifier_id: u32,
         statement_scope: u32,
@@ -151,6 +163,7 @@ struct PreprocessedRow {
     source_index_0: u32,
     source_index_1: u32,
     fixed_value: [u32; 4],
+    challenge_verifier_id: u32,
 }
 
 /// Verifier-owned input-node layout for one fixed VM composition circuit.
@@ -159,7 +172,6 @@ pub struct VmAirCompositionInputPreprocessed {
     log_size: u32,
     rows: Vec<PreprocessedRow>,
     input_count: usize,
-    vm_input_count: usize,
 }
 
 impl VmAirCompositionInputPreprocessed {
@@ -189,88 +201,45 @@ impl VmAirCompositionInputPreprocessed {
         recursion_lanes: &[RecursionCompositionInputLane<'_>],
         additional_anchors: &[CircuitAnchorLane<'_>],
     ) -> Result<Self, VmAirCompositionInputError> {
-        M31Word::try_from(circuit_id)
-            .map_err(|_| VmAirCompositionInputError::CircuitIdNotCanonical { circuit_id })?;
-        let arena = reference.circuit().arena();
-        let uses = use_counts_for_outputs(&arena, reference.circuit().outputs());
-        let mut sources = HashSet::with_capacity(reference.input_bindings().len());
-        let mut selector_count = 0_usize;
-        let mut rows = Vec::with_capacity(reference.input_bindings().len());
-        for binding in reference.input_bindings() {
-            if !sources.insert(binding.source) {
-                return Err(VmAirCompositionInputError::DuplicateInputSource {
-                    source: binding.source,
-                });
-            }
-            M31Word::try_from(binding.node_id).map_err(|_| {
-                VmAirCompositionInputError::NodeIdNotCanonical {
-                    node_id: binding.node_id,
-                }
-            })?;
-            let node_id = usize::try_from(binding.node_id).map_err(|_| {
-                VmAirCompositionInputError::NodeIdDoesNotFitUsize {
-                    node_id: binding.node_id,
-                }
-            })?;
-            let node = arena
-                .nodes
-                .get(node_id)
-                .ok_or(VmAirCompositionInputError::NodeMissing {
-                    node_id: binding.node_id,
-                })?;
-            if node.op != Op::Input {
-                return Err(VmAirCompositionInputError::BindingTargetsNonInput {
-                    node_id: binding.node_id,
-                });
-            }
-            let use_count = uses[node_id];
-            M31Word::try_from(use_count).map_err(|_| {
-                VmAirCompositionInputError::UseCountNotCanonical {
-                    node_id: binding.node_id,
-                    use_count,
-                }
-            })?;
-            let (source_index_0, source_index_1) =
-                validate_source(binding.source, reference, &mut selector_count)?;
-            rows.push(PreprocessedRow {
-                source: Some(CompositionInputSource::Vm(binding.source)),
-                anchor: AnchorKind::None,
-                anchor_mode: CircuitAnchorMode::SEGMENT,
+        Self::new_with_segment_and_recursion_inputs(
+            &[SegmentCompositionInputLane {
+                verifier_id: SEGMENT_VERIFIER_ID,
                 circuit_id,
-                node_id: binding.node_id,
-                use_count,
-                source_index_0,
-                source_index_1,
-                fixed_value: [0; 4],
-            });
-        }
-        if selector_count != 1 {
-            return Err(VmAirCompositionInputError::SelectorCountMismatch {
-                actual: selector_count,
-            });
-        }
-        let expected_inputs = expected_input_count(reference)?;
-        if rows.len() != expected_inputs {
-            return Err(VmAirCompositionInputError::InputCountMismatch {
-                expected: expected_inputs,
-                actual: rows.len(),
-            });
-        }
-        let vm_input_count = rows.len();
-        drop(arena);
+                circuit: reference,
+            }],
+            recursion_lanes,
+            additional_anchors,
+        )
+    }
 
+    /// Owns every segment and recursion composition input in the shared DSL table.
+    pub fn new_with_segment_and_recursion_inputs(
+        segment_lanes: &[SegmentCompositionInputLane<'_>],
+        recursion_lanes: &[RecursionCompositionInputLane<'_>],
+        additional_anchors: &[CircuitAnchorLane<'_>],
+    ) -> Result<Self, VmAirCompositionInputError> {
+        let mut rows = Vec::new();
+        for lane in segment_lanes.iter().copied() {
+            append_segment_input_rows(&mut rows, lane)?;
+        }
         for lane in recursion_lanes.iter().copied() {
             append_recursion_input_rows(&mut rows, lane)?;
         }
         let input_count = rows.len();
 
-        let primary_anchor = CircuitAnchorLane {
-            circuit_id,
-            circuit: reference.circuit(),
-            active_in: CircuitAnchorMode::SEGMENT,
-        };
-        let mut circuit_ids = HashSet::with_capacity(additional_anchors.len() + 1);
-        append_anchor_rows(&mut rows, primary_anchor, &mut circuit_ids)?;
+        let mut circuit_ids =
+            HashSet::with_capacity(additional_anchors.len() + segment_lanes.len());
+        for lane in segment_lanes.iter().copied() {
+            append_anchor_rows(
+                &mut rows,
+                CircuitAnchorLane {
+                    circuit_id: lane.circuit_id,
+                    circuit: lane.circuit.circuit(),
+                    active_in: CircuitAnchorMode::SEGMENT,
+                },
+                &mut circuit_ids,
+            )?;
+        }
         for anchor in additional_anchors.iter().copied() {
             append_anchor_rows(&mut rows, anchor, &mut circuit_ids)?;
         }
@@ -287,10 +256,102 @@ impl VmAirCompositionInputPreprocessed {
             log_size,
             rows,
             input_count,
-            vm_input_count,
         })
     }
+}
 
+fn append_segment_input_rows(
+    rows: &mut Vec<PreprocessedRow>,
+    lane: SegmentCompositionInputLane<'_>,
+) -> Result<(), VmAirCompositionInputError> {
+    M31Word::try_from(lane.circuit_id).map_err(|_| {
+        VmAirCompositionInputError::CircuitIdNotCanonical {
+            circuit_id: lane.circuit_id,
+        }
+    })?;
+    M31Word::try_from(lane.verifier_id).map_err(|_| {
+        VmAirCompositionInputError::VerifierIdNotCanonical {
+            verifier_id: lane.verifier_id,
+        }
+    })?;
+    let arena = lane.circuit.circuit().arena();
+    let uses = use_counts_for_outputs(&arena, lane.circuit.circuit().outputs());
+    let mut sources = HashSet::with_capacity(lane.circuit.input_bindings().len());
+    let mut selector_count = 0_usize;
+    let initial_len = rows.len();
+    for binding in lane.circuit.input_bindings() {
+        if !sources.insert(binding.source) {
+            return Err(VmAirCompositionInputError::DuplicateInputSource {
+                source: binding.source,
+            });
+        }
+        M31Word::try_from(binding.node_id).map_err(|_| {
+            VmAirCompositionInputError::NodeIdNotCanonical {
+                node_id: binding.node_id,
+            }
+        })?;
+        let node_id = usize::try_from(binding.node_id).map_err(|_| {
+            VmAirCompositionInputError::NodeIdDoesNotFitUsize {
+                node_id: binding.node_id,
+            }
+        })?;
+        let node = arena
+            .nodes
+            .get(node_id)
+            .ok_or(VmAirCompositionInputError::NodeMissing {
+                node_id: binding.node_id,
+            })?;
+        if node.op != Op::Input {
+            return Err(VmAirCompositionInputError::BindingTargetsNonInput {
+                node_id: binding.node_id,
+            });
+        }
+        let use_count = uses[node_id];
+        M31Word::try_from(use_count).map_err(|_| {
+            VmAirCompositionInputError::UseCountNotCanonical {
+                node_id: binding.node_id,
+                use_count,
+            }
+        })?;
+        let (source_index_0, source_index_1) =
+            validate_source(binding.source, lane.circuit, &mut selector_count)?;
+        rows.push(PreprocessedRow {
+            source: Some(CompositionInputSource::Segment {
+                verifier_id: lane.verifier_id,
+                source: binding.source,
+            }),
+            anchor: AnchorKind::None,
+            anchor_mode: CircuitAnchorMode::SEGMENT,
+            circuit_id: lane.circuit_id,
+            node_id: binding.node_id,
+            use_count,
+            source_index_0,
+            source_index_1,
+            fixed_value: [0; 4],
+            challenge_verifier_id: if lane.verifier_id == POSEIDON2_VERIFIER_ID {
+                SEGMENT_VERIFIER_ID
+            } else {
+                lane.verifier_id
+            },
+        });
+    }
+    if selector_count != 1 {
+        return Err(VmAirCompositionInputError::SelectorCountMismatch {
+            actual: selector_count,
+        });
+    }
+    let expected_inputs = expected_input_count(lane.circuit)?;
+    let actual_inputs = rows.len() - initial_len;
+    if actual_inputs != expected_inputs {
+        return Err(VmAirCompositionInputError::InputCountMismatch {
+            expected: expected_inputs,
+            actual: actual_inputs,
+        });
+    }
+    Ok(())
+}
+
+impl VmAirCompositionInputPreprocessed {
     pub const fn log_size(&self) -> u32 {
         self.log_size
     }
@@ -318,54 +379,60 @@ impl VmAirCompositionInputPreprocessed {
             columns[ROW_MASK_COLUMN][index] = 1;
             columns[SAMPLED_VALUE_MASK_COLUMN][index] = u32::from(matches!(
                 row.source,
-                Some(CompositionInputSource::Vm(
-                    VmAirCompositionInputSource::SampledValueWord { .. }
-                )) | Some(CompositionInputSource::Recursion {
+                Some(CompositionInputSource::Segment {
+                    source: VmAirCompositionInputSource::SampledValueWord { .. },
+                    ..
+                }) | Some(CompositionInputSource::Recursion {
                     source: RecursionAirCompositionInputSource::SampledValueWord { .. },
                     ..
                 })
             ));
             columns[CLAIMED_SUM_MASK_COLUMN][index] = u32::from(matches!(
                 row.source,
-                Some(CompositionInputSource::Vm(
-                    VmAirCompositionInputSource::ClaimedSumWord { .. }
-                )) | Some(CompositionInputSource::Recursion {
+                Some(CompositionInputSource::Segment {
+                    source: VmAirCompositionInputSource::ClaimedSumWord { .. },
+                    ..
+                }) | Some(CompositionInputSource::Recursion {
                     source: RecursionAirCompositionInputSource::ClaimedSumWord { .. },
                     ..
                 })
             ));
             columns[CHALLENGE_MASK_COLUMN][index] = u32::from(matches!(
                 row.source,
-                Some(CompositionInputSource::Vm(
-                    VmAirCompositionInputSource::RelationChallengeWord { .. }
-                )) | Some(CompositionInputSource::Recursion {
+                Some(CompositionInputSource::Segment {
+                    source: VmAirCompositionInputSource::RelationChallengeWord { .. },
+                    ..
+                }) | Some(CompositionInputSource::Recursion {
                     source: RecursionAirCompositionInputSource::RelationChallengeWord { .. },
                     ..
                 })
             ));
             columns[COMPOSITION_RANDOMNESS_MASK_COLUMN][index] = u32::from(matches!(
                 row.source,
-                Some(CompositionInputSource::Vm(
-                    VmAirCompositionInputSource::CompositionRandomnessWord { .. }
-                )) | Some(CompositionInputSource::Recursion {
+                Some(CompositionInputSource::Segment {
+                    source: VmAirCompositionInputSource::CompositionRandomnessWord { .. },
+                    ..
+                }) | Some(CompositionInputSource::Recursion {
                     source: RecursionAirCompositionInputSource::CompositionRandomnessWord { .. },
                     ..
                 })
             ));
             columns[OODS_POINT_MASK_COLUMN][index] = u32::from(matches!(
                 row.source,
-                Some(CompositionInputSource::Vm(
-                    VmAirCompositionInputSource::OodsPointWord { .. }
-                )) | Some(CompositionInputSource::Recursion {
+                Some(CompositionInputSource::Segment {
+                    source: VmAirCompositionInputSource::OodsPointWord { .. },
+                    ..
+                }) | Some(CompositionInputSource::Recursion {
                     source: RecursionAirCompositionInputSource::OodsPointWord { .. },
                     ..
                 })
             ));
             columns[SELECTOR_MASK_COLUMN][index] = u32::from(matches!(
                 row.source,
-                Some(CompositionInputSource::Vm(
-                    VmAirCompositionInputSource::SegmentSelector
-                ))
+                Some(CompositionInputSource::Segment {
+                    source: VmAirCompositionInputSource::SegmentSelector,
+                    ..
+                })
             ));
             columns[CIRCUIT_ID_COLUMN][index] = row.circuit_id;
             columns[NODE_ID_COLUMN][index] = row.node_id;
@@ -390,8 +457,10 @@ impl VmAirCompositionInputPreprocessed {
             columns[FIXED_VALUE_1_COLUMN][index] = row.fixed_value[1];
             columns[FIXED_VALUE_2_COLUMN][index] = row.fixed_value[2];
             columns[FIXED_VALUE_3_COLUMN][index] = row.fixed_value[3];
-            columns[INPUT_SEGMENT_MASK_COLUMN][index] =
-                u32::from(matches!(row.source, Some(CompositionInputSource::Vm(_))));
+            columns[INPUT_SEGMENT_MASK_COLUMN][index] = u32::from(matches!(
+                row.source,
+                Some(CompositionInputSource::Segment { .. })
+            ));
             columns[INPUT_BINARY_MASK_COLUMN][index] = u32::from(matches!(
                 row.source,
                 Some(CompositionInputSource::Recursion { .. })
@@ -425,8 +494,8 @@ impl VmAirCompositionInputPreprocessed {
             {
                 columns[VERIFIER_ID_COLUMN][index] = verifier_id;
                 columns[STATEMENT_SCOPE_COLUMN][index] = statement_scope;
-            } else if matches!(row.source, Some(CompositionInputSource::Vm(_))) {
-                columns[VERIFIER_ID_COLUMN][index] = SEGMENT_VERIFIER_ID;
+            } else if let Some(CompositionInputSource::Segment { verifier_id, .. }) = row.source {
+                columns[VERIFIER_ID_COLUMN][index] = verifier_id;
             }
             columns[RECURSION_CLAIMED_SUM_MASK_COLUMN][index] = u32::from(matches!(
                 row.source,
@@ -435,6 +504,7 @@ impl VmAirCompositionInputPreprocessed {
                     ..
                 })
             ));
+            columns[CHALLENGE_VERIFIER_ID_COLUMN][index] = row.challenge_verifier_id;
         }
         let domain = CanonicCoset::new(self.log_size).circle_domain();
         columns
@@ -554,6 +624,7 @@ fn append_recursion_input_rows(
             source_index_0,
             source_index_1,
             fixed_value: [0; 4],
+            challenge_verifier_id: lane.verifier_id,
         });
     }
     if parent_selector_count != 1 || child_selector_count != 3 {
@@ -658,6 +729,7 @@ fn anchor_row(
         source_index_0: 0,
         source_index_1: 0,
         fixed_value,
+        challenge_verifier_id: 0,
     }
 }
 
@@ -858,6 +930,7 @@ stwo_macros::define_air_fns! {
         verifier_id: "recursion_circuit_input_verifier_id",
         statement_scope: "recursion_circuit_input_statement_scope",
         recursion_claimed_sum_mask: "recursion_circuit_input_recursion_claimed_sum_mask",
+        challenge_verifier_id: "recursion_circuit_input_challenge_verifier_id",
     },
     embedded_params: [
         segment_active, binary_active, empty_active,
@@ -883,7 +956,7 @@ stwo_macros::define_air_fns! {
         input_segment_mask, input_binary_mask,
         parent_binary_selector_mask, child_kind_selector_mask,
         statement_word_mask, verifier_id, statement_scope,
-        recursion_claimed_sum_mask,
+        recursion_claimed_sum_mask, challenge_verifier_id,
         segment_active, binary_active, empty_active,
         sampled_value_kind, vm_claimed_sum_kind, recursion_claimed_sum_kind,
         challenge_scope, composition_randomness_kind, oods_point_kind,
@@ -919,7 +992,7 @@ stwo_macros::define_air_fns! {
             verifier_id, recursion_claimed_sum_kind, source_index_0, source_index_1, value,
         );
         consume(input_active * challenge_mask) challenge_word(
-            verifier_id, challenge_scope, source_index_0, source_index_1, value,
+            challenge_verifier_id, challenge_scope, source_index_0, source_index_1, value,
         );
         consume(input_active * composition_randomness_mask) randomness_word(
             verifier_id, composition_randomness_kind, source_index_0, source_index_1, value,
@@ -964,7 +1037,7 @@ pub fn eval_for_proof_kind(
         binary_active: BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
         empty_active: BaseField::from(u32::from(proof_kind == ProofKind::EmptyLeaf)),
         sampled_value_kind: BaseField::from(VerifierInputKind::SampledValue.as_u32()),
-        vm_claimed_sum_kind: BaseField::from(VerifierInputKind::VmAirClaimedSum.as_u32()),
+        vm_claimed_sum_kind: BaseField::from(VerifierInputKind::AirClaimedSum.as_u32()),
         recursion_claimed_sum_kind: BaseField::from(VerifierInputKind::ClaimedSum.as_u32()),
         challenge_scope: BaseField::from(AIR_EVALUATION_CHALLENGE_SCOPE),
         composition_randomness_kind: BaseField::from(
@@ -1002,7 +1075,7 @@ pub fn gen_interaction_trace(
         BaseField::from(u32::from(proof_kind == ProofKind::BinaryNode)),
         BaseField::from(u32::from(proof_kind == ProofKind::EmptyLeaf)),
         BaseField::from(VerifierInputKind::SampledValue.as_u32()),
-        BaseField::from(VerifierInputKind::VmAirClaimedSum.as_u32()),
+        BaseField::from(VerifierInputKind::AirClaimedSum.as_u32()),
         BaseField::from(VerifierInputKind::ClaimedSum.as_u32()),
         BaseField::from(AIR_EVALUATION_CHALLENGE_SCOPE),
         BaseField::from(VerifierRandomnessKind::CompositionRandomness.as_u32()),
@@ -1047,21 +1120,81 @@ pub fn push_air_composition_inputs(
     recursion_witnesses: &[RecursionCompositionInputLane<'_>],
     proof_kind: ProofKind,
 ) -> Result<(), VmAirCompositionInputError> {
+    push_segment_air_composition_inputs(
+        table,
+        preprocessed,
+        &[SegmentCompositionInputLane {
+            verifier_id: SEGMENT_VERIFIER_ID,
+            circuit_id: preprocessed
+                .rows
+                .iter()
+                .find_map(|row| {
+                    matches!(
+                        row.source,
+                        Some(CompositionInputSource::Segment {
+                            verifier_id: SEGMENT_VERIFIER_ID,
+                            ..
+                        })
+                    )
+                    .then_some(row.circuit_id)
+                })
+                .ok_or(VmAirCompositionInputError::VmInputLaneMissing)?,
+            circuit: vm_reference,
+        }],
+        &[SegmentCompositionInputLane {
+            verifier_id: SEGMENT_VERIFIER_ID,
+            circuit_id: preprocessed
+                .rows
+                .iter()
+                .find_map(|row| {
+                    matches!(
+                        row.source,
+                        Some(CompositionInputSource::Segment {
+                            verifier_id: SEGMENT_VERIFIER_ID,
+                            ..
+                        })
+                    )
+                    .then_some(row.circuit_id)
+                })
+                .ok_or(VmAirCompositionInputError::VmInputLaneMissing)?,
+            circuit: vm_witness,
+        }],
+        recursion_references,
+        recursion_witnesses,
+        proof_kind,
+    )
+}
+
+/// Materializes all segment and recursion-child composition inputs.
+#[allow(clippy::too_many_arguments)]
+pub fn push_segment_air_composition_inputs(
+    table: &mut VmAirCompositionInputTable,
+    preprocessed: &VmAirCompositionInputPreprocessed,
+    segment_references: &[SegmentCompositionInputLane<'_>],
+    segment_witnesses: &[SegmentCompositionInputLane<'_>],
+    recursion_references: &[RecursionCompositionInputLane<'_>],
+    recursion_witnesses: &[RecursionCompositionInputLane<'_>],
+    proof_kind: ProofKind,
+) -> Result<(), VmAirCompositionInputError> {
     let mut values = HashMap::with_capacity(preprocessed.input_count);
-    append_vm_input_values(
-        &mut values,
-        vm_reference,
-        vm_witness,
-        proof_kind == ProofKind::SegmentLeaf,
-        preprocessed
-            .rows
-            .iter()
-            .find_map(|row| {
-                matches!(row.source, Some(CompositionInputSource::Vm(_))).then_some(row.circuit_id)
-            })
-            .ok_or(VmAirCompositionInputError::VmInputLaneMissing)?,
-        preprocessed.vm_input_count,
-    )?;
+    if segment_references.len() != segment_witnesses.len() {
+        return Err(VmAirCompositionInputError::SegmentLaneCountMismatch {
+            expected: segment_references.len(),
+            actual: segment_witnesses.len(),
+        });
+    }
+    for (reference, witness) in segment_references
+        .iter()
+        .copied()
+        .zip(segment_witnesses.iter().copied())
+    {
+        append_segment_input_values(
+            &mut values,
+            reference,
+            witness,
+            proof_kind == ProofKind::SegmentLeaf,
+        )?;
+    }
     if recursion_references.len() != recursion_witnesses.len() {
         return Err(VmAirCompositionInputError::RecursionLaneCountMismatch {
             expected: recursion_references.len(),
@@ -1107,28 +1240,22 @@ pub fn push_air_composition_inputs(
     Ok(())
 }
 
-fn append_vm_input_values(
+fn append_segment_input_values(
     values: &mut HashMap<(u32, u32, CompositionInputSource), u32>,
-    reference: &VmAirCompositionCircuit,
-    witness: &VmAirCompositionCircuit,
+    reference: SegmentCompositionInputLane<'_>,
+    witness: SegmentCompositionInputLane<'_>,
     active: bool,
-    circuit_id: u32,
-    expected_input_count: usize,
 ) -> Result<(), VmAirCompositionInputError> {
-    if reference.profile() != witness.profile()
-        || reference.input_bindings() != witness.input_bindings()
-        || reference.circuit().outputs() != witness.circuit().outputs()
+    if reference.verifier_id != witness.verifier_id
+        || reference.circuit_id != witness.circuit_id
+        || reference.circuit.profile() != witness.circuit.profile()
+        || reference.circuit.input_bindings() != witness.circuit.input_bindings()
+        || reference.circuit.circuit().outputs() != witness.circuit.circuit().outputs()
     {
         return Err(VmAirCompositionInputError::InputLayoutMismatch);
     }
-    if witness.input_bindings().len() != expected_input_count {
-        return Err(VmAirCompositionInputError::InputCountMismatch {
-            expected: expected_input_count,
-            actual: witness.input_bindings().len(),
-        });
-    }
-    let arena = witness.circuit().arena();
-    for binding in witness.input_bindings() {
+    let arena = witness.circuit.circuit().arena();
+    for binding in witness.circuit.input_bindings() {
         let node_id = usize::try_from(binding.node_id).map_err(|_| {
             VmAirCompositionInputError::NodeIdDoesNotFitUsize {
                 node_id: binding.node_id,
@@ -1166,9 +1293,12 @@ fn append_vm_input_values(
         if values
             .insert(
                 (
-                    circuit_id,
+                    witness.circuit_id,
                     binding.node_id,
-                    CompositionInputSource::Vm(binding.source),
+                    CompositionInputSource::Segment {
+                        verifier_id: witness.verifier_id,
+                        source: binding.source,
+                    },
                 ),
                 expected,
             )
@@ -1327,6 +1457,10 @@ pub enum VmAirCompositionInputError {
     RecursionSecureWordIndexOutOfRange {
         word_index: u32,
     },
+    SegmentLaneCountMismatch {
+        expected: usize,
+        actual: usize,
+    },
     RecursionLaneCountMismatch {
         expected: usize,
         actual: usize,
@@ -1369,8 +1503,8 @@ mod tests {
     use super::*;
     use crate::air_relation_parameters::RELATION_CHALLENGE_WORD_COUNT;
     use crate::vm_air_composition_circuit::{
-        VmAirCompositionWitness, build_vm_air_composition_circuit,
-        build_vm_air_composition_reference,
+        VmAirCompositionWitness, build_poseidon2_air_composition_reference,
+        build_vm_air_composition_circuit, build_vm_air_composition_reference,
     };
     use crate::vm_air_program::VmAirProgram;
 
@@ -1490,5 +1624,57 @@ mod tests {
             result,
             Err(VmAirCompositionInputError::InactiveInputIsNonZero { .. })
         ));
+    }
+
+    #[test]
+    fn poseidon2_composition_uses_the_vm_relation_challenge_lane() {
+        let vm = build_vm_air_composition_reference(component_log_sizes())
+            .expect("fixture VM reference is constructible");
+        let poseidon2 = build_poseidon2_air_composition_reference(11)
+            .expect("fixture Poseidon2 reference is constructible");
+        let preprocessing =
+            VmAirCompositionInputPreprocessed::new_with_segment_and_recursion_inputs(
+                &[
+                    SegmentCompositionInputLane {
+                        verifier_id: SEGMENT_VERIFIER_ID,
+                        circuit_id: CIRCUIT_ID,
+                        circuit: &vm,
+                    },
+                    SegmentCompositionInputLane {
+                        verifier_id: POSEIDON2_VERIFIER_ID,
+                        circuit_id: CIRCUIT_ID + 1,
+                        circuit: &poseidon2,
+                    },
+                ],
+                &[],
+                &[],
+            )
+            .expect("fixture segment composition lanes are canonical");
+        let poseidon2_challenges = preprocessing
+            .rows
+            .iter()
+            .filter(|row| {
+                matches!(
+                    row.source,
+                    Some(CompositionInputSource::Segment {
+                        verifier_id: POSEIDON2_VERIFIER_ID,
+                        source: VmAirCompositionInputSource::RelationChallengeWord { .. },
+                    })
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            (
+                poseidon2_challenges.len(),
+                poseidon2_challenges
+                    .iter()
+                    .all(|row| row.challenge_verifier_id == SEGMENT_VERIFIER_ID),
+            ),
+            (
+                poseidon2.profile().relation_challenge_count() as usize
+                    * RELATION_CHALLENGE_WORD_COUNT,
+                true,
+            )
+        );
     }
 }

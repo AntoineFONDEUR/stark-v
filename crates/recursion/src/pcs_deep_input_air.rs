@@ -23,7 +23,8 @@ use stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId;
 use stwo_constraint_framework::relation;
 
 use super::control_air::{
-    LEFT_RECURSION_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID, SEGMENT_VERIFIER_ID,
+    LEFT_RECURSION_VERIFIER_ID, POSEIDON2_VERIFIER_ID, RIGHT_RECURSION_VERIFIER_ID,
+    SEGMENT_VERIFIER_ID,
 };
 use super::pcs_deep_circuit::{PcsDeepCircuit, PcsDeepInputSource};
 use super::query_position_air::{QueryPositionKind, QueryPositionRelations};
@@ -104,7 +105,7 @@ struct PreprocessedRow {
     source_indices: [u32; 3],
 }
 
-/// Verifier-owned input-node layout for the VM lane and two child lanes.
+/// Verifier-owned input-node layout for both segment lanes and two child lanes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PcsDeepInputPreprocessed {
     log_size: u32,
@@ -112,7 +113,7 @@ pub struct PcsDeepInputPreprocessed {
 }
 
 impl PcsDeepInputPreprocessed {
-    pub fn new(lanes: [PcsDeepCircuitLane<'_>; 3]) -> Result<Self, PcsDeepInputError> {
+    pub fn new(lanes: [PcsDeepCircuitLane<'_>; 4]) -> Result<Self, PcsDeepInputError> {
         validate_lane_order(&lanes)?;
         let mut circuit_ids = HashSet::with_capacity(lanes.len());
         let mut rows = Vec::new();
@@ -278,9 +279,10 @@ impl PcsDeepInputPreprocessed {
     }
 }
 
-fn validate_lane_order(lanes: &[PcsDeepCircuitLane<'_>; 3]) -> Result<(), PcsDeepInputError> {
+fn validate_lane_order(lanes: &[PcsDeepCircuitLane<'_>; 4]) -> Result<(), PcsDeepInputError> {
     let expected = [
         SEGMENT_VERIFIER_ID,
+        POSEIDON2_VERIFIER_ID,
         LEFT_RECURSION_VERIFIER_ID,
         RIGHT_RECURSION_VERIFIER_ID,
     ];
@@ -297,7 +299,7 @@ fn validate_lane_order(lanes: &[PcsDeepCircuitLane<'_>; 3]) -> Result<(), PcsDee
 
 fn lane_masks(verifier_id: u32) -> Result<(u32, u32), PcsDeepInputError> {
     match verifier_id {
-        SEGMENT_VERIFIER_ID => Ok((1, 0)),
+        SEGMENT_VERIFIER_ID | POSEIDON2_VERIFIER_ID => Ok((1, 0)),
         LEFT_RECURSION_VERIFIER_ID | RIGHT_RECURSION_VERIFIER_ID => Ok((0, 1)),
         _ => Err(PcsDeepInputError::UnknownVerifierId { verifier_id }),
     }
@@ -599,8 +601,8 @@ pub fn gen_interaction_trace(
 pub fn push_pcs_deep_inputs(
     table: &mut PcsDeepInputTable,
     preprocessed: &PcsDeepInputPreprocessed,
-    references: [PcsDeepCircuitLane<'_>; 3],
-    witnesses: [PcsDeepCircuitLane<'_>; 3],
+    references: [PcsDeepCircuitLane<'_>; 4],
+    witnesses: [PcsDeepCircuitLane<'_>; 4],
     proof_kind: ProofKind,
 ) -> Result<(), PcsDeepInputError> {
     validate_lane_order(&references)?;
@@ -695,7 +697,7 @@ pub fn push_pcs_deep_inputs(
 
 fn verifier_is_active(verifier_id: u32, proof_kind: ProofKind) -> Result<bool, PcsDeepInputError> {
     match verifier_id {
-        SEGMENT_VERIFIER_ID => Ok(proof_kind == ProofKind::SegmentLeaf),
+        SEGMENT_VERIFIER_ID | POSEIDON2_VERIFIER_ID => Ok(proof_kind == ProofKind::SegmentLeaf),
         LEFT_RECURSION_VERIFIER_ID | RIGHT_RECURSION_VERIFIER_ID => {
             Ok(proof_kind == ProofKind::BinaryNode)
         }
@@ -804,16 +806,17 @@ mod tests {
         PcsDeepProfile, PcsDeepWitness, build_pcs_deep_circuit, build_pcs_deep_reference,
     };
 
-    const CIRCUIT_IDS: [u32; 3] = [101, 102, 103];
+    const CIRCUIT_IDS: [u32; 4] = [101, 102, 103, 104];
 
     struct CircuitSet {
         segment: PcsDeepCircuit,
+        poseidon2: PcsDeepCircuit,
         left: PcsDeepCircuit,
         right: PcsDeepCircuit,
     }
 
     impl CircuitSet {
-        fn lanes(&self) -> [PcsDeepCircuitLane<'_>; 3] {
+        fn lanes(&self) -> [PcsDeepCircuitLane<'_>; 4] {
             [
                 PcsDeepCircuitLane {
                     verifier_id: SEGMENT_VERIFIER_ID,
@@ -821,13 +824,18 @@ mod tests {
                     circuit: &self.segment,
                 },
                 PcsDeepCircuitLane {
-                    verifier_id: LEFT_RECURSION_VERIFIER_ID,
+                    verifier_id: POSEIDON2_VERIFIER_ID,
                     circuit_id: CIRCUIT_IDS[1],
+                    circuit: &self.poseidon2,
+                },
+                PcsDeepCircuitLane {
+                    verifier_id: LEFT_RECURSION_VERIFIER_ID,
+                    circuit_id: CIRCUIT_IDS[2],
                     circuit: &self.left,
                 },
                 PcsDeepCircuitLane {
                     verifier_id: RIGHT_RECURSION_VERIFIER_ID,
-                    circuit_id: CIRCUIT_IDS[2],
+                    circuit_id: CIRCUIT_IDS[3],
                     circuit: &self.right,
                 },
             ]
@@ -847,6 +855,7 @@ mod tests {
     fn inactive_set(profile: &PcsDeepProfile) -> CircuitSet {
         CircuitSet {
             segment: build_pcs_deep_reference(profile).expect("segment reference is valid"),
+            poseidon2: build_pcs_deep_reference(profile).expect("Poseidon2 reference is valid"),
             left: build_pcs_deep_reference(profile).expect("left reference is valid"),
             right: build_pcs_deep_reference(profile).expect("right reference is valid"),
         }
@@ -884,6 +893,11 @@ mod tests {
                 active_circuit(profile)
             } else {
                 build_pcs_deep_reference(profile).expect("segment reference is valid")
+            },
+            poseidon2: if kind == ProofKind::SegmentLeaf {
+                active_circuit(profile)
+            } else {
+                build_pcs_deep_reference(profile).expect("Poseidon2 reference is valid")
             },
             left: if kind == ProofKind::BinaryNode {
                 active_circuit(profile)
@@ -1014,7 +1028,7 @@ mod tests {
                 .iter()
                 .filter(|row| matches!(row.source, PcsDeepInputSource::AnswerWord { .. }))
                 .count(),
-            3 * SECURE_WORD_COUNT
+            references.lanes().len() * SECURE_WORD_COUNT
         );
     }
 }

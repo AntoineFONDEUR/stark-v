@@ -10,6 +10,7 @@
 use core::fmt;
 
 use air::digest::{Digest8, M31Word, ProtocolId, VmPublicClaimDigest};
+use stwo::core::fields::qm31::SecureField;
 
 use super::kernel::{VerifierControlPlan, VerifierSchema, VerifierStep};
 use super::protocol::CanonicalWords;
@@ -35,6 +36,8 @@ pub enum VerifierPublicClaim {
     /// A segment leaf keeps the variable-width VM claim private and binds its
     /// canonical digest into the VM transcript.
     Vm(VmPublicClaimDigest),
+    /// A Poseidon2 proof binds its fixed main-trace log size.
+    Poseidon2([M31Word; 1]),
     /// A recursion proof's complete public claim is already `BindStatement`.
     Recursion,
 }
@@ -43,6 +46,7 @@ impl VerifierPublicClaim {
     fn validate(self, schema: VerifierSchema) -> Result<(), TranscriptProgramError> {
         let actual = match self {
             Self::Vm(_) => VerifierSchema::Vm,
+            Self::Poseidon2(_) => VerifierSchema::Poseidon2,
             Self::Recursion => VerifierSchema::Recursion,
         };
         if actual == schema {
@@ -58,9 +62,17 @@ impl VerifierPublicClaim {
     fn words(&self) -> &[M31Word] {
         match self {
             Self::Vm(digest) => digest.digest().words(),
+            Self::Poseidon2(log_size) => log_size,
             Self::Recursion => &[],
         }
     }
+}
+
+/// Cross-proof values fixed after both segment main commitments.
+#[derive(Clone, Copy, Debug)]
+pub struct JointInteractionContext {
+    pub seeds: [SecureField; 2],
+    pub shared_relation_sum: Option<SecureField>,
 }
 
 impl TranscriptEffect {
@@ -81,11 +93,15 @@ impl VerifierStep {
             | Self::BindPcsParameters
             | Self::AbsorbTraceCommitment { .. }
             | Self::AbsorbPublicClaim
+            | Self::AbsorbJointInteractionSeeds
+            | Self::AbsorbJointInteractionNonce { .. }
+            | Self::AbsorbSharedRelationSum
             | Self::AbsorbClaimedSums { .. }
             | Self::AbsorbSampledValues { .. }
             | Self::AbsorbFriCommitment { .. }
             | Self::AbsorbLastLayerCoefficients { .. } => Some(TranscriptEffect::Mix),
-            Self::DrawRelationChallenge { .. }
+            Self::DrawInteractionSeed
+            | Self::DrawRelationChallenge { .. }
             | Self::DrawCompositionRandomness
             | Self::DrawOodsPoint
             | Self::DrawDeepRandomness
@@ -95,6 +111,8 @@ impl VerifierStep {
                 Some(TranscriptEffect::Pow)
             }
             Self::AccumulatePublicLogupTerm { .. }
+            | Self::AssertVmSharedRelation
+            | Self::AssertSegmentSharedRelationZero
             | Self::AssertGlobalLogupZero
             | Self::EvaluateAirInstruction { .. }
             | Self::AssertComposition { .. }
@@ -219,6 +237,164 @@ pub fn execute_fixed_transcript<
 where
     B: TranscriptBackend<Error = TranscriptError>,
 {
+    execute_fixed_transcript_inner(
+        backend,
+        plan,
+        protocol_id,
+        statement,
+        public_claim,
+        proof,
+        None,
+    )
+}
+
+/// Executes one constituent transcript with the segment's shared binder.
+pub fn execute_fixed_transcript_with_joint<
+    B,
+    const N_COMMITMENTS: usize,
+    const N_CLAIMED_SUMS: usize,
+    const N_SAMPLED_VALUES: usize,
+    const N_QUERY_VALUES: usize,
+    const N_TRACE_PATHS: usize,
+    const N_FRI_LAYERS: usize,
+    const N_QUERIES: usize,
+    const FOLD_WIDTH: usize,
+    const N_LAST_LAYER_COEFFICIENTS: usize,
+    const MAX_MERKLE_DEPTH: usize,
+>(
+    backend: B,
+    plan: &VerifierControlPlan,
+    protocol_id: ProtocolId,
+    statement: &SpanStatement,
+    public_claim: VerifierPublicClaim,
+    proof: &FixedStarkProofWire<
+        N_COMMITMENTS,
+        N_CLAIMED_SUMS,
+        N_SAMPLED_VALUES,
+        N_QUERY_VALUES,
+        N_TRACE_PATHS,
+        N_FRI_LAYERS,
+        N_QUERIES,
+        FOLD_WIDTH,
+        N_LAST_LAYER_COEFFICIENTS,
+        MAX_MERKLE_DEPTH,
+    >,
+    joint: JointInteractionContext,
+) -> Result<VerifierTranscriptExecution<B>, TranscriptProgramError>
+where
+    B: TranscriptBackend<Error = TranscriptError>,
+{
+    execute_fixed_transcript_inner(
+        backend,
+        plan,
+        protocol_id,
+        statement,
+        public_claim,
+        proof,
+        Some(joint),
+    )
+}
+
+/// Replays the public main-commitment prefix and returns its constituent seed.
+pub fn derive_interaction_seed<
+    B,
+    const N_COMMITMENTS: usize,
+    const N_CLAIMED_SUMS: usize,
+    const N_SAMPLED_VALUES: usize,
+    const N_QUERY_VALUES: usize,
+    const N_TRACE_PATHS: usize,
+    const N_FRI_LAYERS: usize,
+    const N_QUERIES: usize,
+    const FOLD_WIDTH: usize,
+    const N_LAST_LAYER_COEFFICIENTS: usize,
+    const MAX_MERKLE_DEPTH: usize,
+>(
+    backend: B,
+    plan: &VerifierControlPlan,
+    protocol_id: ProtocolId,
+    statement: &SpanStatement,
+    public_claim: VerifierPublicClaim,
+    proof: &FixedStarkProofWire<
+        N_COMMITMENTS,
+        N_CLAIMED_SUMS,
+        N_SAMPLED_VALUES,
+        N_QUERY_VALUES,
+        N_TRACE_PATHS,
+        N_FRI_LAYERS,
+        N_QUERIES,
+        FOLD_WIDTH,
+        N_LAST_LAYER_COEFFICIENTS,
+        MAX_MERKLE_DEPTH,
+    >,
+) -> Result<SecureField, TranscriptProgramError>
+where
+    B: TranscriptBackend<Error = TranscriptError>,
+{
+    public_claim.validate(plan.schema())?;
+    validate_input_counts(plan, proof)?;
+    let mut kernel = TranscriptKernel::new(backend);
+    for (sequence, step) in plan.steps().iter().copied().enumerate() {
+        let sequence = u32::try_from(sequence)
+            .map_err(|_| TranscriptProgramError::SequenceOutOfRange { sequence })?;
+        let draw = execute_step(
+            &mut kernel,
+            sequence,
+            step,
+            protocol_id,
+            statement,
+            &public_claim,
+            plan,
+            proof,
+            None,
+        )?;
+        if step == VerifierStep::DrawInteractionSeed {
+            let words = draw.ok_or(TranscriptProgramError::InteractionSeedDrawMissing)?;
+            let limbs: [M31Word; 4] = words[..4]
+                .try_into()
+                .expect("one transcript block contains one secure field");
+            return Ok(SecureField::from_m31_array(
+                limbs.map(stwo::core::fields::m31::M31::from),
+            ));
+        }
+    }
+    Err(TranscriptProgramError::InteractionSeedStepMissing)
+}
+
+fn execute_fixed_transcript_inner<
+    B,
+    const N_COMMITMENTS: usize,
+    const N_CLAIMED_SUMS: usize,
+    const N_SAMPLED_VALUES: usize,
+    const N_QUERY_VALUES: usize,
+    const N_TRACE_PATHS: usize,
+    const N_FRI_LAYERS: usize,
+    const N_QUERIES: usize,
+    const FOLD_WIDTH: usize,
+    const N_LAST_LAYER_COEFFICIENTS: usize,
+    const MAX_MERKLE_DEPTH: usize,
+>(
+    backend: B,
+    plan: &VerifierControlPlan,
+    protocol_id: ProtocolId,
+    statement: &SpanStatement,
+    public_claim: VerifierPublicClaim,
+    proof: &FixedStarkProofWire<
+        N_COMMITMENTS,
+        N_CLAIMED_SUMS,
+        N_SAMPLED_VALUES,
+        N_QUERY_VALUES,
+        N_TRACE_PATHS,
+        N_FRI_LAYERS,
+        N_QUERIES,
+        FOLD_WIDTH,
+        N_LAST_LAYER_COEFFICIENTS,
+        MAX_MERKLE_DEPTH,
+    >,
+    joint: Option<JointInteractionContext>,
+) -> Result<VerifierTranscriptExecution<B>, TranscriptProgramError>
+where
+    B: TranscriptBackend<Error = TranscriptError>,
+{
     public_claim.validate(plan.schema())?;
     validate_input_counts(plan, proof)?;
 
@@ -237,7 +413,28 @@ where
             &public_claim,
             plan,
             proof,
+            joint,
         )?;
+        if step == VerifierStep::DrawInteractionSeed {
+            let joint = joint.ok_or(TranscriptProgramError::JointInteractionContextMissing)?;
+            let words = draw.ok_or(TranscriptProgramError::InteractionSeedDrawMissing)?;
+            let limbs: [M31Word; 4] = words[..4]
+                .try_into()
+                .expect("one transcript block contains one secure field");
+            let actual = SecureField::from_m31_array(limbs.map(stwo::core::fields::m31::M31::from));
+            let expected = match plan.schema() {
+                VerifierSchema::Vm => joint.seeds[0],
+                VerifierSchema::Poseidon2 => joint.seeds[1],
+                VerifierSchema::Recursion => {
+                    return Err(TranscriptProgramError::UnexpectedInteractionSeedSchema);
+                }
+            };
+            if actual != expected {
+                return Err(TranscriptProgramError::JointInteractionSeedMismatch {
+                    schema: plan.schema(),
+                });
+            }
+        }
         let after = kernel.position();
         let Some(effect) = step.transcript_effect() else {
             if before != after {
@@ -307,6 +504,7 @@ fn execute_step<
         N_LAST_LAYER_COEFFICIENTS,
         MAX_MERKLE_DEPTH,
     >,
+    joint: Option<JointInteractionContext>,
 ) -> Result<Option<[M31Word; TRANSCRIPT_DRAW_WORDS]>, TranscriptProgramError>
 where
     B: TranscriptBackend<Error = TranscriptError>,
@@ -339,6 +537,18 @@ where
         VerifierStep::AbsorbPublicClaim => {
             absorb_operation(kernel, sequence, step, public_claim.words())?;
         }
+        VerifierStep::AbsorbJointInteractionSeeds => {
+            let joint = joint.ok_or(TranscriptProgramError::JointInteractionContextMissing)?;
+            absorb_operation(kernel, sequence, step, &secure_field_words(&joint.seeds))?;
+        }
+        VerifierStep::AbsorbJointInteractionNonce { .. } => {
+            absorb_operation(
+                kernel,
+                sequence,
+                step,
+                &encode_u64_words(proof.interaction_pow),
+            )?;
+        }
         VerifierStep::VerifyAndAbsorbInteractionPow { bits } => {
             absorb_operation(
                 kernel,
@@ -348,7 +558,8 @@ where
             )?;
             kernel.verify_pow_from_current_digest(proof.interaction_pow, bits)?;
         }
-        VerifierStep::DrawRelationChallenge { .. }
+        VerifierStep::DrawInteractionSeed
+        | VerifierStep::DrawRelationChallenge { .. }
         | VerifierStep::DrawCompositionRandomness
         | VerifierStep::DrawOodsPoint
         | VerifierStep::DrawDeepRandomness
@@ -359,6 +570,12 @@ where
         }
         VerifierStep::AbsorbClaimedSums { .. } => {
             absorb_operation(kernel, sequence, step, &qm31_words(&proof.claimed_sums))?;
+        }
+        VerifierStep::AbsorbSharedRelationSum => {
+            let shared = joint
+                .and_then(|joint| joint.shared_relation_sum)
+                .ok_or(TranscriptProgramError::SharedRelationSumMissing)?;
+            absorb_operation(kernel, sequence, step, &secure_field_words(&[shared]))?;
         }
         VerifierStep::AbsorbSampledValues { .. } => {
             absorb_operation(kernel, sequence, step, &qm31_words(&proof.sampled_values))?;
@@ -388,6 +605,8 @@ where
             kernel.verify_pow_from_current_digest(proof.pcs_pow, bits)?;
         }
         VerifierStep::AccumulatePublicLogupTerm { .. }
+        | VerifierStep::AssertVmSharedRelation
+        | VerifierStep::AssertSegmentSharedRelationZero
         | VerifierStep::AssertGlobalLogupZero
         | VerifierStep::EvaluateAirInstruction { .. }
         | VerifierStep::AssertComposition { .. }
@@ -442,6 +661,14 @@ fn qm31_words<const N: usize>(values: &[Qm31Wire; N]) -> Vec<M31Word> {
     values
         .iter()
         .flat_map(|value| value.words().iter().copied())
+        .collect()
+}
+
+fn secure_field_words(values: &[SecureField]) -> Vec<M31Word> {
+    values
+        .iter()
+        .flat_map(|value| value.to_m31_array())
+        .map(M31Word::from)
         .collect()
 }
 
@@ -577,6 +804,14 @@ pub enum TranscriptProgramError {
         len: usize,
     },
     QueryCountOverflow,
+    JointInteractionContextMissing,
+    InteractionSeedStepMissing,
+    InteractionSeedDrawMissing,
+    UnexpectedInteractionSeedSchema,
+    JointInteractionSeedMismatch {
+        schema: VerifierSchema,
+    },
+    SharedRelationSumMissing,
     UnexpectedTranscriptTransition {
         sequence: u32,
     },
@@ -627,6 +862,25 @@ impl fmt::Display for TranscriptProgramError {
                 )
             }
             Self::QueryCountOverflow => write!(formatter, "raw query count overflowed u32"),
+            Self::JointInteractionContextMissing => {
+                formatter.write_str("segment transcript is missing the joint interaction context")
+            }
+            Self::InteractionSeedStepMissing => {
+                formatter.write_str("constituent transcript has no interaction-seed step")
+            }
+            Self::InteractionSeedDrawMissing => {
+                formatter.write_str("interaction-seed step produced no transcript draw")
+            }
+            Self::UnexpectedInteractionSeedSchema => {
+                formatter.write_str("recursion transcript unexpectedly draws an interaction seed")
+            }
+            Self::JointInteractionSeedMismatch { schema } => write!(
+                formatter,
+                "{schema:?} transcript seed differs from the joint interaction context"
+            ),
+            Self::SharedRelationSumMissing => {
+                formatter.write_str("VM transcript is missing the shared relation sum")
+            }
             Self::UnexpectedTranscriptTransition { sequence } => write!(
                 formatter,
                 "non-transcript verifier step {sequence} changed transcript coordinates"
@@ -656,6 +910,7 @@ impl std::error::Error for TranscriptProgramError {}
 #[cfg(test)]
 pub(crate) mod tests {
     use air::digest::{IoDigest, MemoryDigest, ProgramDigest};
+    use num_traits::Zero;
     use prover::poseidon2_channel::Poseidon2M31Channel;
     use rstest::rstest;
     use stwo::core::channel::Channel;
@@ -849,7 +1104,43 @@ pub(crate) mod tests {
         match plan.schema() {
             VerifierSchema::Vm => VerifierPublicClaim::Vm(VmPublicClaimDigest::from(digest(180))),
             VerifierSchema::Recursion => VerifierPublicClaim::Recursion,
+            VerifierSchema::Poseidon2 => VerifierPublicClaim::Poseidon2([word(180)]),
         }
+    }
+
+    fn execute_fixture_transcript<B: TranscriptBackend<Error = TranscriptError>>(
+        backend: B,
+        plan: &VerifierControlPlan,
+        protocol: ProtocolId,
+        statement: &SpanStatement,
+        claim: VerifierPublicClaim,
+        proof: &TestProof,
+    ) -> Result<VerifierTranscriptExecution<B>, TranscriptProgramError> {
+        if plan.schema() == VerifierSchema::Recursion {
+            return execute_fixed_transcript(backend, plan, protocol, statement, claim, proof);
+        }
+        let seed = derive_interaction_seed(
+            RecordingTranscriptBackend::default(),
+            plan,
+            protocol,
+            statement,
+            claim,
+            proof,
+        )?;
+        let mut seeds = [SecureField::zero(); 2];
+        seeds[usize::from(plan.schema() == VerifierSchema::Poseidon2)] = seed;
+        execute_fixed_transcript_with_joint(
+            backend,
+            plan,
+            protocol,
+            statement,
+            claim,
+            proof,
+            JointInteractionContext {
+                seeds,
+                shared_relation_sum: Some(SecureField::from(proof.claimed_sums[0])),
+            },
+        )
     }
 
     fn recording_execution()
@@ -871,27 +1162,106 @@ pub(crate) mod tests {
     ) -> VerifierTranscriptExecution<crate::transcript::RecordingTranscriptBackend> {
         let mut proof = proof();
         proof.claimed_sums[0] = Qm31Wire::from(claimed_sum);
-        execute_fixed_transcript(
+        let protocol = ProtocolId::from(digest(9));
+        let statement = statement(statement_seed);
+        let claim = public_claim(plan);
+        execute_fixture_transcript(
             RecordingTranscriptBackend::default(),
             plan,
-            ProtocolId::from(digest(9)),
-            &statement(statement_seed),
-            public_claim(plan),
+            protocol,
+            &statement,
+            claim,
             &proof,
         )
-        .expect("fixture executes the complete typed transcript")
+        .expect("fixture executes the complete typed joint transcript")
+    }
+
+    pub(crate) fn recording_joint_executions_for_with_claimed_sums(
+        vm_plan: &VerifierControlPlan,
+        poseidon2_plan: &VerifierControlPlan,
+        statement_seed: u16,
+        vm_claimed_sum: SecureField,
+        poseidon2_claimed_sum: SecureField,
+        shared_relation_sum: SecureField,
+    ) -> (
+        VerifierTranscriptExecution<crate::transcript::RecordingTranscriptBackend>,
+        VerifierTranscriptExecution<crate::transcript::RecordingTranscriptBackend>,
+        [SecureField; 2],
+        u64,
+    ) {
+        let protocol = ProtocolId::from(digest(9));
+        let statement = statement(statement_seed);
+        let mut vm_proof = proof();
+        vm_proof.claimed_sums[0] = Qm31Wire::from(vm_claimed_sum);
+        let mut poseidon2_proof = proof();
+        poseidon2_proof.claimed_sums[0] = Qm31Wire::from(poseidon2_claimed_sum);
+        let seeds = [
+            derive_interaction_seed(
+                RecordingTranscriptBackend::default(),
+                vm_plan,
+                protocol,
+                &statement,
+                public_claim(vm_plan),
+                &vm_proof,
+            )
+            .expect("fixture VM interaction seed is derivable"),
+            derive_interaction_seed(
+                RecordingTranscriptBackend::default(),
+                poseidon2_plan,
+                protocol,
+                &statement,
+                public_claim(poseidon2_plan),
+                &poseidon2_proof,
+            )
+            .expect("fixture Poseidon2 interaction seed is derivable"),
+        ];
+        let joint = JointInteractionContext {
+            seeds,
+            shared_relation_sum: Some(shared_relation_sum),
+        };
+        let interaction_pow = vm_proof.interaction_pow;
+        (
+            execute_fixed_transcript_with_joint(
+                RecordingTranscriptBackend::default(),
+                vm_plan,
+                protocol,
+                &statement,
+                public_claim(vm_plan),
+                &vm_proof,
+                joint,
+            )
+            .expect("fixture VM joint transcript executes"),
+            execute_fixed_transcript_with_joint(
+                RecordingTranscriptBackend::default(),
+                poseidon2_plan,
+                protocol,
+                &statement,
+                public_claim(poseidon2_plan),
+                &poseidon2_proof,
+                joint,
+            )
+            .expect("fixture Poseidon2 joint transcript executes"),
+            seeds,
+            interaction_pow,
+        )
     }
 
     fn assert_call_binding_constraints(kind: ProofKind, tamper_enabler: bool) {
         let vm_plan = plan_for_schema(VerifierSchema::Vm, 1);
+        let poseidon2_plan = plan_for_schema(VerifierSchema::Poseidon2, 1);
         let recursion_plan = plan_for_schema(VerifierSchema::Recursion, 1);
-        let preprocessing = TranscriptCallPreprocessed::new(&vm_plan, &recursion_plan)
-            .expect("fixture plans occupy their canonical transcript lanes");
+        let preprocessing =
+            TranscriptCallPreprocessed::new(&vm_plan, &poseidon2_plan, &recursion_plan)
+                .expect("fixture plans occupy their canonical transcript lanes");
         let segment = recording_execution_for(&vm_plan, 1);
+        let poseidon2 = recording_execution_for(&poseidon2_plan, 1);
         let left = recording_execution_for(&recursion_plan, 1);
         let right = recording_execution_for(&recursion_plan, 2);
         let witness = match kind {
-            ProofKind::SegmentLeaf => UniversalTranscriptWitness::Segment(&segment),
+            ProofKind::SegmentLeaf => UniversalTranscriptWitness::Segment {
+                vm: &segment,
+                poseidon2: &poseidon2,
+            },
             ProofKind::BinaryNode => UniversalTranscriptWitness::Binary {
                 left: &left,
                 right: &right,
@@ -939,16 +1309,21 @@ pub(crate) mod tests {
 
     fn assert_frame_state_constraints(kind: ProofKind, tamper: FrameStateTamper) {
         let vm_plan = plan_for_schema(VerifierSchema::Vm, 1);
+        let poseidon2_plan = plan_for_schema(VerifierSchema::Poseidon2, 1);
         let recursion_plan = plan_for_schema(VerifierSchema::Recursion, 1);
-        let calls = TranscriptCallPreprocessed::new(&vm_plan, &recursion_plan)
+        let calls = TranscriptCallPreprocessed::new(&vm_plan, &poseidon2_plan, &recursion_plan)
             .expect("fixture plans occupy their canonical transcript lanes");
         let preprocessing = TranscriptStatePreprocessed::new(&calls)
             .expect("trusted call layout has canonical digest transitions");
         let segment = recording_execution_for(&vm_plan, 1);
+        let poseidon2 = recording_execution_for(&poseidon2_plan, 1);
         let left = recording_execution_for(&recursion_plan, 1);
         let right = recording_execution_for(&recursion_plan, 2);
         let witness = match kind {
-            ProofKind::SegmentLeaf => UniversalTranscriptWitness::Segment(&segment),
+            ProofKind::SegmentLeaf => UniversalTranscriptWitness::Segment {
+                vm: &segment,
+                poseidon2: &poseidon2,
+            },
             ProofKind::BinaryNode => UniversalTranscriptWitness::Binary {
                 left: &left,
                 right: &right,
@@ -996,16 +1371,21 @@ pub(crate) mod tests {
 
     fn assert_word_constraints(kind: ProofKind, tamper: WordTamper) {
         let vm_plan = plan_for_schema(VerifierSchema::Vm, 1);
+        let poseidon2_plan = plan_for_schema(VerifierSchema::Poseidon2, 1);
         let recursion_plan = plan_for_schema(VerifierSchema::Recursion, 1);
-        let calls = TranscriptCallPreprocessed::new(&vm_plan, &recursion_plan)
+        let calls = TranscriptCallPreprocessed::new(&vm_plan, &poseidon2_plan, &recursion_plan)
             .expect("fixture plans occupy their canonical transcript lanes");
         let preprocessing = TranscriptWordPreprocessed::new(&calls)
             .expect("trusted call layout has canonical word ownership");
         let segment = recording_execution_for(&vm_plan, 1);
+        let poseidon2 = recording_execution_for(&poseidon2_plan, 1);
         let left = recording_execution_for(&recursion_plan, 1);
         let right = recording_execution_for(&recursion_plan, 2);
         let witness = match kind {
-            ProofKind::SegmentLeaf => UniversalTranscriptWitness::Segment(&segment),
+            ProofKind::SegmentLeaf => UniversalTranscriptWitness::Segment {
+                vm: &segment,
+                poseidon2: &poseidon2,
+            },
             ProofKind::BinaryNode => UniversalTranscriptWitness::Binary {
                 left: &left,
                 right: &right,
@@ -1053,16 +1433,22 @@ pub(crate) mod tests {
 
     fn assert_payload_constraints(kind: ProofKind, tamper: PayloadTamper) {
         let vm_plan = plan_for_schema(VerifierSchema::Vm, 1);
+        let poseidon2_plan = plan_for_schema(VerifierSchema::Poseidon2, 1);
         let recursion_plan = plan_for_schema(VerifierSchema::Recursion, 1);
-        let calls = TranscriptCallPreprocessed::new(&vm_plan, &recursion_plan)
+        let calls = TranscriptCallPreprocessed::new(&vm_plan, &poseidon2_plan, &recursion_plan)
             .expect("fixture plans occupy their canonical transcript lanes");
-        let preprocessing = TranscriptPayloadPreprocessed::new(&calls, ProtocolId::from(digest(9)))
-            .expect("trusted payload slots have canonical semantic sources");
+        let preprocessing =
+            TranscriptPayloadPreprocessed::new(&calls, ProtocolId::from(digest(9)), word(180))
+                .expect("trusted payload slots have canonical semantic sources");
         let segment = recording_execution_for(&vm_plan, 1);
+        let poseidon2 = recording_execution_for(&poseidon2_plan, 1);
         let left = recording_execution_for(&recursion_plan, 1);
         let right = recording_execution_for(&recursion_plan, 2);
         let witness = match kind {
-            ProofKind::SegmentLeaf => UniversalTranscriptWitness::Segment(&segment),
+            ProofKind::SegmentLeaf => UniversalTranscriptWitness::Segment {
+                vm: &segment,
+                poseidon2: &poseidon2,
+            },
             ProofKind::BinaryNode => UniversalTranscriptWitness::Binary {
                 left: &left,
                 right: &right,
@@ -1112,16 +1498,21 @@ pub(crate) mod tests {
         mut channel: Poseidon2M31Channel,
     ) -> stwo::core::fields::qm31::QM31 {
         let vm_plan = plan_for_schema(VerifierSchema::Vm, 1);
+        let poseidon2_plan = plan_for_schema(VerifierSchema::Poseidon2, 1);
         let recursion_plan = plan_for_schema(VerifierSchema::Recursion, 1);
-        let calls = TranscriptCallPreprocessed::new(&vm_plan, &recursion_plan)
+        let calls = TranscriptCallPreprocessed::new(&vm_plan, &poseidon2_plan, &recursion_plan)
             .expect("fixture plans occupy their canonical transcript lanes");
         let word_preprocessing = TranscriptWordPreprocessed::new(&calls)
             .expect("trusted call layout has canonical word ownership");
         let payload_preprocessing =
-            TranscriptPayloadPreprocessed::new(&calls, ProtocolId::from(digest(9)))
+            TranscriptPayloadPreprocessed::new(&calls, ProtocolId::from(digest(9)), word(180))
                 .expect("trusted payload slots have canonical semantic sources");
         let execution = recording_execution_for(&vm_plan, 1);
-        let witness = UniversalTranscriptWitness::Segment(&execution);
+        let poseidon2_execution = recording_execution_for(&poseidon2_plan, 1);
+        let witness = UniversalTranscriptWitness::Segment {
+            vm: &execution,
+            poseidon2: &poseidon2_execution,
+        };
 
         let mut word_table = TranscriptWordTable::new();
         push_transcript_words(&mut word_table, &word_preprocessing, witness)
@@ -1157,7 +1548,7 @@ pub(crate) mod tests {
     }
 
     #[rstest]
-    #[case::segment(ProofKind::SegmentLeaf, 145)]
+    #[case::segment(ProofKind::SegmentLeaf, 303)]
     #[case::binary(ProofKind::BinaryNode, 288)]
     #[case::empty(ProofKind::EmptyLeaf, 0)]
     fn proof_kind_activates_only_its_transcript_calls(
@@ -1166,6 +1557,7 @@ pub(crate) mod tests {
     ) {
         let preprocessing = TranscriptCallPreprocessed::new(
             &plan_for_schema(VerifierSchema::Vm, 1),
+            &plan_for_schema(VerifierSchema::Poseidon2, 1),
             &plan_for_schema(VerifierSchema::Recursion, 1),
         )
         .expect("fixture plans occupy their canonical transcript lanes");
@@ -1204,7 +1596,7 @@ pub(crate) mod tests {
     }
 
     #[rstest]
-    #[case::segment(ProofKind::SegmentLeaf, 31)]
+    #[case::segment(ProofKind::SegmentLeaf, 66)]
     #[case::binary(ProofKind::BinaryNode, 62)]
     #[case::empty(ProofKind::EmptyLeaf, 0)]
     fn proof_kind_activates_only_its_transcript_frames(
@@ -1213,6 +1605,7 @@ pub(crate) mod tests {
     ) {
         let calls = TranscriptCallPreprocessed::new(
             &plan_for_schema(VerifierSchema::Vm, 1),
+            &plan_for_schema(VerifierSchema::Poseidon2, 1),
             &plan_for_schema(VerifierSchema::Recursion, 1),
         )
         .expect("fixture plans occupy their canonical transcript lanes");
@@ -1258,7 +1651,7 @@ pub(crate) mod tests {
     }
 
     #[rstest]
-    #[case::segment(ProofKind::SegmentLeaf, 912, 512)]
+    #[case::segment(ProofKind::SegmentLeaf, 1_896, 1_037)]
     #[case::binary(ProofKind::BinaryNode, 1_808, 1_008)]
     #[case::empty(ProofKind::EmptyLeaf, 0, 0)]
     fn proof_kind_activates_only_its_typed_transcript_words(
@@ -1268,6 +1661,7 @@ pub(crate) mod tests {
     ) {
         let calls = TranscriptCallPreprocessed::new(
             &plan_for_schema(VerifierSchema::Vm, 1),
+            &plan_for_schema(VerifierSchema::Poseidon2, 1),
             &plan_for_schema(VerifierSchema::Recursion, 1),
         )
         .expect("fixture plans occupy their canonical transcript lanes");
@@ -1319,8 +1713,8 @@ pub(crate) mod tests {
     }
 
     #[rstest]
-    #[case::segment(ProofKind::SegmentLeaf, 512, 480)]
-    #[case::binary(ProofKind::BinaryNode, 1_008, 944)]
+    #[case::segment(ProofKind::SegmentLeaf, 1_037, 980)]
+    #[case::binary(ProofKind::BinaryNode, 1_008, 952)]
     #[case::empty(ProofKind::EmptyLeaf, 0, 0)]
     fn proof_kind_activates_only_its_semantic_payload_sources(
         #[case] kind: ProofKind,
@@ -1329,11 +1723,13 @@ pub(crate) mod tests {
     ) {
         let calls = TranscriptCallPreprocessed::new(
             &plan_for_schema(VerifierSchema::Vm, 1),
+            &plan_for_schema(VerifierSchema::Poseidon2, 1),
             &plan_for_schema(VerifierSchema::Recursion, 1),
         )
         .expect("fixture plans occupy their canonical transcript lanes");
-        let preprocessing = TranscriptPayloadPreprocessed::new(&calls, ProtocolId::from(digest(9)))
-            .expect("trusted payload slots have canonical semantic sources");
+        let preprocessing =
+            TranscriptPayloadPreprocessed::new(&calls, ProtocolId::from(digest(9)), word(180))
+                .expect("trusted payload slots have canonical semantic sources");
         assert_eq!(
             (
                 preprocessing.active_payload_count(kind),
@@ -1382,7 +1778,7 @@ pub(crate) mod tests {
     #[rstest]
     fn every_transcript_step_has_one_operation_record() {
         let plan = plan(1);
-        let execution = execute_fixed_transcript(
+        let execution = execute_fixture_transcript(
             RecordingTranscriptBackend::default(),
             &plan,
             ProtocolId::from(digest(9)),
@@ -1436,7 +1832,7 @@ pub(crate) mod tests {
     #[rstest]
     fn trusted_layout_matches_the_recording_backend() {
         let plan = plan(1);
-        let execution = execute_fixed_transcript(
+        let execution = execute_fixture_transcript(
             RecordingTranscriptBackend::default(),
             &plan,
             ProtocolId::from(digest(9)),
@@ -1522,7 +1918,7 @@ pub(crate) mod tests {
                 layout.frames().len(),
                 layout.calls().len(),
             ),
-            (22, 31, 145)
+            (25, 35, 157)
         );
     }
 
@@ -1531,7 +1927,7 @@ pub(crate) mod tests {
         let plan = plan(1);
         let statement = statement(1);
         let proof = proof();
-        let native = execute_fixed_transcript(
+        let native = execute_fixture_transcript(
             NativeTranscriptBackend,
             &plan,
             ProtocolId::from(digest(9)),
@@ -1540,7 +1936,7 @@ pub(crate) mod tests {
             &proof,
         )
         .expect("native transcript accepts the fixture");
-        let recording = execute_fixed_transcript(
+        let recording = execute_fixture_transcript(
             RecordingTranscriptBackend::default(),
             &plan,
             ProtocolId::from(digest(9)),
@@ -1567,7 +1963,7 @@ pub(crate) mod tests {
     fn changing_the_bound_statement_changes_the_final_digest() {
         let plan = plan(1);
         let proof = proof();
-        let first = execute_fixed_transcript(
+        let first = execute_fixture_transcript(
             NativeTranscriptBackend,
             &plan,
             ProtocolId::from(digest(9)),
@@ -1576,7 +1972,7 @@ pub(crate) mod tests {
             &proof,
         )
         .expect("first statement executes");
-        let second = execute_fixed_transcript(
+        let second = execute_fixture_transcript(
             NativeTranscriptBackend,
             &plan,
             ProtocolId::from(digest(9)),
@@ -1591,7 +1987,7 @@ pub(crate) mod tests {
     #[rstest]
     fn changing_the_vm_public_claim_changes_the_final_digest() {
         let plan = plan(1);
-        let first = execute_fixed_transcript(
+        let first = execute_fixture_transcript(
             NativeTranscriptBackend,
             &plan,
             ProtocolId::from(digest(9)),
@@ -1600,7 +1996,7 @@ pub(crate) mod tests {
             &proof(),
         )
         .expect("first VM public claim executes");
-        let second = execute_fixed_transcript(
+        let second = execute_fixture_transcript(
             NativeTranscriptBackend,
             &plan,
             ProtocolId::from(digest(9)),
@@ -1617,14 +2013,14 @@ pub(crate) mod tests {
         assert_eq!(
             recording_execution().final_digest(),
             Digest8::new([
-                canonical(71_520_153),
-                canonical(254_872_391),
-                canonical(1_352_344_338),
-                canonical(734_162_471),
-                canonical(1_472_453_936),
-                canonical(485_556_251),
-                canonical(1_103_360_662),
-                canonical(1_015_747_588),
+                canonical(117_413_420),
+                canonical(1_181_837_297),
+                canonical(1_440_154_124),
+                canonical(1_650_820_447),
+                canonical(1_437_515_998),
+                canonical(886_855_654),
+                canonical(176_046_726),
+                canonical(2_105_225_742),
             ])
         );
     }

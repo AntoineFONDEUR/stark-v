@@ -182,7 +182,7 @@ const UNIVERSAL_INVENTORY: [ComponentOwner; 36] = [
     },
 ];
 
-const VM_INVENTORY: [ComponentOwner; 27] = [
+const VM_INVENTORY: [ComponentOwner; 26] = [
     ComponentOwner {
         name: "auipc",
         source: "crates/air/src/schema.rs",
@@ -258,10 +258,6 @@ const VM_INVENTORY: [ComponentOwner; 27] = [
     ComponentOwner {
         name: "merkle",
         source: "crates/air/src/schema.rs",
-    },
-    ComponentOwner {
-        name: "poseidon2",
-        source: "crates/air/src/poseidon2.rs",
     },
     ComponentOwner {
         name: "clock_update",
@@ -471,14 +467,11 @@ fn every_reachable_air_owner_uses_only_the_direct_dsl() {
 }
 
 #[test]
-fn vm_component_router_has_only_the_dsl_generated_poseidon_override() {
-    let custom_routes = parse_vm_component_router();
+fn vm_component_router_detaches_only_dsl_poseidon() {
+    let (custom_routes, detached) = parse_vm_component_router();
     assert_eq!(
-        custom_routes,
-        [(
-            "poseidon2".to_owned(),
-            "air::poseidon2::component".to_owned()
-        )]
+        (custom_routes, detached),
+        (vec![], vec!["poseidon2".to_owned()])
     );
 }
 
@@ -583,6 +576,7 @@ impl Parse for RouterEntry {
 
 struct ComponentRouter {
     trace: Vec<RouterEntry>,
+    detached: Vec<syn::Ident>,
 }
 
 impl Parse for ComponentRouter {
@@ -601,7 +595,20 @@ impl Parse for ComponentRouter {
             .into_iter()
             .collect();
         input.parse::<Token![,]>()?;
-        let lookup_label: syn::Ident = input.parse()?;
+        let next_label: syn::Ident = input.parse()?;
+        let (detached, lookup_label) = if next_label == "detached" {
+            input.parse::<Token![:]>()?;
+            let detached_content;
+            braced!(detached_content in input);
+            let detached =
+                Punctuated::<syn::Ident, Token![,]>::parse_terminated(&detached_content)?
+                    .into_iter()
+                    .collect();
+            input.parse::<Token![,]>()?;
+            (detached, input.parse()?)
+        } else {
+            (vec![], next_label)
+        };
         if lookup_label != "lookup" {
             return Err(syn::Error::new(
                 lookup_label.span(),
@@ -613,11 +620,11 @@ impl Parse for ComponentRouter {
         braced!(lookup_content in input);
         let _ = Punctuated::<syn::Ident, Token![,]>::parse_terminated(&lookup_content)?;
         let _ = input.parse::<Token![,]>();
-        Ok(Self { trace })
+        Ok(Self { trace, detached })
     }
 }
 
-fn parse_vm_component_router() -> Vec<(String, String)> {
+fn parse_vm_component_router() -> (Vec<(String, String)>, Vec<String>) {
     let path = workspace_root().join("crates/prover/src/components/mod.rs");
     let source = fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
@@ -644,7 +651,7 @@ fn parse_vm_component_router() -> Vec<(String, String)> {
         .next()
         .expect("the prover declares one components router")
         .expect("the prover components router has the expected structure");
-    router
+    let custom_routes = router
         .trace
         .into_iter()
         .filter_map(|entry| {
@@ -658,5 +665,11 @@ fn parse_vm_component_router() -> Vec<(String, String)> {
                 (entry.name.to_string(), path)
             })
         })
-        .collect()
+        .collect();
+    let detached = router
+        .detached
+        .into_iter()
+        .map(|name| name.to_string())
+        .collect();
+    (custom_routes, detached)
 }

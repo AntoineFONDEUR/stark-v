@@ -238,17 +238,15 @@ external: { poseidon2: crate::poseidon2 }   // air/src/schema.rs
 ```
 
 Each entry generates the `Tracer` field, initialization, `total_traces`, debug,
-and column re-export, so the monolithic `Tracer` is composable. Poseidon2 (a
-fn-DSL component wired through
-`components! { … poseidon2: air::poseidon2::component … }`) is the first entry,
-and the full e2e suite (a real prove+verify per opcode) passes through the
-generalized path. Migrating an opcode is now additive: define it via
-`define_air_fns!`, add it to `external:`, point its `components!` entry at the
-generated module, and remove it from the `trace:` block — one family per PR,
-each guarded by the existing e2e proofs, until `runner/src/ops/` and the
-schema's opcode list are empty. The remaining per-opcode work is the witness
-fill calling the runner's `Tracer` (`trace_reg_access`/`trace_mem_access`) for
-access values and the range checks resolving against the preprocessed tables.
+and column re-export, so the monolithic `Tracer` is composable. Poseidon2 is the
+first entry and the component router assigns it to the `detached` section used
+by the standalone hash proof. Migrating an opcode is additive: define it via
+`define_air_fns!`, add it to `external:`, route its generated component to the
+appropriate constituent proof, and remove its prior table from the schema's
+`trace:` block. Each family remains guarded by real prove-and-verify tests. The
+remaining per-opcode work is the witness fill calling the runner's `Tracer`
+(`trace_reg_access`/`trace_mem_access`) for access values and the range checks
+resolving against the preprocessed tables.
 
 ### What this retires (the `components!` question)
 

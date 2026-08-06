@@ -69,17 +69,17 @@ binary shape at larger counts.
 
 ## Documentation map
 
-| Document                    | Class                          | Authority                                                                   |
-| --------------------------- | ------------------------------ | --------------------------------------------------------------------------- |
-| `docs/roadmap.md`           | Current execution ledger       | Task order, task status, completion gates, and evidence                     |
-| `README.md`                 | Current state                  | Supported user-facing behavior and measured commands                        |
-| `docs/airs.md`              | Current state                  | Active AIR architecture; source remains authoritative for exact constraints |
-| `docs/recursion.md`         | Current design                 | Recursive statements, verifier architecture, and soundness invariants       |
-| `docs/felt-air-compiler.md` | Partially implemented design   | Compiler facilities and opcode/runner target                                |
-| `docs/precompiles.md`       | Planned feature with prototype | Cross-proof hash binding target                                             |
-| `docs/syscalls.md`          | Planned feature                | Syscall and output-journal target                                           |
-| `CONTRIBUTING.md`           | Current process                | Development and submission workflow                                         |
-| `SECURITY.md`               | Current policy                 | Security scope and private reporting                                        |
+| Document                    | Class                        | Authority                                                                   |
+| --------------------------- | ---------------------------- | --------------------------------------------------------------------------- |
+| `docs/roadmap.md`           | Current execution ledger     | Task order, task status, completion gates, and evidence                     |
+| `README.md`                 | Current state                | Supported user-facing behavior and measured commands                        |
+| `docs/airs.md`              | Current state                | Active AIR architecture; source remains authoritative for exact constraints |
+| `docs/recursion.md`         | Current design               | Recursive statements, verifier architecture, and soundness invariants       |
+| `docs/felt-air-compiler.md` | Partially implemented design | Compiler facilities and opcode/runner target                                |
+| `docs/precompiles.md`       | Active implementation design | Cross-proof hash binding state and remaining PRE-001 work                   |
+| `docs/syscalls.md`          | Planned feature              | Syscall and output-journal target                                           |
+| `CONTRIBUTING.md`           | Current process              | Development and submission workflow                                         |
+| `SECURITY.md`               | Current policy               | Security scope and private reporting                                        |
 
 A planned document is not stale merely because its feature is absent. It is
 wrong if it presents the target as implemented, references an API that no longer
@@ -159,34 +159,35 @@ set.
     wrapper macros, unexpected item macros, roster drift, and unapproved VM
     component routing.
   - Current-state AIR, recursion, and felt-compiler documentation reflects the
-    completed migration while planned syscall and precompile documents remain
-    explicitly future goals.
+    completed migration; the syscall design remains explicitly planned and the
+    precompile design tracks its active implementation state.
   - Evidence: commit `59ef6b42`; the structural guard, complete recursion suite,
     full release workspace suite, structural searches, and repository hooks
     passed.
 - `[done] PRO-001` Freeze the first recursive protocol profile.
-  - The generated VM and universal rosters derive both fixed proof geometries,
-    verifier plans, preprocessing registries, exact wire types, and the protocol
-    identifier from one profile constructor.
+  - The generated VM, detached Poseidon2, and universal AIR programs derive
+    their fixed proof geometries, verifier plans, preprocessing registries,
+    exact wire types, and the protocol identifier from one profile constructor.
   - The profile fixes 193 FRI queries, 4 KiB public-input and public-output
-    capacities, and a 3,459,396-byte universal proof wire.
+    capacities, and a 3,479,096-byte universal proof wire.
   - Evidence: commit `b0a3f2ae`; focused profile, manifest mutation, macro,
     recursion, full release workspace, and repository hook suites passed.
-- `[done] REC-001` Adapt a real VM proof to the recursive leaf wire.
-  - The recursion-targeted fixed-layout Poseidon prover uses the manifest-bound
-    verifier transcript and retains STWO's authenticated expansion maps long
-    enough to materialize all 193 independent raw-query slots. The ordinary
-    prover keeps its native transcript and compact in-memory behavior.
-  - The adapter checks the frozen geometry, canonical public claim, runner
-    boundary, job identity, segment slot, cycle interval, and every trace and
-    FRI opening before producing the fixed leaf input.
+- `[done] REC-001` Adapt a real segment proof to the recursive leaf wire.
+  - Recursion-targeted VM and Poseidon2 constituents use manifest-bound verifier
+    transcripts and retain STWO's authenticated expansion maps long enough to
+    materialize all 193 independent raw-query slots. Ordinary segment proving
+    keeps native transcripts and compact in-memory behavior.
+  - The adapter checks both frozen constituent geometries, their shared-relation
+    cancellation, canonical public claim, runner boundary, job identity, segment
+    slot, cycle interval, and every trace and FRI opening before producing the
+    fixed leaf input.
   - Evidence: commit `93dc88b3`; focused real-proof, malformed metadata, fixed
     wire, fixed trace, macro, clippy, full recursion, full release workspace,
     and repository hook suites passed.
 - `[done] REC-002` Build the universal trace assembler.
-  - Recursion-targeted VM proofs use the trusted manifest transcript while the
-    ordinary prover retains its native public transcript and compact proof
-    auxiliary state.
+  - Recursion-targeted segment constituents use trusted manifest transcripts
+    while the ordinary prover retains native public transcripts and compact
+    proof auxiliary state.
   - `UniversalWitness` deterministically fills preprocessing, original, and
     interaction trees for all 36 components, derives all claimed sums and
     verifier-owned public terms, and validates every emitted column against the
@@ -194,16 +195,17 @@ set.
   - STWO-omitted FRI query values are reconstructed from the DEEP answer and
     prior folds before both Merkle and folding checks; PCS periodicity uses the
     committed-domain log sizes.
-  - The active profile has 22 recursion FRI layers, a 3,459,396-byte fixed proof
+  - The active profile has 22 recursion FRI layers, a 3,479,096-byte fixed proof
     wire, and protocol identifier limbs
-    `[996130352, 439599105, 1840972074, 322360417, 2002034527, 739270897, 775019197, 1167228932]`.
+    `[1367177019, 1287613895, 1066887904, 1957561640, 1756805490, 987259214, 2076002296, 748188730]`.
   - Evidence: commit `827ec9a9`; deterministic real-proof assembly, all 36
     direct component checks, focused malformed-FRI tests, the ordinary prover
     integration, the full recursion and workspace release suites, clippy, DSL
     guards, and repository hooks passed.
 - `[done] REC-003` Close the segment-leaf branch end to end.
-  - Real VM proofs now replay through every verifier circuit, reject nonzero
-    circuit outputs, and require exact global relation closure.
+  - Real segment proofs replay every active constituent through its verifier
+    circuit, reject nonzero circuit outputs, and require exact global relation
+    closure.
   - Verifier-owned terminal control terms, active-lane wire multiplicities, and
     both PCS and FRI query-bit consumers close the complete relation roster.
   - Thirteen independent mutations cover the statement, public claim, every
@@ -288,14 +290,17 @@ set.
     and repository hooks passed.
 - `[done] REC-010` Demonstrate constant root-proof size.
   - Every successfully produced canonical root encodes as the profile-owned
-    3,459,396-byte `RootProofBytes` type and uses the same 4,937-step verifier
+    3,479,096-byte `RootProofBytes` type and uses the same 4,943-step verifier
     plan with one checked digest.
-  - Real release roots cover the segment-leaf, binary, and padded-binary root
-    constructions. REC-008 separately establishes valid 4- and 8-segment roots;
-    their root wire and verifier plan are the same profile-owned types.
-  - Evidence: real 1-, 2-, and 3-segment roots encoded and verified, fixed wire
-    and verifier-shape vectors passed, and outer-only proof parallelism was
-    measured and rejected as slower than the retained shared-pool strategy.
+  - The earlier integrated-Poseidon profile produced real segment-leaf, binary,
+    padded-binary, 4-segment, and 8-segment roots through the same fixed wire
+    and verifier plan. The active split-proof profile has revalidated a real
+    segment-leaf root; PRE-001 step 7 tracks its binary and padded reruns.
+  - Evidence: real 1-, 2-, and 3-segment roots encoded and verified under the
+    prior profile, fixed wire and verifier-shape vectors passed, and outer-only
+    proof parallelism was measured and rejected as slower than the retained
+    shared-pool strategy. The active PRE-001 evidence records the split-profile
+    root.
 - `[active] PRE-001` Prepare the hash-precompile proof split for production.
   - Completed slice: prototype square emit, square consume, and Poseidon host
     binding components derive their tables, constraints, evaluators, and
@@ -307,11 +312,22 @@ set.
     trace before the joint draw, produces a standalone STARK carrying its
     nonzero shared-relation sum and exact trace shapes, retains recursion query
     expansion, and verifies under both Blake2s and Poseidon2-M31 channels.
-  - Focused release evidence: all 5 standalone round-trip, recursion-channel,
-    nonzero-sum, forged-sum, and fixed-capacity tests passed; all 13 binding
-    prototype regressions passed; prover clippy passed with warnings denied.
-  - Next slice: remove Poseidon2 from the VM proof roster and expose the VM
-    proof's matching shared-relation deficit.
+  - Completed slice: the VM router detaches Poseidon2, `SegmentProof` carries
+    both constituent proofs plus the joint nonce, and host verification and
+    continuation replay the shared draw and require exact sum cancellation.
+  - Completed slice: the recursive leaf uses four verifier lanes for the VM,
+    Poseidon2, left child, and right child. Its direct DSL-owned binder closes
+    both transcript nonces and the cross-proof relation without a handwritten
+    component or compatibility macro.
+  - Active-profile evidence: 21 payload, 11 binder, 6 relation-challenge, and 5
+    direct-DSL guard tests passed in release mode. One real split segment closed
+    all 36 universal components in 98.26 seconds with 9.25 GB peak RSS. Host
+    split verification passed in 67.38 seconds with 2.15 GB peak RSS. One real
+    split-proof root passed in 554.23 seconds with 19.34 GB peak RSS and zero
+    swaps. Workspace release check and clippy with warnings denied passed.
+  - Next slice: add forged, missing, extra, and reordered tuple-pairing tests at
+    both host-continuation and recursive-root boundaries, then rerun current
+    binary and padded-root conformance before benchmarking the split.
 - `[pending] SYS-001` Implement proof-bound syscalls and output journal.
 - `[pending] FELT-001` Complete witness-side felt-function VM access.
 - `[pending] FELT-002` Migrate opcode execution and retire duplicate semantics.
@@ -469,14 +485,15 @@ Done when native and AIR manifest encodings have the same digest, every field
 mutation changes the identity or fails validation, and the profile is tested,
 committed, and pushed.
 
-### `[done] REC-001` Real VM-proof adapter
+### `[done] REC-001` Real segment-proof adapter
 
 Dependencies: `PRO-001`.
 
 Required work:
 
-1. Convert `prover::Proof<Poseidon2M31MerkleHasher>` and authenticated public
-   data into the fixed segment-leaf wire.
+1. Convert `prover::SegmentProof<Poseidon2M31MerkleHasher>` and authenticated
+   public data into the fixed segment-leaf wire, including every constituent
+   proof required by the active profile.
 2. Derive the exact height-zero span from the public claim, job context, segment
    index, and cycle interval.
 3. Reject capacity overflow, non-canonical optional roots, and disagreement
@@ -509,15 +526,15 @@ Dependencies: `REC-002`.
 
 Required work:
 
-1. Replay one real VM proof through public-claim semantics, VM AIR composition,
-   authenticated openings, DEEP quotient evaluation, FRI, proof of work, and
-   final-polynomial checks.
+1. Replay one real segment proof through public-claim semantics, every
+   constituent AIR composition, joint relation binding, authenticated openings,
+   DEEP quotient evaluation, FRI, proof of work, and final-polynomial checks.
 2. Accumulate every verifier-owned public term and enforce zero global LogUp sum
    over the universal roster.
 3. Bind the authenticated VM claim to exactly one height-zero span.
 
-Done when a valid VM proof satisfies the entire universal AIR and an independent
-mutation in every proof region or omitted control phase fails.
+Done when a valid segment proof satisfies the entire universal AIR and an
+independent mutation in every proof region or omitted control phase fails.
 
 ### `[done] REC-004` Canonical empty leaf
 
@@ -642,21 +659,23 @@ Design authority: `docs/precompiles.md`.
 
 Required work, in order:
 
-1. Replace the prototype binding tables and handwritten evaluators with
+1. `[done]` Replace the prototype binding tables and handwritten evaluators with
    `define_air!` or `define_air_fns!` while preserving malformed-pair tests.
-2. Implement the joint post-commitment transcript draw and joint interaction
-   proof of work for VM and Poseidon2 instances.
-3. Produce a standalone Poseidon2 proof carrying its shared-relation sum.
-4. Remove the Poseidon2 component from the VM proof and expose its deficit as a
-   public shared-relation claim.
-5. Define one segment artifact containing the VM proof, hash proof, proof
-   shapes, and shared claimed sums.
-6. Extend `continuation` and the recursive leaf branch to replay the joint draw,
-   verify both proofs, and require exact sum cancellation.
-7. Bind the changed artifact to a new protocol manifest and rerun root
-   conformance tests.
-8. Measure the split against the integrated Poseidon2 component and record the
-   supported profile rather than assuming a performance win.
+2. `[done]` Implement the joint post-commitment transcript draw and joint
+   interaction proof of work for VM and Poseidon2 instances.
+3. `[done]` Produce a standalone Poseidon2 proof carrying its shared-relation
+   sum.
+4. `[done]` Remove the Poseidon2 component from the VM proof and expose its
+   deficit as a public shared-relation claim.
+5. `[done]` Define one segment artifact containing the VM proof, hash proof,
+   proof shapes, and shared claimed sums.
+6. `[done]` Extend `continuation` and the recursive leaf branch to replay the
+   joint draw, verify both proofs, and require exact sum cancellation.
+7. `[in progress]` Bind the changed artifact to a new protocol manifest and
+   rerun root conformance tests. The active profile and one real segment root
+   pass; binary and padded roots remain.
+8. `[pending]` Measure the split against the integrated Poseidon2 component and
+   record the supported profile rather than assuming a performance win.
 
 Done when forged, missing, extra, or reordered permutation tuples fail both host
 continuation and recursive-root verification and the result is tested,
@@ -757,6 +776,8 @@ proof-bound, and every published claim is reproducible.
 
 Append one entry after each completed task. Include the task ID, date, exact
 commands run, observed test counts or measurements, and the pushed commit.
+Values in dated entries describe the checked-in profile at that milestone; the
+Current checkpoint section above is authoritative for the active profile.
 
 ### `BASE-001` — 2026-08-04
 

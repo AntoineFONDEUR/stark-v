@@ -1086,7 +1086,9 @@ impl RosterCollector {
             super::vm_public_logup_control_air::eval_for_proof_kind(
                 log_size,
                 kind,
-                relations.control.clone(),
+                &relations.control,
+                &relations.verifier_input,
+                &relations.verifier_randomness,
             )
         });
         self.push(allocator, UNIVERSAL_COMPONENT_NAMES[18], claimed_sum(), {

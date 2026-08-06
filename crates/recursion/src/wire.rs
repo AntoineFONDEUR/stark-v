@@ -321,12 +321,16 @@ impl<
             N_LAST_LAYER_COEFFICIENTS,
         )?;
 
-        let expected_trace_paths =
-            N_TREES
-                .checked_mul(N_QUERIES)
-                .ok_or(WireError::WireShapeArithmeticOverflow {
-                    field: "trace path layout",
-                })?;
+        let authenticated_tree_count = shape
+            .tree_heights
+            .iter()
+            .filter(|height| **height != M31Word::ZERO)
+            .count();
+        let expected_trace_paths = authenticated_tree_count.checked_mul(N_QUERIES).ok_or(
+            WireError::WireShapeArithmeticOverflow {
+                field: "trace path layout",
+            },
+        )?;
         validate_wire_count("trace path layout", expected_trace_paths, N_TRACE_PATHS)?;
 
         let mut described_max_depth = 0;
@@ -368,9 +372,12 @@ impl<
         }
         validate_wire_count("maximum FRI fold width", described_max_width, FOLD_WIDTH)?;
 
-        for (tree, expected_depth) in shape.tree_heights.iter().enumerate() {
-            for query in 0..N_QUERIES {
-                let path = tree * N_QUERIES + query;
+        let mut path = 0;
+        for expected_depth in &shape.tree_heights {
+            if *expected_depth == M31Word::ZERO {
+                continue;
+            }
+            for _ in 0..N_QUERIES {
                 let actual_depth = self.trace_paths[path].active_depth();
                 if actual_depth != expected_depth.as_u32() {
                     return Err(WireError::MerklePathDepthMismatch {
@@ -379,6 +386,7 @@ impl<
                         actual: actual_depth,
                     });
                 }
+                path += 1;
             }
         }
 

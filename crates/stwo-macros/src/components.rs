@@ -66,6 +66,7 @@ struct ComponentList {
 
 struct ComponentsInput {
     trace: Vec<ComponentEntry>,
+    detached: Vec<Ident>,
     lookup: Vec<Ident>,
 }
 
@@ -108,7 +109,17 @@ impl Parse for ComponentsInput {
 
         input.parse::<Token![,]>()?;
 
-        let lookup_label: Ident = input.parse()?;
+        let next_label: Ident = input.parse()?;
+        let (detached, lookup_label) = if next_label == "detached" {
+            input.parse::<Token![:]>()?;
+            let detached_content;
+            braced!(detached_content in input);
+            let IdentList { idents } = detached_content.parse()?;
+            input.parse::<Token![,]>()?;
+            (idents, input.parse()?)
+        } else {
+            (Vec::new(), next_label)
+        };
         if lookup_label != "lookup" {
             return Err(syn::Error::new_spanned(
                 lookup_label,
@@ -121,15 +132,23 @@ impl Parse for ComponentsInput {
         let IdentList { idents: lookup } = lookup_content.parse()?;
         let _ = input.parse::<Token![,]>();
 
-        Ok(Self { trace, lookup })
+        Ok(Self {
+            trace,
+            detached,
+            lookup,
+        })
     }
 }
 
 pub fn components(input: TokenStream) -> TokenStream {
-    let ComponentsInput { trace, lookup } = syn::parse_macro_input!(input as ComponentsInput);
+    let ComponentsInput {
+        trace,
+        detached,
+        lookup,
+    } = syn::parse_macro_input!(input as ComponentsInput);
     let lookup_components = render_lookup_components(&lookup);
     let trace_components = render_trace_components(&trace);
-    let components = render_components(trace, lookup);
+    let components = render_components(trace, detached, lookup);
     quote! {
         pub mod lookups {
             #lookup_components
@@ -299,7 +318,11 @@ fn render_trace_components(entries: &[ComponentEntry]) -> TokenStream2 {
     }
 }
 
-fn render_components(opcodes: Vec<ComponentEntry>, lookups: Vec<Ident>) -> TokenStream2 {
+fn render_components(
+    opcodes: Vec<ComponentEntry>,
+    detached: Vec<Ident>,
+    lookups: Vec<Ident>,
+) -> TokenStream2 {
     // Generate Traces struct fields
     let traces_fields = opcodes.iter().map(|component| {
         let op = &component.name;
@@ -316,6 +339,11 @@ fn render_components(opcodes: Vec<ComponentEntry>, lookups: Vec<Ident>) -> Token
         let op = &component.name;
         quote! {
             #op: _,
+        }
+    });
+    let detached_trace_table_coverage_fields = detached.iter().map(|table| {
+        quote! {
+            #table: _,
         }
     });
 
@@ -879,6 +907,7 @@ fn render_components(opcodes: Vec<ComponentEntry>, lookups: Vec<Ident>) -> Token
                 mem_initial: _,
                 program_reads: _,
                 #(#trace_table_coverage_fields)*
+                #(#detached_trace_table_coverage_fields)*
             } = tracer;
         }
 

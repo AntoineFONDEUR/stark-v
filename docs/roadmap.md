@@ -33,6 +33,12 @@ requires focused malformed-witness or statement-mutation coverage. Commands in
 the evidence log are commands that were actually run; future work must append
 its real commands and results rather than predicted output.
 
+Recursive proof E2Es are memory-bound. Run exactly one heavy proof process at a
+time and keep full recursion suites at `--test-threads=1`; the REC-008
+two-worker driver measured up to 36.01 GB maximum RSS in one process. Do not use
+process-level test parallelism for these gates until a checked-in lower-memory
+measurement replaces this limit.
+
 ## Non-negotiable architecture gates
 
 - Host continuation and recursive proving remain separate crates and APIs.
@@ -250,8 +256,17 @@ set.
     the fold boundary, the statement model and AIR substitution matrices passed,
     all direct-DSL guards passed, release compilation and clippy passed, and
     repository hooks passed.
-- `[active] REC-008` Build the recursive tree driver.
-- `[pending] REC-009` Expose and bind the application root API.
+- `[done] REC-008` Build the recursive tree driver.
+  - Finalized VM segments are proved as ordered recursion leaves, padded to the
+    unique minimal power-of-two capacity, and reduced through adjacent binary
+    levels to one retained root statement and proof.
+  - Same-level proof work shares immutable fixed preprocessing while every
+    worker owns its recorder-backed witness state. The `parallel` feature caps
+    tree proof waves at two workers to preserve measured host memory headroom.
+  - Evidence: commit `c212200d`; release E2Es produced and verified roots for 1,
+    2, 3, 4, and 8 executed segments, the full recursion and direct-DSL suites
+    passed, release checks and clippy passed, and repository hooks passed.
+- `[active] REC-009` Expose and bind the application root API.
 - `[pending] REC-010` Demonstrate constant root-proof size.
 - `[pending] PRE-001` Prepare the hash-precompile proof split for production.
 - `[pending] SYS-001` Implement proof-bound syscalls and output journal.
@@ -521,7 +536,7 @@ Required work:
 Done when two valid adjacent child proofs produce one verified parent proof and
 swapped, duplicated, gapped, overlapping, or mismatched children fail.
 
-### `[active] REC-008` Tree driver
+### `[done] REC-008` Tree driver
 
 Dependencies: `REC-007`.
 
@@ -536,7 +551,7 @@ Required work:
 Done when runs with 1, 2, 3, 4, and 8 executed segments each produce one valid
 root proof with the expected span.
 
-### `[pending] REC-009` Application root API
+### `[active] REC-009` Application root API
 
 Dependencies: `REC-008`.
 
@@ -987,6 +1002,41 @@ the recorded command without committing a machine-specific path.
   passed.
 - `prek run --all-files`: passed.
 - Commit `b6f6c9be` pushed to `origin/chore/scratchpad-cleanups`.
+
+### `REC-008` — 2026-08-06
+
+- `cargo test --release -p recursion --features parallel tree_plan -- --nocapture`:
+  all 6 empty-run and minimal-capacity planner tests passed.
+- `cargo test --release -p recursion --features parallel recursive_proof::tests::parallel_workers_reuse_the_fixed_preprocessing_commitment -- --exact --nocapture`:
+  the worker template reused the immutable fixed preprocessing commitment; the
+  test passed in 150.19 seconds with 7.64 GB maximum RSS and zero swaps.
+- `/usr/bin/time -l cargo test --release -p recursion --features parallel tree::tests::capacity_segmented_guest_produces_a_two_leaf_root -- --ignored --exact --nocapture`:
+  the two-segment root passed in 938.57 seconds with 30.31 GB maximum RSS and
+  zero swaps.
+- The same release command selected
+  `tree::tests::cycle_segmented_guest_produces_the_expected_root::case_1_three`,
+  `case_2_four`, and `case_3_eight` independently. All three roots passed in
+  2,069.78, 1,759.19, and 3,354.26 seconds with 35.94, 36.01, and 35.48 GB
+  maximum RSS respectively and zero swaps.
+- `cargo test --release -p recursion --features parallel vm_air_composition_lowering::tests -- --nocapture`:
+  all 3 composition-lowering regressions passed.
+- `cargo test --release -p recursion --features parallel --test air_dsl_guard -- --nocapture`:
+  all 5 roster, owner-policy, direct-DSL, and component-route guards passed.
+- `cargo check --release -p recursion`,
+  `cargo check --release -p recursion --features parallel`,
+  `cargo test --release -p recursion --features parallel --no-run`, and
+  `cargo clippy --release -p recursion --all-targets --features parallel --no-deps -- -D warnings`:
+  passed.
+- `/usr/bin/time -l cargo test --release -p recursion --features parallel -- --test-threads=1`:
+  665 unit tests and 5 structural integration tests passed, 4 explicit tree
+  conformance tests remained ignored, and the one-segment root was covered. The
+  suite finished in 3,980.25 seconds with 20.23 GB maximum RSS and zero swaps.
+- `sg -p 'impl FrameworkEval for $TYPE { $$$BODY }' -l rust --json=compact crates/recursion/src crates/air/src/schema.rs crates/air/src/poseidon2.rs`:
+  zero matches.
+- `rg -n 'define_component_tables!|define_component_tables' crates/recursion/src crates/air/src/schema.rs crates/air/src/poseidon2.rs`:
+  zero matches.
+- `prek run --all-files`: passed.
+- Commit `c212200d` pushed to `origin/chore/scratchpad-cleanups`.
 
 ## Project finish line
 

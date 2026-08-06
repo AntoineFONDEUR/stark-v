@@ -187,19 +187,25 @@ telemetry.
 
 #### Current hybrid Metal baseline
 
-Apple M5 Max, release build with `metal,parallel`; every proof verified and SIMD
-and Metal produced identical serialized proof sizes:
+Apple M5 Max, release build with `metal,parallel`; values are three-run medians.
+Every proof verified, SIMD and Metal produced identical serialized proof sizes,
+and every Metal run recorded 96 checked successes and zero failures:
 
 | Program | Cycles | SIMD total | SIMD prove | Metal total | Metal prove | Metal success/failure | Exact proof bytes (both) | Verified |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| `mul_output` | 61 | 0.98 s | 0.897 s | 68.76 s | 68.673 s | 96 / 0 | 74,081 | Both |
-| `load_merge` | 187 | 0.98 s | 0.898 s | 68.57 s | 68.484 s | 96 / 0 | 74,384 | Both |
-| `max_div` | 147 | 1.00 s | 0.909 s | 72.12 s | 72.021 s | 96 / 0 | 80,152 | Both |
+| `mul_output` | 61 | 1.00 s | 0.913 s | 1.20 s | 1.067 s | 96 / 0 | 74,081 | Both |
+| `load_merge` | 187 | 1.00 s | 0.914 s | 1.15 s | 1.065 s | 96 / 0 | 74,384 | Both |
+| `max_div` | 147 | 1.04 s | 0.947 s | 1.16 s | 1.073 s | 96 / 0 | 80,152 | Both |
 
-This forwarded hybrid path is functional correctness and telemetry
-infrastructure, not a performance win yet. It is currently much slower than
-SIMD because Stark-V's surrounding scalar `CpuBackend` work dominates. Resident
-SIMD/Metal AIR integration is the follow-up required for competitive latency.
+The previous roughly 69-second Metal result hit a scalar barycentric-weight
+cliff in `CpuBackend`: at log 20 it performed a QM31 division for every point.
+Exact SIMD dispatch now handles that work. Metal proving latency is consequently
+13–17% above SIMD rather than roughly 70x slower.
+
+The forwarded hybrid path remains correctness and telemetry infrastructure, not
+a performance win yet, so SIMD remains the default. Resident SIMD/Metal AIR
+integration and further profiling are the follow-up work needed for competitive
+Metal latency.
 
 ## Benchmarks
 

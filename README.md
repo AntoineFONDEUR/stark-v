@@ -187,20 +187,21 @@ telemetry.
 
 #### Current hybrid Metal baseline
 
-Apple M5 Max, release build with `metal,parallel`; values are three-run medians.
-Every proof verified, SIMD and Metal produced identical serialized proof sizes,
-and every Metal run recorded 96 checked successes and zero failures:
+Apple M5 Max, release build with `metal,parallel`; values are five-run medians
+from interleaved fresh-process SIMD/Metal runs. Every proof verified, SIMD and
+Metal produced identical serialized proof sizes, and every Metal run recorded
+96 checked successes and zero failures:
 
 | Program | Cycles | SIMD total | SIMD prove | Metal total | Metal prove | Metal success/failure | Exact proof bytes (both) | Verified |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| `mul_output` | 61 | 1.00 s | 0.913 s | 1.20 s | 1.067 s | 96 / 0 | 74,081 | Both |
-| `load_merge` | 187 | 1.00 s | 0.914 s | 1.15 s | 1.065 s | 96 / 0 | 74,384 | Both |
-| `max_div` | 147 | 1.04 s | 0.947 s | 1.16 s | 1.073 s | 96 / 0 | 80,152 | Both |
+| `mul_output` | 61 | 1.05 s | 0.960 s | 1.16 s | 1.072 s | 96 / 0 | 74,081 | Both |
+| `load_merge` | 187 | 1.05 s | 0.960 s | 1.15 s | 1.057 s | 96 / 0 | 74,384 | Both |
+| `max_div` | 147 | 1.08 s | 0.989 s | 1.16 s | 1.076 s | 96 / 0 | 80,152 | Both |
 
 The previous roughly 69-second Metal result hit a scalar barycentric-weight
 cliff in `CpuBackend`: at log 20 it performed a QM31 division for every point.
 Exact SIMD dispatch now handles that work. Metal proving latency is consequently
-13–17% above SIMD rather than roughly 70x slower.
+9–12% above SIMD rather than roughly 70x slower.
 
 The forwarded hybrid path remains correctness and telemetry infrastructure, not
 a performance win yet, so SIMD remains the default. Resident SIMD/Metal AIR

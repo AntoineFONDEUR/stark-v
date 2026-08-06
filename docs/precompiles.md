@@ -6,9 +6,8 @@
 > traces, and their claimed sums must cancel. It includes a square exemplar and
 > a Poseidon2 exemplar over the 32-word `poseidon2_io` tuple. The VM prover does
 > not yet offload Poseidon2, segment artifacts do not contain a precompile
-> proof, and recursion does not yet verify the pair. The prototype also uses
-> legacy manual component plumbing; production components must be expressed
-> through `define_air!` or `define_air_fns!` before integration.
+> proof, and recursion does not yet verify the pair. All three prototype binding
+> components are expressed directly through `define_air_fns!`.
 
 Goal: take the Poseidon2 table out of the rv32im stwo instance and prove it in
 its own instance, binding the two proofs through their shared LogUp relation.
@@ -68,9 +67,9 @@ before deriving the segment statement.
 
 1. **AIR definitions**: keep the `poseidon2` function and table in
    `define_air_fns!`; `poseidon2_io` already exists in the VM relation schema.
-   Migrate the prototype's host-side binding table away from
-   `define_component_tables!` and manual `FrameworkEval` before it becomes a
-   production component.
+   The prototype's square emit, square consume, and 32-word host binding tables
+   already use `define_air_fns!`; production adapters must preserve that direct
+   DSL ownership.
 2. **hash prover**: extract a production STWO instance over `Poseidon2Table`.
    `define_air_fns!` already generates standalone `prove_air_fns` /
    `verify_air_fns` for its tables (see `stwo-macros/tests/air_fns.rs`); this

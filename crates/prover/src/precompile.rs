@@ -26,43 +26,55 @@ use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::blake2_merkle::{Blake2sMerkleChannel, Blake2sMerkleHasher};
 use stwo::core::verifier::{VerificationError, verify};
 use stwo::prover::backend::simd::SimdBackend;
-use stwo::prover::backend::simd::qm31::PackedQM31;
 use stwo::prover::pcs::CommitmentSchemeProver;
 use stwo::prover::poly::BitReversedOrder;
 use stwo::prover::poly::circle::{CircleEvaluation, PolyOps};
 use stwo::prover::poly::twiddles::TwiddleTree;
 use stwo::prover::prove;
-use stwo_constraint_framework::{
-    EvalAtRow, FrameworkComponent, FrameworkEval, LogupTraceGenerator, RelationEntry,
-    TraceLocationAllocator, relation,
-};
-use stwo_macros::{combine, define_component_tables};
+use stwo_constraint_framework::{TraceLocationAllocator, relation};
 
-// The binding tables. `binding` is one row per `(x, y)` pair of the square
-// exemplar, on either side of the shared relation: the host fills it with
-// the pairs it used, the precompile with the pairs it validated.
-// `hash_binding` is the widened host side of the Poseidon2 precompile: one
-// row per permutation the host used, carrying the full 32-word io tuple; the
-// precompile side is the stark-v `poseidon2` component itself (io rows).
-define_component_tables! {
-    binding: {
-        committed: { x, y },
-    },
-    hash_binding: {
-        committed: {
-            in_0, in_1, in_2, in_3, in_4, in_5, in_6, in_7,
-            in_8, in_9, in_10, in_11, in_12, in_13, in_14, in_15,
-            out_0, out_1, out_2, out_3, out_4, out_5, out_6, out_7,
-            out_8, out_9, out_10, out_11, out_12, out_13, out_14, out_15,
-        },
-    },
+// The square exemplar shares one atomic `(x, y)` relation across its proofs.
+relation!(ValueRelation, 2);
+
+/// Relation instances embedded by the square binding component.
+#[derive(Clone)]
+pub struct BindingRelations {
+    pub value: ValueRelation,
 }
 
-use prover_columns::{BindingColumns, HashBindingColumns};
+// Distinct AIR owners keep the square constraint out of prover-controlled data.
+mod binding_emit_dsl {
+    stwo_macros::define_air_fns! {
+        max_degree: 3,
+        embedded: [],
+        embedded_component: true,
+        embedded_relations: crate::precompile::BindingRelations,
 
-// The shared relation, arity 2: `(x, y)`. A real precompile widens this to
-// the hash io tuple, e.g. `poseidon2_io(in_0..15, out_0..15)`.
-relation!(ValueRelation, 2);
+        relation value(2);
+
+        fn binding(x, y) {
+            emit(enabler) value(x, y);
+            return (x, y);
+        }
+    }
+}
+
+mod binding_consume_square_dsl {
+    stwo_macros::define_air_fns! {
+        max_degree: 3,
+        embedded: [],
+        embedded_component: true,
+        embedded_relations: crate::precompile::BindingRelations,
+
+        relation value(2);
+
+        fn binding(x, y) {
+            constrain y - x * x;
+            consume(enabler) value(x, y);
+            return (x, y);
+        }
+    }
+}
 
 type B = SimdBackend;
 type MC = Blake2sMerkleChannel;
@@ -78,49 +90,6 @@ pub enum Role {
     ConsumeSquare,
 }
 
-/// AIR of one binding side.
-#[derive(Clone)]
-pub struct Eval {
-    pub log_size: u32,
-    pub value: ValueRelation,
-    pub role: Role,
-}
-
-pub type Component = FrameworkComponent<Eval>;
-
-impl FrameworkEval for Eval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
-
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
-
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = BindingColumns::from_eval(&mut eval);
-        // Enabler booleanity (generated) for every row.
-        for constraint in cols.constraints() {
-            eval.add_constraint(constraint);
-        }
-        // The precompile is the only side that proves the relationship.
-        if self.role == Role::ConsumeSquare {
-            eval.add_constraint(cols.y.clone() - cols.x.clone() * cols.x.clone());
-        }
-        let numerator = match self.role {
-            Role::Emit => E::EF::from(cols.enabler.clone()),
-            Role::ConsumeSquare => -E::EF::from(cols.enabler.clone()),
-        };
-        eval.add_to_relation(RelationEntry::new(
-            &self.value,
-            numerator,
-            &[cols.x.clone(), cols.y.clone()],
-        ));
-        eval.finalize_logup();
-        eval
-    }
-}
-
 /// Generate the interaction trace and claimed LogUp sum for one side.
 ///
 /// The numerator is `±enabler`, so padding rows (enabler 0) contribute
@@ -133,24 +102,17 @@ fn gen_interaction_trace(
     ColumnVec<CircleEvaluation<B, BaseField, BitReversedOrder>>,
     SecureField,
 ) {
-    let cols = BindingColumns::from_iter(trace.iter().map(|eval| &eval.values.data));
-    let simd_size = cols.enabler.len();
-    let log_size = trace[0].domain.log_size();
-    let denom = combine!(value, [cols.x, cols.y]);
-
-    debug_assert_eq!(denom.len(), simd_size);
-    let mut logup_gen = LogupTraceGenerator::new(log_size);
-    let mut col_gen = logup_gen.new_col();
-    for (vec_row, &denominator) in denom.iter().enumerate() {
-        let enabler = PackedQM31::from(cols.enabler[vec_row]);
-        let numerator = match role {
-            Role::Emit => enabler,
-            Role::ConsumeSquare => -enabler,
-        };
-        col_gen.write_frac(vec_row, numerator, denominator);
+    let relations = BindingRelations {
+        value: value.clone(),
+    };
+    match role {
+        Role::Emit => {
+            binding_emit_dsl::component::witness::gen_interaction_trace(trace, &relations)
+        }
+        Role::ConsumeSquare => {
+            binding_consume_square_dsl::component::witness::gen_interaction_trace(trace, &relations)
+        }
     }
-    col_gen.finalize_col();
-    logup_gen.finalize_last()
 }
 
 /// One side's proof: its trace size, its claimed LogUp sum, and the stwo
@@ -221,18 +183,36 @@ fn finish_system(
     tree_builder.extend_evals(interaction);
     tree_builder.commit(channel);
 
-    let mut location_allocator = TraceLocationAllocator::default();
-    let component = Component::new(
-        &mut location_allocator,
-        Eval {
-            log_size,
-            value: value.clone(),
-            role,
-        },
-        claimed_sum,
-    );
-    let stark_proof =
-        prove(&[&component], channel, commitment_scheme).expect("binding proof generation failed");
+    let relations = BindingRelations {
+        value: value.clone(),
+    };
+    let stark_proof = match role {
+        Role::Emit => {
+            let mut location_allocator = TraceLocationAllocator::default();
+            let component = binding_emit_dsl::component::air::Component::new(
+                &mut location_allocator,
+                binding_emit_dsl::component::air::Eval {
+                    log_size,
+                    relations,
+                },
+                claimed_sum,
+            );
+            prove(&[&component], channel, commitment_scheme)
+        }
+        Role::ConsumeSquare => {
+            let mut location_allocator = TraceLocationAllocator::default();
+            let component = binding_consume_square_dsl::component::air::Component::new(
+                &mut location_allocator,
+                binding_consume_square_dsl::component::air::Eval {
+                    log_size,
+                    relations,
+                },
+                claimed_sum,
+            );
+            prove(&[&component], channel, commitment_scheme)
+        }
+    }
+    .expect("binding proof generation failed");
 
     SystemProof {
         log_size,
@@ -259,8 +239,8 @@ pub fn prove_binding_sides(
     precompile_pairs: &[(u32, u32)],
     config: PcsConfig,
 ) -> PrecompileBindingProof {
-    let mut host_table = BindingTable::new();
-    let mut precompile_table = BindingTable::new();
+    let mut host_table = binding_emit_dsl::BindingTable::new();
+    let mut precompile_table = binding_consume_square_dsl::BindingTable::new();
     for &(x, y) in host_pairs {
         host_table.push(x, y);
     }
@@ -323,7 +303,8 @@ fn replay_commit(
 
     commitment_scheme.commit(commitments[0], &[], &mut channel);
     channel.mix_u32s(&[proof.log_size]);
-    let trace_log_sizes = vec![proof.log_size; BindingColumns::<()>::SIZE];
+    let trace_log_sizes =
+        vec![proof.log_size; binding_emit_dsl::prover_columns::BindingColumns::<()>::SIZE];
     commitment_scheme.commit(commitments[1], &trace_log_sizes, &mut channel);
 
     (commitment_scheme, channel)
@@ -350,22 +331,45 @@ fn verify_system(
         channel,
     );
 
-    let mut location_allocator = TraceLocationAllocator::default();
-    let component = Component::new(
-        &mut location_allocator,
-        Eval {
-            log_size: proof.log_size,
-            value: value.clone(),
-            role,
-        },
-        proof.claimed_sum,
-    );
-    verify(
-        &[&component],
-        channel,
-        &mut commitment_scheme,
-        proof.stark_proof,
-    )
+    let relations = BindingRelations {
+        value: value.clone(),
+    };
+    match role {
+        Role::Emit => {
+            let mut location_allocator = TraceLocationAllocator::default();
+            let component = binding_emit_dsl::component::air::Component::new(
+                &mut location_allocator,
+                binding_emit_dsl::component::air::Eval {
+                    log_size: proof.log_size,
+                    relations,
+                },
+                proof.claimed_sum,
+            );
+            verify(
+                &[&component],
+                channel,
+                &mut commitment_scheme,
+                proof.stark_proof,
+            )
+        }
+        Role::ConsumeSquare => {
+            let mut location_allocator = TraceLocationAllocator::default();
+            let component = binding_consume_square_dsl::component::air::Component::new(
+                &mut location_allocator,
+                binding_consume_square_dsl::component::air::Eval {
+                    log_size: proof.log_size,
+                    relations,
+                },
+                proof.claimed_sum,
+            );
+            verify(
+                &[&component],
+                channel,
+                &mut commitment_scheme,
+                proof.stark_proof,
+            )
+        }
+    }
 }
 
 /// Verify a bound pair: both stwo proofs hold, and their claimed LogUp sums
@@ -420,74 +424,41 @@ use crate::relations::Relations;
 use air::poseidon2::poseidon2_traced_state;
 use air::trace::Poseidon2Table;
 
-/// AIR of the host side of the Poseidon2 binding: each row consumes one
-/// `poseidon2_io(in_0..15, out_0..15)` tuple the host used. No constraint
-/// ties the output to the input — the precompile proof owns the permutation.
-#[derive(Clone)]
-pub struct HashHostEval {
-    pub log_size: u32,
-    pub relations: Relations,
-}
+// Outputs stay unconstrained here because the paired Poseidon proof discharges them.
+mod hash_binding_dsl {
+    stwo_macros::define_air_fns! {
+        max_degree: 3,
+        embedded: [],
+        embedded_component: true,
+        embedded_relations: crate::relations::Relations,
 
-pub type HashHostComponent = FrameworkComponent<HashHostEval>;
+        relation poseidon2_io(32);
 
-impl FrameworkEval for HashHostEval {
-    fn log_size(&self) -> u32 {
-        self.log_size
-    }
-
-    fn max_constraint_log_degree_bound(&self) -> u32 {
-        self.log_size + 1
-    }
-
-    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
-        let cols = HashBindingColumns::from_eval(&mut eval);
-        for constraint in cols.constraints() {
-            eval.add_constraint(constraint);
+        fn hash_binding(
+            in_0, in_1, in_2, in_3, in_4, in_5, in_6, in_7,
+            in_8, in_9, in_10, in_11, in_12, in_13, in_14, in_15,
+            out_0, out_1, out_2, out_3, out_4, out_5, out_6, out_7,
+            out_8, out_9, out_10, out_11, out_12, out_13, out_14, out_15,
+        ) {
+            consume(enabler) poseidon2_io(
+                in_0, in_1, in_2, in_3, in_4, in_5, in_6, in_7,
+                in_8, in_9, in_10, in_11, in_12, in_13, in_14, in_15,
+                out_0, out_1, out_2, out_3, out_4, out_5, out_6, out_7,
+                out_8, out_9, out_10, out_11, out_12, out_13, out_14, out_15,
+            );
+            return (
+                out_0, out_1, out_2, out_3, out_4, out_5, out_6, out_7,
+                out_8, out_9, out_10, out_11, out_12, out_13, out_14, out_15,
+            );
         }
-        let tuple = [
-            cols.in_0.clone(),
-            cols.in_1.clone(),
-            cols.in_2.clone(),
-            cols.in_3.clone(),
-            cols.in_4.clone(),
-            cols.in_5.clone(),
-            cols.in_6.clone(),
-            cols.in_7.clone(),
-            cols.in_8.clone(),
-            cols.in_9.clone(),
-            cols.in_10.clone(),
-            cols.in_11.clone(),
-            cols.in_12.clone(),
-            cols.in_13.clone(),
-            cols.in_14.clone(),
-            cols.in_15.clone(),
-            cols.out_0.clone(),
-            cols.out_1.clone(),
-            cols.out_2.clone(),
-            cols.out_3.clone(),
-            cols.out_4.clone(),
-            cols.out_5.clone(),
-            cols.out_6.clone(),
-            cols.out_7.clone(),
-            cols.out_8.clone(),
-            cols.out_9.clone(),
-            cols.out_10.clone(),
-            cols.out_11.clone(),
-            cols.out_12.clone(),
-            cols.out_13.clone(),
-            cols.out_14.clone(),
-            cols.out_15.clone(),
-        ];
-        eval.add_to_relation(RelationEntry::new(
-            &self.relations.poseidon2_io,
-            -E::EF::from(cols.enabler.clone()),
-            &tuple,
-        ));
-        eval.finalize_logup();
-        eval
     }
 }
+
+use hash_binding_dsl::HashBindingTable;
+use hash_binding_dsl::prover_columns::HashBindingColumns;
+
+pub type HashHostEval = hash_binding_dsl::component::air::Eval;
+pub type HashHostComponent = hash_binding_dsl::component::air::Component;
 
 /// Generate the host side's interaction trace: `-enabler / poseidon2_io(t)`
 /// per row, so padding rows drop out and every used tuple must be discharged
@@ -499,54 +470,7 @@ fn gen_hash_host_interaction(
     ColumnVec<CircleEvaluation<B, BaseField, BitReversedOrder>>,
     SecureField,
 ) {
-    let cols = HashBindingColumns::from_iter(trace.iter().map(|eval| &eval.values.data));
-    let log_size = trace[0].domain.log_size();
-    let denom = combine!(
-        relations.poseidon2_io,
-        [
-            cols.in_0,
-            cols.in_1,
-            cols.in_2,
-            cols.in_3,
-            cols.in_4,
-            cols.in_5,
-            cols.in_6,
-            cols.in_7,
-            cols.in_8,
-            cols.in_9,
-            cols.in_10,
-            cols.in_11,
-            cols.in_12,
-            cols.in_13,
-            cols.in_14,
-            cols.in_15,
-            cols.out_0,
-            cols.out_1,
-            cols.out_2,
-            cols.out_3,
-            cols.out_4,
-            cols.out_5,
-            cols.out_6,
-            cols.out_7,
-            cols.out_8,
-            cols.out_9,
-            cols.out_10,
-            cols.out_11,
-            cols.out_12,
-            cols.out_13,
-            cols.out_14,
-            cols.out_15
-        ]
-    );
-
-    let mut logup_gen = LogupTraceGenerator::new(log_size);
-    let mut col_gen = logup_gen.new_col();
-    for (vec_row, &denominator) in denom.iter().enumerate() {
-        let numerator = -PackedQM31::from(cols.enabler[vec_row]);
-        col_gen.write_frac(vec_row, numerator, denominator);
-    }
-    col_gen.finalize_col();
-    logup_gen.finalize_last()
+    hash_binding_dsl::component::witness::gen_interaction_trace(trace, relations)
 }
 
 /// A bound pair of proofs for the Poseidon2 precompile: the host that used

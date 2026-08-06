@@ -297,6 +297,11 @@ set.
     and verifier-shape vectors passed, and outer-only proof parallelism was
     measured and rejected as slower than the retained shared-pool strategy.
 - `[active] PRE-001` Prepare the hash-precompile proof split for production.
+  - Completed slice: prototype square emit, square consume, and Poseidon host
+    binding components derive their tables, constraints, evaluators, and
+    interaction traces directly from `define_air_fns!`.
+  - Next slice: implement the joint post-commitment relation draw and
+    interaction proof of work.
 - `[pending] SYS-001` Implement proof-bound syscalls and output journal.
 - `[pending] FELT-001` Complete witness-side felt-function VM access.
 - `[pending] FELT-002` Migrate opcode execution and retire duplicate semantics.

@@ -327,9 +327,17 @@ set.
     swaps. Workspace release check and clippy with warnings denied passed.
   - Implementation slice: commit `d80b2d97` pushed to
     `origin/chore/scratchpad-cleanups`.
-  - Next slice: add forged, missing, extra, and reordered tuple-pairing tests at
-    both host-continuation and recursive-root boundaries, then rerun current
-    binary and padded-root conformance before benchmarking the split.
+  - Completed slice: two individually valid missing/extra tuple proof pairs fail
+    continuation shared-sum verification; re-paired outputs fail the generated
+    Poseidon2 AIR during proving; and 25 recursive tests reject a sum mismatch
+    plus mutations across every VM and detached-Poseidon proof region.
+  - Adversarial release evidence: missing/extra continuation cases passed in
+    6.86 seconds under one outer Rayon batch with 3.52 GB peak RSS; re-paired
+    output rejection passed in 6.70 seconds with 2.06 GB peak RSS; the shared
+    real-proof recursive matrix passed all 25 cases in 121.08 seconds with 4.24
+    GB peak RSS. Every run reported zero swaps.
+  - Next slice: rerun current binary and padded-root conformance before
+    benchmarking the split.
 - `[pending] SYS-001` Implement proof-bound syscalls and output journal.
 - `[pending] FELT-001` Complete witness-side felt-function VM access.
 - `[pending] FELT-002` Migrate opcode execution and retire duplicate semantics.
@@ -679,9 +687,10 @@ Required work, in order:
 8. `[pending]` Measure the split against the integrated Poseidon2 component and
    record the supported profile rather than assuming a performance win.
 
-Done when forged, missing, extra, or reordered permutation tuples fail both host
-continuation and recursive-root verification and the result is tested,
-committed, and pushed.
+Done when forged outputs, missing or extra tuples, and input/output re-pairing
+fail both host continuation and recursive leaf/root construction and the result
+is tested, committed, and pushed. Reordering complete tuples remains valid
+because the shared LogUp relation binds a multiset.
 
 ### `[pending] SYS-001` Syscalls and output journal
 

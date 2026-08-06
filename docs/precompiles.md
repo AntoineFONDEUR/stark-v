@@ -6,9 +6,11 @@
 > interaction nonce. Host verification, continuation, and the recursive segment
 > leaf replay both constituent transcripts and require exact cancellation of
 > their shared `poseidon2_io` relation sum. The active profile has produced and
-> verified one real split-proof recursive root. PRE-001 still requires
-> adversarial tuple-pairing tests, binary and padded-root conformance for the
-> changed profile, and comparative performance measurements.
+> verified one real split-proof recursive root. Production tests reject missing
+> and extra tuples at the host binder, re-paired outputs in the generated
+> Poseidon2 AIR, and mutations across every recursive Poseidon2 proof region.
+> PRE-001 still requires binary and padded-root conformance for the changed
+> profile and comparative performance measurements.
 
 The implemented split takes the Poseidon2 table out of the RV32IM STWO instance
 and proves it in its own instance, binding the two proofs through their shared
@@ -85,6 +87,10 @@ before deriving the segment statement.
 5. **SDK/proof format**: `SegmentProof` contains the VM proof, Poseidon2 proof,
    and joint interaction nonce; recursive statement folding remains over the
    segment's `SpanStatement`.
+6. **adversarial binding**: continuation rejects individually valid missing and
+   extra tuple proofs at exact shared-sum cancellation. The generated Poseidon2
+   AIR rejects outputs re-paired with different inputs, and the recursive leaf
+   rejects independent mutations across the detached proof wire.
 
 ## What it buys
 
@@ -100,8 +106,6 @@ before deriving the segment statement.
 
 ## Remaining work
 
-- **Adversarial pairing**: forged, missing, extra, and reordered permutation
-  tuples must fail through both continuation and recursive-root verification.
 - **Current-profile conformance**: rerun binary and padded-root constructions
   after the manifest change; the real one-segment split-proof root already
   passes.
@@ -109,3 +113,6 @@ before deriving the segment statement.
   (commitments, FRI) may exceed the column savings. Measure representative
   segment sizes before selecting an outer scheduling policy or claiming a
   performance win.
+
+Reordering complete tuples is valid because LogUp authenticates a multiset;
+changing how inputs and outputs are paired is not.

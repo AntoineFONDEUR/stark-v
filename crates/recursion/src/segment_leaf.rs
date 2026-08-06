@@ -1358,7 +1358,7 @@ pub(crate) mod tests {
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
     use air::digest::{MemoryDigest, ProgramDigest, ProtocolId};
-    use num_traits::Zero;
+    use num_traits::{One, Zero};
     use prover::components::COMPONENT_COUNT;
     use prover::e2e::{ensure_guest_built, guest_bin_dir};
     use prover::poseidon2_channel::Poseidon2M31MerkleChannel;
@@ -1367,6 +1367,7 @@ pub(crate) mod tests {
     use stwo::core::air::Components as CoreComponents;
     use stwo::core::channel::Channel;
     use stwo::core::fields::m31::BaseField;
+    use stwo::core::fields::qm31::SecureField;
     use stwo::core::pcs::CommitmentSchemeVerifier;
     use stwo::core::verifier::verify;
     use stwo_constraint_framework::TraceLocationAllocator;
@@ -1743,6 +1744,17 @@ pub(crate) mod tests {
         LastLayerCoefficient,
         InteractionPow,
         PcsPow,
+        Poseidon2TraceCommitment,
+        Poseidon2ClaimedSum,
+        Poseidon2SampledValue,
+        Poseidon2QueriedValue,
+        Poseidon2TracePath,
+        Poseidon2FriCommitment,
+        Poseidon2FriValue,
+        Poseidon2FriPath,
+        Poseidon2LastLayerCoefficient,
+        Poseidon2InteractionPow,
+        Poseidon2PcsPow,
     }
 
     #[rstest]
@@ -1759,7 +1771,18 @@ pub(crate) mod tests {
     #[case::last_layer_coefficient(ProofRegionMutation::LastLayerCoefficient)]
     #[case::interaction_pow(ProofRegionMutation::InteractionPow)]
     #[case::pcs_pow(ProofRegionMutation::PcsPow)]
-    fn universal_leaf_rejects_each_independently_mutated_proof_region(
+    #[case::poseidon2_trace_commitment(ProofRegionMutation::Poseidon2TraceCommitment)]
+    #[case::poseidon2_claimed_sum(ProofRegionMutation::Poseidon2ClaimedSum)]
+    #[case::poseidon2_sampled_value(ProofRegionMutation::Poseidon2SampledValue)]
+    #[case::poseidon2_queried_value(ProofRegionMutation::Poseidon2QueriedValue)]
+    #[case::poseidon2_trace_path(ProofRegionMutation::Poseidon2TracePath)]
+    #[case::poseidon2_fri_commitment(ProofRegionMutation::Poseidon2FriCommitment)]
+    #[case::poseidon2_fri_value(ProofRegionMutation::Poseidon2FriValue)]
+    #[case::poseidon2_fri_path(ProofRegionMutation::Poseidon2FriPath)]
+    #[case::poseidon2_last_layer_coefficient(ProofRegionMutation::Poseidon2LastLayerCoefficient)]
+    #[case::poseidon2_interaction_pow(ProofRegionMutation::Poseidon2InteractionPow)]
+    #[case::poseidon2_pcs_pow(ProofRegionMutation::Poseidon2PcsPow)]
+    fn split_segment_universal_leaf_rejects_each_mutated_proof_region(
         #[case] mutation: ProofRegionMutation,
     ) {
         let _assembly_guard = universal_assembly_guard();
@@ -1832,6 +1855,63 @@ pub(crate) mod tests {
             }
             ProofRegionMutation::InteractionPow => leaf.proof.interaction_pow ^= 1,
             ProofRegionMutation::PcsPow => leaf.proof.pcs_pow ^= 1,
+            ProofRegionMutation::Poseidon2TraceCommitment => {
+                leaf.poseidon2_proof.commitments[0] =
+                    flipped_digest(leaf.poseidon2_proof.commitments[0]);
+            }
+            ProofRegionMutation::Poseidon2ClaimedSum => {
+                leaf.poseidon2_proof.claimed_sums[0] =
+                    flipped_qm31(leaf.poseidon2_proof.claimed_sums[0]);
+            }
+            ProofRegionMutation::Poseidon2SampledValue => {
+                leaf.poseidon2_proof.sampled_values[0] =
+                    flipped_qm31(leaf.poseidon2_proof.sampled_values[0]);
+            }
+            ProofRegionMutation::Poseidon2QueriedValue => {
+                leaf.poseidon2_proof.queried_values[0] =
+                    flipped_word(leaf.poseidon2_proof.queried_values[0]);
+            }
+            ProofRegionMutation::Poseidon2TracePath => {
+                leaf.poseidon2_proof.trace_paths[0] =
+                    flipped_path(leaf.poseidon2_proof.trace_paths[0]);
+            }
+            ProofRegionMutation::Poseidon2FriCommitment => {
+                let layer = leaf.poseidon2_proof.fri_layers[0].clone();
+                leaf.poseidon2_proof.fri_layers[0] = FriLayerWire::new(
+                    layer.active_width(),
+                    flipped_digest(layer.commitment()),
+                    Box::new(*layer.queries()),
+                )
+                .expect("the active FRI width is unchanged");
+            }
+            ProofRegionMutation::Poseidon2FriValue => {
+                let layer = leaf.poseidon2_proof.fri_layers[0].clone();
+                let mut queries = Box::new(*layer.queries());
+                let query = queries[0];
+                let mut values = *query.values();
+                values[0] = flipped_qm31(values[0]);
+                queries[0] = FriQueryWire::new(values, *query.path());
+                leaf.poseidon2_proof.fri_layers[0] =
+                    FriLayerWire::new(layer.active_width(), layer.commitment(), queries)
+                        .expect("the active FRI width is unchanged");
+            }
+            ProofRegionMutation::Poseidon2FriPath => {
+                let layer = leaf.poseidon2_proof.fri_layers[0].clone();
+                let mut queries = Box::new(*layer.queries());
+                let query = queries[0];
+                queries[0] = FriQueryWire::new(*query.values(), flipped_path(*query.path()));
+                leaf.poseidon2_proof.fri_layers[0] =
+                    FriLayerWire::new(layer.active_width(), layer.commitment(), queries)
+                        .expect("the active FRI width is unchanged");
+            }
+            ProofRegionMutation::Poseidon2LastLayerCoefficient => {
+                leaf.poseidon2_proof.last_layer_coefficients[0] =
+                    flipped_qm31(leaf.poseidon2_proof.last_layer_coefficients[0]);
+            }
+            ProofRegionMutation::Poseidon2InteractionPow => {
+                leaf.poseidon2_proof.interaction_pow ^= 1;
+            }
+            ProofRegionMutation::Poseidon2PcsPow => leaf.poseidon2_proof.pcs_pow ^= 1,
         }
         leaf
     }
@@ -1946,6 +2026,17 @@ pub(crate) mod tests {
         assert_eq!(
             adapt_vm_segment_leaf(&fixture.profile, &proof, &fixture.metadata, fixture.job),
             Err(SegmentLeafError::MissingProverAuxiliaryData)
+        );
+    }
+
+    #[test]
+    fn split_segment_adapter_rejects_mismatched_relation_sums() {
+        let fixture = real_fixture();
+        let mut proof = fixture.proof.clone();
+        proof.poseidon2.interaction_claim.claimed_sum += SecureField::one();
+        assert_eq!(
+            adapt_vm_segment_leaf(&fixture.profile, &proof, &fixture.metadata, fixture.job),
+            Err(SegmentLeafError::SharedRelationMismatch)
         );
     }
 

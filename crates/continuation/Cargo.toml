@@ -13,6 +13,7 @@ stwo.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+air.workspace = true
 test-log.workspace = true
 
 [features]

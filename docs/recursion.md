@@ -22,9 +22,9 @@ The recursion crate exposes a manifest-bound outer prover and verifier for
 segment leaves, canonical empty leaves, and binary parents that verify two
 recursion proofs. Its level-ordered tree driver proves finalized VM segments,
 adds canonical padding, and returns only one root statement and root proof. The
-repository does not yet expose the application root-verification API or checked
-constant-size conformance, so no code should describe those properties as
-finished.
+application root verifier binds that proof to a caller-supplied complete
+execution. Checked constant-size conformance remains unfinished, so no code
+should describe that property as finished.
 
 The implemented foundation includes:
 
@@ -80,8 +80,14 @@ proof. A real recursion proof can be encoded and verified as either binary
 child. Swapped, duplicated, gapped, overlapping, and job-mismatched child pairs
 are rejected at the unique fold boundary. Release-mode end-to-end tests have
 produced and verified roots for runs with 1, 2, 3, 4, and 8 executed segments,
-including canonical padding for the three-segment tree. The public application
-root-verification API and constant-size conformance remain unfinished.
+including canonical padding for the three-segment tree.
+
+`root::verify_recursive_root` accepts a segmentation-free
+`CompleteExecutionStatement` and exactly one `RecursionProof`. It requires the
+proof statement to be the canonical complete root, compares the expected
+protocol, program, initial and final machine states, public input, public
+output, and total cycles, then runs the manifest-bound recursion verifier.
+Constant-size conformance remains unfinished.
 
 The live universal roster has 36 components. Every recursion-local component is
 authored directly through `define_air_fns!`; Poseidon2 uses the same macro, and
@@ -92,8 +98,8 @@ accepted macro counts. It rejects hand-written `FrameworkEval` implementations,
 standalone `define_component_tables!` declarations, and wrapper macros in those
 sources.
 
-The host continuation remains useful while recursion is incomplete, but it is
-not a final statement-verification API. Its public data does not currently bind
+The host continuation remains available for linear proof chains, but it is not
+the recursive application-verification API. Its public data does not bind
 segment roles, and its verifier does not accept an application-supplied
 complete-execution statement. Callers must not treat those helpers as a
 constant-size or fully statement-bound proof system.

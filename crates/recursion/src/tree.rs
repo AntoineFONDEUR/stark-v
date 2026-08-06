@@ -677,11 +677,10 @@ mod tests {
         .expect("the one-segment guest produces a complete recursion tree");
         let (root_statement, proof) = tree.into_parts();
         assert!(
-            crate::recursive_proof::verify_recursion_proof(
+            crate::root::verify_recursive_root(
                 &profile,
                 &preprocessing,
-                profile.manifest().protocol_id(),
-                root_statement.statement(),
+                root_statement.complete_execution(),
                 proof,
             )
             .is_ok()

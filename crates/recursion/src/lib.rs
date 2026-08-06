@@ -3,8 +3,8 @@
 //! The crate defines one universal verifier AIR with segment, binary, and empty
 //! branches. Its outer prover and verifier support authenticated segment leaves,
 //! canonical empty leaves, and binary parents that verify two recursion proofs.
-//! Tree construction and the application root-verifier API remain integration
-//! work tracked in `docs/roadmap.md`.
+//! The tree driver reduces finalized VM segments to one root proof. Constant
+//! root-size conformance remains tracked in `docs/roadmap.md`.
 //!
 //! Every recursion-owned roster component is authored in `define_air!` or
 //! `define_air_fns!`, so its AIR evaluation and interaction witness share one
@@ -44,6 +44,7 @@ pub mod recursion_child;
 pub mod recursive_proof;
 pub mod relation_challenge_air;
 pub mod relations;
+pub mod root;
 pub mod segment_leaf;
 pub mod statement;
 pub mod statement_input_air;

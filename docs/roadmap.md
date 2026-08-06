@@ -1135,6 +1135,7 @@ the recorded command without committing a machine-specific path.
 - `rg -n 'define_component_tables!|define_component_tables' crates/recursion/src crates/air/src/schema.rs crates/air/src/poseidon2.rs`:
   zero matches.
 - `prek run --all-files`: passed.
+- Commit `f1614b7e` pushed to `origin/chore/scratchpad-cleanups`.
 
 ## Project finish line
 

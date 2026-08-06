@@ -7,7 +7,9 @@
 > a Poseidon2 exemplar over the 32-word `poseidon2_io` tuple. The VM prover does
 > not yet offload Poseidon2, segment artifacts do not contain a precompile
 > proof, and recursion does not yet verify the pair. All three prototype binding
-> components are expressed directly through `define_air_fns!`.
+> components are expressed directly through `define_air_fns!`. The prototype
+> commits both main traces, grinds one joint interaction PoW over their ordered
+> post-commitment seeds, and only then draws the shared relations.
 
 Goal: take the Poseidon2 table out of the rv32im stwo instance and prove it in
 its own instance, binding the two proofs through their shared LogUp relation.
@@ -45,19 +47,22 @@ This forces a transcript handshake between the instances:
 ```text
 rv32im prover                      hash prover
   commit main trace ──── root_a ──┐
-                                  ├── mix(root_a, root_b) ── draw (z, alphas)
-  commit poseidon2 IO ◄─ root_b ──┘         │
-  interaction phase ◄───────────────────────┤
-  STARK proof A                             └─► interaction phase
-                                                STARK proof B
+                                  ├── mix(root_a, root_b) ── joint PoW
+  commit poseidon2 IO ◄─ root_b ──┘                    │
+                                   draw (z, alphas) ◄──┘
+  interaction phase ◄─────────────────────────────────┤
+  STARK proof A                                       └─► interaction phase
+                                                          STARK proof B
 ```
 
 Both provers can run their trace-commitment phase in parallel, synchronize once
-to derive the shared relation draw from both commitment roots, then finish
-independently. The continuation verifier first, and the recursive verifier once
-implemented, replay the same draw from both proofs' commitments and check
-`claimed_sum_A + claimed_sum_B = 0` for the shared relation (A's own internal
-relations still balance to zero on their own, as do B's).
+to grind the joint interaction nonce and derive the shared relation draw, then
+finish independently. The ordered roots and joint nonce are absorbed into both
+constituent proof transcripts. The continuation verifier first, and the
+recursive verifier once implemented, replay the same PoW and draw from both
+proofs' commitments and check `claimed_sum_A + claimed_sum_B = 0` for the shared
+relation (A's own internal relations still balance to zero on their own, as do
+B's).
 
 The recursive verifier must treat the VM proof and precompile proof as one leaf
 artifact: it verifies both proof transcripts and binds their shared relation sum
@@ -103,9 +108,6 @@ before deriving the segment statement.
   point; the simpler alternative (hash prover commits first, rv32im mixes its
   root) serializes the commitment phases. Measure before choosing — the sync is
   only needed if commitments genuinely overlap in time.
-- **Interaction PoW**: today one `interaction_pow` guards the relation draw;
-  with two instances the PoW must cover the joint transcript (one grind over
-  `mix(root_a, root_b)` shared by both).
 - **Lifting/log-size mismatch**: the two instances have independent trace sizes
   and PCS configs; the sum check is config-agnostic, but the recursive
   verifier's replay components must handle two distinct transcript shapes.

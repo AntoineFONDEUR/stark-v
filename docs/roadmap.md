@@ -300,8 +300,11 @@ set.
   - Completed slice: prototype square emit, square consume, and Poseidon host
     binding components derive their tables, constraints, evaluators, and
     interaction traces directly from `define_air_fns!`.
-  - Next slice: implement the joint post-commitment relation draw and
-    interaction proof of work.
+  - Completed slice: both prototype main commitments feed one ordered joint
+    interaction PoW; relation challenges are drawn afterward and the same joint
+    prefix is bound into both proof transcripts.
+  - Next slice: produce the standalone Poseidon2 proof and public
+    shared-relation claim used by the production segment artifact.
 - `[pending] SYS-001` Implement proof-bound syscalls and output journal.
 - `[pending] FELT-001` Complete witness-side felt-function VM access.
 - `[pending] FELT-002` Migrate opcode execution and retire duplicate semantics.

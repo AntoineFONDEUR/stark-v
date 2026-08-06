@@ -23,6 +23,7 @@ use stwo::core::fields::qm31::SecureField;
 use stwo::core::pcs::{CommitmentSchemeVerifier, PcsConfig};
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::proof::StarkProof;
+use stwo::core::proof_of_work::GrindOps;
 use stwo::core::vcs_lifted::blake2_merkle::{Blake2sMerkleChannel, Blake2sMerkleHasher};
 use stwo::core::verifier::{VerificationError, verify};
 use stwo::prover::backend::simd::SimdBackend;
@@ -32,6 +33,8 @@ use stwo::prover::poly::circle::{CircleEvaluation, PolyOps};
 use stwo::prover::poly::twiddles::TwiddleTree;
 use stwo::prover::prove;
 use stwo_constraint_framework::{TraceLocationAllocator, relation};
+
+use crate::relations::{INTERACTION_POW_BITS, Relations};
 
 // The square exemplar shares one atomic `(x, y)` relation across its proofs.
 relation!(ValueRelation, 2);
@@ -124,22 +127,58 @@ pub struct SystemProof {
     pub stark_proof: StarkProof<H>,
 }
 
+/// One proof of work over both committed main traces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JointInteractionProof {
+    pub pow_nonce: u64,
+}
+
 /// A bound pair of proofs: the host that used the pairs and the precompile
 /// that validated them.
 pub struct PrecompileBindingProof {
+    pub joint_interaction: JointInteractionProof,
     pub host: SystemProof,
     pub precompile: SystemProof,
 }
 
-/// Draw the shared relation from both trace commitments' channel seeds.
-///
-/// Deterministic in both prover and verifier: the relation is a public
-/// function of both proofs' trace roots, so neither prover commits its trace
-/// after learning the relation.
-fn draw_shared_relation(seed_host: SecureField, seed_precompile: SecureField) -> ValueRelation {
+/// Starts the ordered transcript shared by both proof instances.
+fn joint_interaction_channel(seeds: [SecureField; 2]) -> Blake2sChannel {
     let mut channel = Blake2sChannel::default();
-    channel.mix_felts(&[seed_host, seed_precompile]);
-    ValueRelation::draw(&mut channel)
+    channel.mix_felts(&seeds);
+    channel
+}
+
+/// Grinds once over both post-commitment seeds and advances the joint transcript.
+fn prove_joint_interaction(seeds: [SecureField; 2]) -> (JointInteractionProof, Blake2sChannel) {
+    let mut channel = joint_interaction_channel(seeds);
+    let pow_nonce = SimdBackend::grind(&channel, INTERACTION_POW_BITS);
+    channel.mix_u64(pow_nonce);
+    (JointInteractionProof { pow_nonce }, channel)
+}
+
+/// Checks the shared grind before any cross-proof relation challenge is drawn.
+fn verify_joint_interaction(
+    seeds: [SecureField; 2],
+    proof: JointInteractionProof,
+) -> Result<Blake2sChannel, VerificationError> {
+    let mut channel = joint_interaction_channel(seeds);
+    if !channel.verify_pow_nonce(INTERACTION_POW_BITS, proof.pow_nonce) {
+        return Err(VerificationError::InvalidStructure(
+            "precompile binding: invalid joint interaction proof of work".to_string(),
+        ));
+    }
+    channel.mix_u64(proof.pow_nonce);
+    Ok(channel)
+}
+
+/// Binds the ordered joint transcript prefix into one constituent proof.
+fn bind_joint_interaction(
+    channel: &mut Blake2sChannel,
+    seeds: [SecureField; 2],
+    proof: JointInteractionProof,
+) {
+    channel.mix_felts(&seeds);
+    channel.mix_u64(proof.pow_nonce);
 }
 
 /// Commit one side's preprocessed (empty) and trace trees, leaving the
@@ -267,11 +306,12 @@ pub fn prove_binding_sides(
     // Two-phase draw: the relation depends on both committed traces.
     let seed_host = host_channel.draw_secure_felt();
     let seed_precompile = precompile_channel.draw_secure_felt();
-    let value = draw_shared_relation(seed_host, seed_precompile);
+    let seeds = [seed_host, seed_precompile];
+    let (joint_interaction, mut joint_channel) = prove_joint_interaction(seeds);
+    let value = ValueRelation::draw(&mut joint_channel);
 
-    // Bind the shared relation into each transcript.
-    host_channel.mix_felts(&[seed_host, seed_precompile]);
-    precompile_channel.mix_felts(&[seed_host, seed_precompile]);
+    bind_joint_interaction(&mut host_channel, seeds, joint_interaction);
+    bind_joint_interaction(&mut precompile_channel, seeds, joint_interaction);
 
     let host = finish_system(
         host_scheme,
@@ -288,14 +328,19 @@ pub fn prove_binding_sides(
         Role::ConsumeSquare,
     );
 
-    PrecompileBindingProof { host, precompile }
+    PrecompileBindingProof {
+        joint_interaction,
+        host,
+        precompile,
+    }
 }
 
 /// Replay one side's commitment phase, leaving the verifier channel at the
 /// post-commit state. Mirrors [`commit_system`].
-fn replay_commit(
+fn replay_system_commit(
     proof: &SystemProof,
     config: PcsConfig,
+    trace_column_count: usize,
 ) -> (CommitmentSchemeVerifier<MC>, Blake2sChannel) {
     let mut channel = Blake2sChannel::default();
     let mut commitment_scheme = CommitmentSchemeVerifier::<MC>::new(config);
@@ -303,24 +348,20 @@ fn replay_commit(
 
     commitment_scheme.commit(commitments[0], &[], &mut channel);
     channel.mix_u32s(&[proof.log_size]);
-    let trace_log_sizes =
-        vec![proof.log_size; binding_emit_dsl::prover_columns::BindingColumns::<()>::SIZE];
+    let trace_log_sizes = vec![proof.log_size; trace_column_count];
     commitment_scheme.commit(commitments[1], &trace_log_sizes, &mut channel);
 
     (commitment_scheme, channel)
 }
 
-/// Finish verifying one side: bind the shared relation, commit the
-/// interaction tree, and run stwo verification against the matching role.
+/// Finishes one side after the caller binds the joint transcript prefix.
 fn verify_system(
     proof: SystemProof,
     mut commitment_scheme: CommitmentSchemeVerifier<MC>,
     channel: &mut Blake2sChannel,
     value: &ValueRelation,
     role: Role,
-    seeds: [SecureField; 2],
 ) -> Result<(), VerificationError> {
-    channel.mix_felts(&seeds);
     channel.mix_felts(&[proof.claimed_sum]);
 
     // One secure column (4 base columns) of LogUp fractions.
@@ -381,14 +422,22 @@ pub fn verify_binding(
     proof: PrecompileBindingProof,
     config: PcsConfig,
 ) -> Result<(), VerificationError> {
-    let PrecompileBindingProof { host, precompile } = proof;
+    let PrecompileBindingProof {
+        joint_interaction,
+        host,
+        precompile,
+    } = proof;
 
-    let (host_scheme, mut host_channel) = replay_commit(&host, config);
-    let (precompile_scheme, mut precompile_channel) = replay_commit(&precompile, config);
+    let trace_column_count = binding_emit_dsl::prover_columns::BindingColumns::<()>::SIZE;
+    let (host_scheme, mut host_channel) = replay_system_commit(&host, config, trace_column_count);
+    let (precompile_scheme, mut precompile_channel) =
+        replay_system_commit(&precompile, config, trace_column_count);
 
     let seed_host = host_channel.draw_secure_felt();
     let seed_precompile = precompile_channel.draw_secure_felt();
-    let value = draw_shared_relation(seed_host, seed_precompile);
+    let seeds = [seed_host, seed_precompile];
+    let mut joint_channel = verify_joint_interaction(seeds, joint_interaction)?;
+    let value = ValueRelation::draw(&mut joint_channel);
 
     // The cross-proof binding check.
     if !(host.claimed_sum + precompile.claimed_sum).is_zero() {
@@ -397,22 +446,15 @@ pub fn verify_binding(
         ));
     }
 
-    let seeds = [seed_host, seed_precompile];
-    verify_system(
-        host,
-        host_scheme,
-        &mut host_channel,
-        &value,
-        Role::Emit,
-        seeds,
-    )?;
+    bind_joint_interaction(&mut host_channel, seeds, joint_interaction);
+    bind_joint_interaction(&mut precompile_channel, seeds, joint_interaction);
+    verify_system(host, host_scheme, &mut host_channel, &value, Role::Emit)?;
     verify_system(
         precompile,
         precompile_scheme,
         &mut precompile_channel,
         &value,
         Role::ConsumeSquare,
-        seeds,
     )
 }
 
@@ -420,7 +462,6 @@ pub fn verify_binding(
 // The real precompile: Poseidon2 over the 32-word `poseidon2_io` relation
 // =============================================================================
 
-use crate::relations::Relations;
 use air::poseidon2::poseidon2_traced_state;
 use air::trace::Poseidon2Table;
 
@@ -477,17 +518,16 @@ fn gen_hash_host_interaction(
 /// the permutations and the stark-v `poseidon2` component instance that
 /// proved them (io rows, so only the atomic 32-word tuples are emitted).
 pub struct HashPrecompileBindingProof {
+    pub joint_interaction: JointInteractionProof,
     pub host: SystemProof,
     pub precompile: SystemProof,
 }
 
-/// Draw the full relation set from both trace commitments' channel seeds.
+/// Draws the full relation set from the post-grind joint transcript.
 /// The `poseidon2_io` member is the shared relation; drawing the whole set
 /// keeps the precompile side's component byte-identical to the zkVM's.
-fn draw_shared_relations(seed_host: SecureField, seed_precompile: SecureField) -> Relations {
-    let mut channel = Blake2sChannel::default();
-    channel.mix_felts(&[seed_host, seed_precompile]);
-    Relations::draw(&mut channel)
+fn draw_shared_relations(channel: &mut Blake2sChannel) -> Relations {
+    Relations::draw(channel)
 }
 
 /// Prove the host and the Poseidon2 precompile as two independent stwo
@@ -554,9 +594,11 @@ pub fn prove_hash_binding_sides(
     // Two-phase draw: the relations depend on both committed traces.
     let seed_host = host_channel.draw_secure_felt();
     let seed_precompile = precompile_channel.draw_secure_felt();
-    let relations = draw_shared_relations(seed_host, seed_precompile);
-    host_channel.mix_felts(&[seed_host, seed_precompile]);
-    precompile_channel.mix_felts(&[seed_host, seed_precompile]);
+    let seeds = [seed_host, seed_precompile];
+    let (joint_interaction, mut joint_channel) = prove_joint_interaction(seeds);
+    let relations = draw_shared_relations(&mut joint_channel);
+    bind_joint_interaction(&mut host_channel, seeds, joint_interaction);
+    bind_joint_interaction(&mut precompile_channel, seeds, joint_interaction);
 
     // Host side: interaction, claim, proof.
     let (host_interaction, host_claimed_sum) = gen_hash_host_interaction(&host_trace, &relations);
@@ -602,6 +644,7 @@ pub fn prove_hash_binding_sides(
     .expect("hash precompile proof generation failed");
 
     HashPrecompileBindingProof {
+        joint_interaction,
         host: SystemProof {
             log_size: host_log_size,
             claimed_sum: host_claimed_sum,
@@ -622,31 +665,25 @@ pub fn verify_hash_binding(
     proof: HashPrecompileBindingProof,
     config: PcsConfig,
 ) -> Result<(), VerificationError> {
-    let HashPrecompileBindingProof { host, precompile } = proof;
+    let HashPrecompileBindingProof {
+        joint_interaction,
+        host,
+        precompile,
+    } = proof;
 
-    let replay = |proof: &SystemProof, n_columns: usize| {
-        let mut channel = Blake2sChannel::default();
-        let mut commitment_scheme = CommitmentSchemeVerifier::<MC>::new(config);
-        let commitments = &proof.stark_proof.commitments;
-        commitment_scheme.commit(commitments[0], &[], &mut channel);
-        channel.mix_u32s(&[proof.log_size]);
-        commitment_scheme.commit(
-            commitments[1],
-            &vec![proof.log_size; n_columns],
-            &mut channel,
-        );
-        (commitment_scheme, channel)
-    };
-    let (mut host_scheme, mut host_channel) = replay(&host, HashBindingColumns::<()>::SIZE);
-    let (mut precompile_scheme, mut precompile_channel) = replay(
+    let (mut host_scheme, mut host_channel) =
+        replay_system_commit(&host, config, HashBindingColumns::<()>::SIZE);
+    let (mut precompile_scheme, mut precompile_channel) = replay_system_commit(
         &precompile,
+        config,
         air::trace::prover_columns::Poseidon2Columns::<()>::SIZE,
     );
 
     let seed_host = host_channel.draw_secure_felt();
     let seed_precompile = precompile_channel.draw_secure_felt();
-    let relations = draw_shared_relations(seed_host, seed_precompile);
     let seeds = [seed_host, seed_precompile];
+    let mut joint_channel = verify_joint_interaction(seeds, joint_interaction)?;
+    let relations = draw_shared_relations(&mut joint_channel);
 
     // The cross-proof binding check.
     if !(host.claimed_sum + precompile.claimed_sum).is_zero() {
@@ -656,7 +693,7 @@ pub fn verify_hash_binding(
     }
 
     // Host side: one secure LogUp column (4 base columns).
-    host_channel.mix_felts(&seeds);
+    bind_joint_interaction(&mut host_channel, seeds, joint_interaction);
     host_channel.mix_felts(&[host.claimed_sum]);
     host_scheme.commit(
         host.stark_proof.commitments[2],
@@ -681,7 +718,7 @@ pub fn verify_hash_binding(
 
     // Precompile side: two secure LogUp columns (8 base columns, the
     // poseidon2 component pairs its entries).
-    precompile_channel.mix_felts(&seeds);
+    bind_joint_interaction(&mut precompile_channel, seeds, joint_interaction);
     precompile_channel.mix_felts(&[precompile.claimed_sum]);
     precompile_scheme.commit(
         precompile.stark_proof.commitments[2],
@@ -722,6 +759,15 @@ mod tests {
     fn test_binding_roundtrip_verifies() {
         let proof = prove_binding(&square_pairs(), config());
         assert!(verify_binding(proof, config()).is_ok());
+    }
+
+    #[test]
+    fn test_binding_rejects_invalid_joint_interaction_pow() {
+        let mut proof = prove_binding(&square_pairs(), config());
+        let columns = binding_emit_dsl::prover_columns::BindingColumns::<()>::SIZE;
+        proof.joint_interaction.pow_nonce =
+            invalid_joint_pow_nonce(&proof.host, columns, &proof.precompile, columns);
+        assert!(verify_binding(proof, config()).is_err());
     }
 
     #[test]
@@ -778,6 +824,18 @@ mod tests {
     }
 
     #[test]
+    fn test_hash_binding_rejects_invalid_joint_interaction_pow() {
+        let mut proof = prove_hash_binding(&hash_states(5), config());
+        proof.joint_interaction.pow_nonce = invalid_joint_pow_nonce(
+            &proof.host,
+            HashBindingColumns::<()>::SIZE,
+            &proof.precompile,
+            air::trace::prover_columns::Poseidon2Columns::<()>::SIZE,
+        );
+        assert!(verify_hash_binding(proof, config()).is_err());
+    }
+
+    #[test]
     fn test_hash_binding_sums_cancel() {
         let proof = prove_hash_binding(&hash_states(5), config());
         assert!((proof.host.claimed_sum + proof.precompile.claimed_sum).is_zero());
@@ -826,5 +884,24 @@ mod tests {
         proof.host.claimed_sum = -proof.precompile.claimed_sum + one;
         proof.precompile.claimed_sum = -proof.host.claimed_sum;
         assert!(verify_binding(proof, config()).is_err());
+    }
+
+    fn invalid_joint_pow_nonce(
+        host: &SystemProof,
+        host_columns: usize,
+        precompile: &SystemProof,
+        precompile_columns: usize,
+    ) -> u64 {
+        let (_, mut host_channel) = replay_system_commit(host, config(), host_columns);
+        let (_, mut precompile_channel) =
+            replay_system_commit(precompile, config(), precompile_columns);
+        let seeds = [
+            host_channel.draw_secure_felt(),
+            precompile_channel.draw_secure_felt(),
+        ];
+        let channel = joint_interaction_channel(seeds);
+        (0_u64..)
+            .find(|nonce| !channel.verify_pow_nonce(INTERACTION_POW_BITS, *nonce))
+            .expect("the PoW predicate rejects at least one nonce")
     }
 }

@@ -1652,6 +1652,8 @@ the recorded command without committing a machine-specific path.
 - Recursive-root proofs remain deferred until the final opcode roster: this
   slice changes the VM component geometry and protocol identity, but no root
   construction boundary.
+- Implementation commit `9c6fb0ef` was pushed to
+  `origin/chore/scratchpad-cleanups`.
 
 ## Project finish line
 

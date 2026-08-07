@@ -1600,6 +1600,8 @@ the recorded command without committing a machine-specific path.
   while a single proof retains STWO's shared Rayon pool: the measured binary
   root took 949.04 seconds and 34.62 GB maximum RSS with the shared pool versus
   1,139.85 seconds and 35.17 GB with outer-only Rayon.
+- Implementation commit `16888749` was pushed to
+  `origin/chore/scratchpad-cleanups`.
 
 ## Project finish line
 

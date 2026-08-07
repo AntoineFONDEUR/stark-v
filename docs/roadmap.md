@@ -415,17 +415,19 @@ set.
     mode; detailed evidence is recorded below.
 - `[in progress] FELT-002` Migrate opcode execution and retire duplicate
   semantics.
-  - LUI, AUIPC, JAL, JALR, both base ALUs, both comparisons, and both branch
-    families now derive execution, witness rows, AIR, interactions, and VM
+  - LUI, AUIPC, JAL, JALR, both base ALUs, both comparisons, and both branch and
+    shift families now derive execution, witness rows, AIR, interactions, and VM
     component routes from direct `define_air_fns!` definitions; their runner
     modules retain decode adapters only.
   - The existing felt DSL now provides proof-bound canonical M31 splitting and
     byte-level AND/OR/XOR intrinsics plus wrapping `u32` add/subtract with a
-    constrained carry/borrow chain. JALR constrains both its M31 source address
-    and the low-bit clearing lookup.
-  - The active checkpoint has 1,556 VM tables, 1,664 sampled values, and 629 VM
+    constrained carry/borrow chain. Batched LogUp arguments with nonlinear
+    expressions are materialized by the same compiler so generated constraints
+    stay within the declared cubic degree. JALR constrains both its M31 source
+    address and the low-bit clearing lookup.
+  - The active checkpoint has 1,677 VM tables, 1,785 sampled values, and 646 VM
     AIR instructions. Its protocol identifier is
-    `[1812854606, 380357156, 1799778124, 326217952, 1577751674, 998653010, 10229157, 1305708380]`.
+    `[1496761093, 943642719, 1615269435, 2129355053, 368726675, 2114118801, 2126697374, 1055584304]`.
   - Fast boundary, component, and malformed-relation tests precede one
     sequential single-chunk VM proof per migrated family; root E2Es remain
     deferred until the final VM roster.
@@ -837,16 +839,17 @@ Required work, in order:
 2. `[done]` Migrate `auipc`, `jal`, and `jalr`.
 3. `[done]` Migrate `base_alu_imm` and `base_alu_reg`.
 4. `[done]` Migrate `lt_imm`, `lt_reg`, `branch_eq`, and `branch_lt`.
-5. `[in progress]` Migrate `shifts_imm`, `shifts_reg`, `mul`, and `mulh`.
-6. Migrate `load_store`.
-7. Migrate `div` last.
-8. `[in progress]` Preserve one real guest prove/verify test plus focused
+5. `[done]` Migrate `shifts_imm` and `shifts_reg`.
+6. `[in progress]` Migrate `mul` and `mulh`.
+7. Migrate `load_store`.
+8. Migrate `div` last.
+9. `[in progress]` Preserve one real guest prove/verify test plus focused
    malformed-witness coverage for every family before deleting its old schema
    and handler. LUI, AUIPC, JAL, JALR, both base ALUs, both comparisons, and
-   both branch families have both gates.
-9. Delete the obsolete opcode `define_air!` trace block, `components!` support,
-   and `runner/src/ops` only after the last family moves.
-10. Re-derive the VM AIR program and recursion manifest from the final roster
+   both branch and shift families have both gates.
+10. Delete the obsolete opcode `define_air!` trace block, `components!` support,
+    and `runner/src/ops` only after the last family moves.
+11. Re-derive the VM AIR program and recursion manifest from the final roster
     and rerun every root conformance test under a new protocol identity.
 
 Done when opcode execution, witness filling, and AIR constraints have one
@@ -1654,6 +1657,53 @@ the recorded command without committing a machine-specific path.
   construction boundary.
 - Implementation commit `9c6fb0ef` was pushed to
   `origin/chore/scratchpad-cleanups`.
+
+### `FELT-002 shift checkpoint` — 2026-08-07
+
+- `crates/air/src/opcodes/{shifts_reg,shifts_imm}.rs` are the sole sources for
+  SLL/SRL/SRA and SLLI/SRLI/SRAI state transitions, witness rows, constraints,
+  relations, and component evaluators through direct `define_air_fns!`
+  invocations. Their runner functions decode only registers, immediates, and the
+  one-hot opcode tuple before calling the generated fill. The obsolete
+  `define_air!` blocks and manual shift-witness builder are gone.
+- The shift functions authenticate the five-bit amount, byte carries, dynamic
+  masks, and arithmetic sign through the existing bitwise relation, then
+  range-check the four output bytes. No standalone or opcode-specific macro was
+  added. The existing compiler now commits nonlinear relation arguments before
+  pair-batched LogUp evaluation; two macro-level degree regressions and both
+  production shift evaluators prove every constraint remains at degree three or
+  below. Trusted preprocessed components retain their singleton nonlinear tail.
+- `/usr/bin/time -l cargo nextest run --release -p runner -p prover ... -j 12`
+  selected nine runner boundary cases, six component fixtures, three lookup
+  gates, two malformed-witness checks, and two exact-guest aggregate AIR checks:
+  all 22 passed concurrently in 3.35 seconds after release compilation, with
+  1.46 GB maximum RSS and zero swaps.
+- `/usr/bin/time -l cargo nextest run --release -p prover --test integration ... -j 1`:
+  the register and immediate single-chunk guests proved and verified
+  sequentially in 13.76 seconds, with 2.09 GB maximum RSS and zero swaps.
+- `/usr/bin/time -l cargo test --release -p stwo-macros --test air_fns -- --test-threads=12`
+  passed all 58 compiler, access, intrinsic, relation, degree, and proof tests.
+  `cargo test --release -p air --lib -- --test-threads=12` passed all 46 AIR
+  tests.
+- `/usr/bin/time -l cargo test --release -p recursion --lib profile::tests:: -- --nocapture --test-threads=7`:
+  all seven profile construction, geometry, digest, registry, and fixed-wire
+  tests passed in 0.58 seconds after release compilation, with 3.17 GB maximum
+  RSS and zero swaps. The active checkpoint has 1,677 VM tables, 1,785 sampled
+  values, 646 AIR instructions, protocol identifier
+  `[1496761093, 943642719, 1615269435, 2129355053, 368726675, 2114118801, 2126697374, 1055584304]`,
+  and VM AIR digest
+  `[1045320913, 590638401, 396291190, 174280959, 1757939123, 404792689, 410635700, 1286242632]`.
+- `cargo test --release -p recursion --test air_dsl_guard -- --nocapture --test-threads=5`
+  passed all five roster, owner, direct-DSL, and generated-component route
+  guards after moving both exact shift owners and routes out of the manual
+  schema.
+- Host release clippy passed with warnings denied for `stwo-macros`, `air`,
+  `runner`, `prover`, and `recursion`; standalone guest release clippy passed
+  for both shift output fixtures. `prek run --all-files` passed.
+- Implementation commit `92060bc2` was pushed to
+  `origin/chore/scratchpad-cleanups`. Recursive-root proofs remain deferred
+  until the final opcode roster because this slice changes VM geometry but not a
+  root construction boundary.
 
 ## Project finish line
 

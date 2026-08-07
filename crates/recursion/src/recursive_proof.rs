@@ -587,6 +587,7 @@ mod tests {
 
     use air::digest::{Digest8, IoDigest, M31Word, ProgramDigest};
     use num_traits::One;
+    use prover::poseidon2_channel::Poseidon2M31Channel;
     use rstest::rstest;
 
     use super::*;
@@ -700,8 +701,30 @@ mod tests {
             let preprocessing =
                 preprocess_recursion(&profile).expect("universal preprocessing is valid");
             let (left_statement, right_statement, parent_statement) = padding_pair(&profile);
+            #[cfg(feature = "parallel")]
+            let (left, right) = {
+                let parallel = preprocessing
+                    .parallel_template(&profile)
+                    .expect("parallel preprocessing is valid");
+                rayon::join(
+                    || {
+                        let local = parallel
+                            .worker_local(&profile)
+                            .expect("left worker preprocessing is valid");
+                        proved_child_wire(&profile, &local, &left_statement, "left-child.bin")
+                    },
+                    || {
+                        let local = parallel
+                            .worker_local(&profile)
+                            .expect("right worker preprocessing is valid");
+                        proved_child_wire(&profile, &local, &right_statement, "right-child.bin")
+                    },
+                )
+            };
+            #[cfg(not(feature = "parallel"))]
             let left =
                 proved_child_wire(&profile, &preprocessing, &left_statement, "left-child.bin");
+            #[cfg(not(feature = "parallel"))]
             let right = proved_child_wire(
                 &profile,
                 &preprocessing,
@@ -1171,6 +1194,26 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn two_recursion_children_close_binary_witness_relations() {
+        let fixture = binary_child_fixture();
+        let _assembly_guard = crate::segment_leaf::tests::universal_assembly_guard();
+        let preprocessing =
+            preprocess_recursion(&fixture.profile).expect("universal preprocessing is valid");
+        let main = prepare_binary_node(
+            &fixture.profile,
+            &fixture.left,
+            &fixture.right,
+            &preprocessing.universal,
+        )
+        .expect("two authenticated children assemble one binary witness");
+        let mut channel = Poseidon2M31Channel::default();
+        let relations = UniversalRelations::draw(&mut channel);
+        let witness = finish_prepared_witness(&preprocessing.universal, main, &relations)
+            .expect("binary witness relations close");
+        assert!(witness.global_relation_sum().is_zero());
     }
 
     #[rstest]

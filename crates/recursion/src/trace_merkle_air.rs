@@ -1711,9 +1711,11 @@ mod tests {
         ]
     }
 
-    #[test]
-    fn trace_leaf_relations_close_exactly() {
-        let (preprocessing, _, table, poseidon2) = materialize(ProofKind::SegmentLeaf);
+    #[rstest]
+    #[case::segment(ProofKind::SegmentLeaf)]
+    #[case::binary(ProofKind::BinaryNode)]
+    fn trace_leaf_relations_close_exactly(#[case] kind: ProofKind) {
+        let (preprocessing, _, table, poseidon2) = materialize(kind);
         let mut channel = Poseidon2M31Channel::default();
         let vm_relations = Relations::draw(&mut channel);
         let control_relations = ControlRelations::draw(&mut channel);
@@ -1724,7 +1726,11 @@ mod tests {
             .rows
             .iter()
             .enumerate()
-            .filter(|(_, row)| row.segment_mask == 1)
+            .filter(|(_, row)| match kind {
+                ProofKind::SegmentLeaf => row.segment_mask == 1,
+                ProofKind::BinaryNode => row.binary_mask == 1,
+                ProofKind::EmptyLeaf => false,
+            })
             .fold(QM31::zero(), |sum, (row_index, row)| {
                 let value_terms =
                     row.chunks
@@ -1781,7 +1787,7 @@ mod tests {
         let (_, leaf_sum) = gen_interaction_trace(
             &trace,
             &preprocessing.gen_columns(),
-            ProofKind::SegmentLeaf,
+            kind,
             &vm_relations,
             &control_relations,
             &query_relations,

@@ -120,33 +120,24 @@ struct PayloadSource {
 }
 
 impl PayloadSource {
-    const fn requires_input_relation(self) -> bool {
-        matches!(
-            self.kind,
-            VerifierInputKind::Statement
-                | VerifierInputKind::Commitment
-                | VerifierInputKind::ClaimedSum
-                | VerifierInputKind::SampledValue
-                | VerifierInputKind::FriCommitment
-                | VerifierInputKind::LastLayerCoefficient
-                | VerifierInputKind::InteractionPowNonce
-                | VerifierInputKind::VmPublicClaimDigest
-                | VerifierInputKind::JointInteractionSeed
-                | VerifierInputKind::SharedRelationSum
-        )
-    }
-
-    const fn input_relation_use_count(self) -> u32 {
+    const fn input_relation_use_count(self, verifier_id: u32) -> u32 {
         match self.kind {
             // The AIR-composition and DEEP-quotient circuits independently
             // consume every sampled value authenticated by the transcript.
             VerifierInputKind::SampledValue => 2,
+            // Only segment constituents share the joint interaction nonce.
+            VerifierInputKind::InteractionPowNonce => {
+                if matches!(verifier_id, SEGMENT_VERIFIER_ID | POSEIDON2_VERIFIER_ID) {
+                    1
+                } else {
+                    0
+                }
+            }
             VerifierInputKind::Statement
             | VerifierInputKind::Commitment
             | VerifierInputKind::ClaimedSum
             | VerifierInputKind::FriCommitment
             | VerifierInputKind::LastLayerCoefficient
-            | VerifierInputKind::InteractionPowNonce
             | VerifierInputKind::VmPublicClaimDigest
             | VerifierInputKind::JointInteractionSeed => 1,
             VerifierInputKind::SharedRelationSum => 2,
@@ -301,7 +292,7 @@ impl TranscriptPayloadPreprocessed {
         self.rows
             .iter()
             .filter(|row| {
-                row.source.requires_input_relation()
+                row.source.input_relation_use_count(row.verifier_id) != 0
                     && match kind {
                         ProofKind::SegmentLeaf => row.segment_mask == 1,
                         ProofKind::BinaryNode => row.binary_mask == 1,
@@ -342,7 +333,8 @@ impl TranscriptPayloadPreprocessed {
             columns[ITEM_INDEX_COLUMN][index] = row.source.item_index;
             columns[LIMB_INDEX_COLUMN][index] = row.source.limb_index;
             columns[CONSTANT_MASK_COLUMN][index] = u32::from(row.source.constant.is_some());
-            columns[INPUT_USE_COUNT_COLUMN][index] = row.source.input_relation_use_count();
+            columns[INPUT_USE_COUNT_COLUMN][index] =
+                row.source.input_relation_use_count(row.verifier_id);
             columns[CONSTANT_COLUMN][index] = row.source.constant.unwrap_or(M31Word::ZERO).as_u32();
             columns[VM_AIR_CLAIMED_SUM_MASK_COLUMN][index] = u32::from(
                 matches!(row.verifier_id, SEGMENT_VERIFIER_ID | POSEIDON2_VERIFIER_ID)
@@ -954,6 +946,8 @@ impl std::error::Error for TranscriptPayloadError {}
 
 #[cfg(test)]
 mod tests {
+    use rstest::rstest;
+
     use super::*;
 
     #[test]
@@ -964,23 +958,70 @@ mod tests {
             limb_index: 0,
             constant: None,
         };
-        assert_eq!(source.input_relation_use_count(), 2);
+        assert_eq!(source.input_relation_use_count(SEGMENT_VERIFIER_ID), 2);
     }
 
-    #[test]
-    fn interaction_nonce_payloads_are_exposed_to_the_joint_binder() {
+    #[rstest]
+    #[case::vm(SEGMENT_VERIFIER_ID, 1)]
+    #[case::poseidon2(POSEIDON2_VERIFIER_ID, 1)]
+    #[case::left_recursion(LEFT_RECURSION_VERIFIER_ID, 0)]
+    #[case::right_recursion(RIGHT_RECURSION_VERIFIER_ID, 0)]
+    fn interaction_nonce_use_matches_the_verifier_lane(
+        #[case] verifier_id: u32,
+        #[case] expected: u32,
+    ) {
         let source = PayloadSource {
             kind: VerifierInputKind::InteractionPowNonce,
             item_index: 0,
             limb_index: 0,
             constant: None,
         };
+        assert_eq!(source.input_relation_use_count(verifier_id), expected);
+    }
+
+    #[rstest]
+    #[case::segment(ProofKind::SegmentLeaf, 1)]
+    #[case::binary(ProofKind::BinaryNode, 0)]
+    fn active_profile_interaction_nonce_rows_have_exact_external_uses(
+        #[case] kind: ProofKind,
+        #[case] expected: u32,
+    ) {
+        let profile = crate::profile::frozen_protocol_profile().expect("frozen profile is valid");
+        let calls = TranscriptCallPreprocessed::new(
+            profile.vm_plan(),
+            profile.poseidon2_plan(),
+            profile.recursion_plan(),
+        )
+        .expect("active transcript layouts are valid");
+        let preprocessing = TranscriptPayloadPreprocessed::new(
+            &calls,
+            profile.manifest().protocol_id(),
+            M31Word::from(
+                u16::try_from(crate::profile::POSEIDON2_COMPONENT_LOG_SIZE)
+                    .expect("the active Poseidon2 log size fits u16"),
+            ),
+        )
+        .expect("active payload layout is valid");
+        let active_nonce_rows = preprocessing
+            .rows
+            .iter()
+            .filter(|row| {
+                row.source.kind == VerifierInputKind::InteractionPowNonce
+                    && match kind {
+                        ProofKind::SegmentLeaf => row.segment_mask == 1,
+                        ProofKind::BinaryNode => row.binary_mask == 1,
+                        ProofKind::EmptyLeaf => false,
+                    }
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
             (
-                source.requires_input_relation(),
-                source.input_relation_use_count()
+                active_nonce_rows.len(),
+                active_nonce_rows
+                    .iter()
+                    .all(|row| row.source.input_relation_use_count(row.verifier_id) == expected),
             ),
-            (true, 1),
+            (8, true),
         );
     }
 
@@ -992,7 +1033,7 @@ mod tests {
             limb_index: 0,
             constant: None,
         };
-        assert_eq!(source.input_relation_use_count(), 2);
+        assert_eq!(source.input_relation_use_count(SEGMENT_VERIFIER_ID), 2);
     }
 
     #[test]
@@ -1011,15 +1052,9 @@ mod tests {
             (
                 source.kind,
                 source.constant,
-                source.requires_input_relation(),
-                source.input_relation_use_count(),
+                source.input_relation_use_count(POSEIDON2_VERIFIER_ID),
             ),
-            (
-                VerifierInputKind::Poseidon2LogSize,
-                Some(log_size),
-                false,
-                0
-            ),
+            (VerifierInputKind::Poseidon2LogSize, Some(log_size), 0),
         );
     }
 }

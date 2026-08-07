@@ -767,9 +767,11 @@ mod tests {
         assert_eq!(distinct.len(), preprocessing.rows.len());
     }
 
-    #[test]
-    fn transcript_roots_and_path_consumers_close_exactly() {
-        let (preprocessing, table) = materialize(ProofKind::SegmentLeaf);
+    #[rstest]
+    #[case::segment(ProofKind::SegmentLeaf)]
+    #[case::binary(ProofKind::BinaryNode)]
+    fn transcript_roots_and_path_consumers_close_exactly(#[case] kind: ProofKind) {
+        let (preprocessing, table) = materialize(kind);
         let trace = table.into_witness();
         let mut channel = Poseidon2M31Channel::default();
         let verifier_input_relations = VerifierInputRelations::draw(&mut channel);
@@ -777,15 +779,19 @@ mod tests {
         let (_, root_sum) = gen_interaction_trace(
             &trace,
             &preprocessing.gen_columns(),
-            ProofKind::SegmentLeaf,
+            kind,
             &verifier_input_relations,
             &recursion_relations,
         );
         let external = preprocessing
             .rows
             .iter()
-            .filter(|row| row.segment_mask == 1)
             .enumerate()
+            .filter(|(_, row)| match kind {
+                ProofKind::SegmentLeaf => row.segment_mask == 1,
+                ProofKind::BinaryNode => row.binary_mask == 1,
+                ProofKind::EmptyLeaf => false,
+            })
             .fold(QM31::zero(), |sum, (index, row)| {
                 let digest = [
                     trace[1].values.at(index),

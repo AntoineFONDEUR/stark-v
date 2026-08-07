@@ -2467,6 +2467,8 @@ mod tests {
         poseidon2: Poseidon2Table,
         vm: FriMerkleOpeningSet,
         poseidon2_opening: FriMerkleOpeningSet,
+        left: FriMerkleOpeningSet,
+        right: FriMerkleOpeningSet,
     }
 
     fn materialize(kind: ProofKind) -> Materialized {
@@ -2536,6 +2538,8 @@ mod tests {
             poseidon2,
             vm,
             poseidon2_opening,
+            left,
+            right,
         }
     }
 
@@ -2925,15 +2929,17 @@ mod tests {
             }
             LookupTamper::AnchorDigest => materialized.anchor.digest_0[0] += 1,
         }
-        assert!(!relation_sum(materialized).is_zero());
+        assert!(!relation_sum(ProofKind::SegmentLeaf, materialized).is_zero());
     }
 
-    #[test]
-    fn fri_merkle_relations_close_exactly() {
-        assert!(relation_sum(materialize(ProofKind::SegmentLeaf)).is_zero());
+    #[rstest]
+    #[case::segment(ProofKind::SegmentLeaf)]
+    #[case::binary(ProofKind::BinaryNode)]
+    fn fri_merkle_relations_close_exactly(#[case] kind: ProofKind) {
+        assert!(relation_sum(kind, materialize(kind)).is_zero());
     }
 
-    fn relation_sum(materialized: Materialized) -> QM31 {
+    fn relation_sum(kind: ProofKind, materialized: Materialized) -> QM31 {
         let mut channel = Poseidon2M31Channel::default();
         let vm_relations = Relations::draw(&mut channel);
         let control_relations = ControlRelations::draw(&mut channel);
@@ -2943,7 +2949,7 @@ mod tests {
         let (_, leaf_sum) = gen_leaf_interaction_trace(
             &materialized.leaf.into_witness(),
             &materialized.preprocessing.gen_leaf_columns(),
-            ProofKind::SegmentLeaf,
+            kind,
             &vm_relations,
             &fri_relations,
             &recursion_relations,
@@ -2951,7 +2957,7 @@ mod tests {
         let (_, node_sum) = gen_node_interaction_trace(
             &materialized.node.into_witness(),
             &materialized.preprocessing.gen_node_columns(),
-            ProofKind::SegmentLeaf,
+            kind,
             &vm_relations,
             &fri_relations,
             &recursion_relations,
@@ -2959,7 +2965,7 @@ mod tests {
         let (_, anchor_sum) = gen_anchor_interaction_trace(
             &materialized.anchor.into_witness(),
             &materialized.preprocessing.gen_anchor_columns(),
-            ProofKind::SegmentLeaf,
+            kind,
             &control_relations,
             &query_relations,
             &fri_relations,
@@ -2974,25 +2980,32 @@ mod tests {
             &materialized.poseidon2.into_witness(),
             &vm_relations,
         );
-        let external = external_relation_sum(
-            &materialized.preprocessing,
-            &materialized.query_preprocessing,
-            &materialized.vm,
-            SEGMENT_VERIFIER_ID,
-            &control_relations,
-            &query_relations,
-            &fri_relations,
-            &recursion_relations,
-        ) + external_relation_sum(
-            &materialized.preprocessing,
-            &materialized.query_preprocessing,
-            &materialized.poseidon2_opening,
-            POSEIDON2_VERIFIER_ID,
-            &control_relations,
-            &query_relations,
-            &fri_relations,
-            &recursion_relations,
-        );
+        let openings = match kind {
+            ProofKind::SegmentLeaf => vec![
+                (&materialized.vm, SEGMENT_VERIFIER_ID),
+                (&materialized.poseidon2_opening, POSEIDON2_VERIFIER_ID),
+            ],
+            ProofKind::BinaryNode => vec![
+                (&materialized.left, LEFT_RECURSION_VERIFIER_ID),
+                (&materialized.right, RIGHT_RECURSION_VERIFIER_ID),
+            ],
+            ProofKind::EmptyLeaf => Vec::new(),
+        };
+        let external = openings
+            .into_iter()
+            .map(|(opening, verifier_id)| {
+                external_relation_sum(
+                    &materialized.preprocessing,
+                    &materialized.query_preprocessing,
+                    opening,
+                    verifier_id,
+                    &control_relations,
+                    &query_relations,
+                    &fri_relations,
+                    &recursion_relations,
+                )
+            })
+            .sum::<QM31>();
         leaf_sum + node_sum + anchor_sum + path_sum + poseidon_sum + external
     }
 

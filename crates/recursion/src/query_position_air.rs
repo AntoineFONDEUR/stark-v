@@ -1371,44 +1371,64 @@ mod tests {
         assert!(!canonical_constraint.is_zero());
     }
 
-    #[test]
-    fn raw_draws_bits_and_typed_positions_close_exactly() {
+    #[rstest]
+    #[case::segment(ProofKind::SegmentLeaf)]
+    #[case::binary(ProofKind::BinaryNode)]
+    fn raw_draws_bits_and_typed_positions_close_exactly(#[case] kind: ProofKind) {
         let preprocessing = preprocessing();
-        let (vm, _, _) = queries();
+        let (vm, left, right) = queries();
         let mut bits = QueryBitsTable::new();
         let mut mappings = QueryMappingTable::new();
         push_query_positions(
             &mut bits,
             &mut mappings,
             &preprocessing,
-            UniversalRawQueryWitness::Segment {
-                vm: &vm,
-                poseidon2: &vm,
+            match kind {
+                ProofKind::SegmentLeaf => UniversalRawQueryWitness::Segment {
+                    vm: &vm,
+                    poseidon2: &vm,
+                },
+                ProofKind::BinaryNode => UniversalRawQueryWitness::Binary {
+                    left: &left,
+                    right: &right,
+                },
+                ProofKind::EmptyLeaf => UniversalRawQueryWitness::Empty,
             },
         )
         .expect("fixture raw queries materialize");
+        let active = |segment_mask: u32, binary_mask: u32| match kind {
+            ProofKind::SegmentLeaf => segment_mask == 1,
+            ProofKind::BinaryNode => binary_mask == 1,
+            ProofKind::EmptyLeaf => false,
+        };
+        let query_word = |verifier_id: u32, query: u32| match verifier_id {
+            SEGMENT_VERIFIER_ID | POSEIDON2_VERIFIER_ID => vm[query as usize],
+            LEFT_RECURSION_VERIFIER_ID => left[query as usize],
+            RIGHT_RECURSION_VERIFIER_ID => right[query as usize],
+            _ => unreachable!("preprocessed verifier identifiers are canonical"),
+        };
         let mut channel = Poseidon2M31Channel::default();
         let randomness_relations = VerifierRandomnessRelations::draw(&mut channel);
         let query_relations = QueryPositionRelations::draw(&mut channel);
         let (_, bits_sum) = gen_bits_interaction_trace(
             &bits.into_witness(),
             &preprocessing.gen_raw_columns(),
-            ProofKind::SegmentLeaf,
+            kind,
             &randomness_relations,
             &query_relations,
         );
         let (_, mappings_sum) = gen_mapping_interaction_trace(
             &mappings.into_witness(),
             &preprocessing.gen_mapping_columns(),
-            ProofKind::SegmentLeaf,
+            kind,
             &query_relations,
         );
         let raw_sources = preprocessing
             .raw_rows
             .iter()
-            .filter(|row| row.segment_mask == 1)
+            .filter(|row| active(row.segment_mask, row.binary_mask))
             .fold(QM31::zero(), |sum, row| {
-                let word = vm[row.query as usize];
+                let word = query_word(row.verifier_id, row.query);
                 let denominator: QM31 = randomness_relations.word.combine(&[
                     M31::from(row.verifier_id),
                     M31::from(VerifierRandomnessKind::RawQuery.as_u32()),
@@ -1421,9 +1441,9 @@ mod tests {
         let position_consumers = preprocessing
             .mapping_rows
             .iter()
-            .filter(|row| row.segment_mask == 1)
+            .filter(|row| active(row.segment_mask, row.binary_mask))
             .fold(QM31::zero(), |sum, row| {
-                let word = vm[row.query as usize];
+                let word = query_word(row.verifier_id, row.query);
                 let (position, offset) = row.evaluate(word).unwrap();
                 let denominator: QM31 = query_relations.position.combine(&[
                     M31::from(row.verifier_id),
@@ -1438,9 +1458,9 @@ mod tests {
         let bit_value_consumers = preprocessing
             .raw_rows
             .iter()
-            .filter(|row| row.segment_mask == 1)
+            .filter(|row| active(row.segment_mask, row.binary_mask))
             .fold(QM31::zero(), |sum, row| {
-                let word = vm[row.query as usize].as_u32();
+                let word = query_word(row.verifier_id, row.query).as_u32();
                 (0..M31_BITS).fold(sum, |sum, bit| {
                     let denominator: QM31 = query_relations.bit_value.combine(&[
                         M31::from(row.verifier_id),

@@ -363,7 +363,6 @@ pub fn gen_interaction_trace(
 }
 
 /// Statement inputs needed by the selected universal verifier mode.
-/// Statement inputs needed by the selected universal verifier mode.
 #[derive(Clone, Copy)]
 pub enum StatementInputWitness<'a> {
     Segment(&'a SpanStatement),

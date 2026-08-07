@@ -510,7 +510,6 @@ pub fn gen_interaction_trace(
 }
 
 /// Materializes the trusted non-relation draws for the selected verifier lanes.
-/// Materializes the trusted non-relation draws for the selected verifier lanes.
 pub fn push_verifier_randomness(
     table: &mut VerifierRandomnessTable,
     preprocessed: &VerifierRandomnessPreprocessed,

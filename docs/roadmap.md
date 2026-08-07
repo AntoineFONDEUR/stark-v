@@ -415,24 +415,23 @@ set.
     mode; detailed evidence is recorded below.
 - `[in progress] FELT-002` Migrate opcode execution and retire duplicate
   semantics.
-  - LUI, AUIPC, JAL, JALR, both base ALUs, both comparisons, and the branch,
-    shift, multiplication, and load/store families now derive execution, witness
-    rows, AIR, interactions, and VM component routes from direct
-    `define_air_fns!` definitions; their runner modules retain decode adapters
-    only.
+  - Every RV32IM opcode family now derives execution, witness rows, AIR,
+    interactions, and its VM component route from a direct `define_air_fns!`
+    definition; runner modules retain decode adapters only.
   - The existing felt DSL now provides proof-bound canonical M31 splitting and
     byte-level AND/OR/XOR intrinsics plus wrapping `u32` add/subtract with a
     constrained carry/borrow chain. Dynamic word access selects register or
-    aligned-memory state while preserving x0. Batched LogUp arguments with
-    nonlinear expressions are materialized by the same compiler so generated
-    constraints stay within the declared cubic degree. JALR constrains both its
-    M31 source address and the low-bit clearing lookup.
-  - The active checkpoint has 1,726 VM tables, 1,834 sampled values, and 695 VM
-    AIR instructions. Its protocol identifier is
-    `[466445823, 1367009901, 1596720998, 1043908003, 1382761831, 1599587195, 1994327166, 195567491]`.
+    aligned-memory state while preserving x0. Division witnesses come from the
+    same DSL and are explicitly bound by the wide-product identity, remainder
+    magnitude, exceptional cases, and range relations. Batched LogUp arguments
+    with nonlinear expressions are materialized by the compiler so generated
+    constraints stay within the declared cubic degree.
+  - The final opcode roster has 1,905 VM tables, 2,013 sampled values, and 787
+    VM AIR instructions. Its protocol identifier is
+    `[1201321936, 1233882972, 279865999, 1954284523, 1154633417, 1357347584, 450458594, 1504555888]`.
   - Fast boundary, component, and malformed-relation tests precede one
-    sequential single-chunk VM proof per migrated family; root E2Es remain
-    deferred until the final VM roster.
+    sequential single-chunk VM proof per migrated family. The final roster is
+    frozen; the one-, two-, and padded-root reruns are the next gate.
 - `[pending] REL-001` Harden and measure the completed system.
 
 ## Macro-only recursion migration
@@ -844,15 +843,16 @@ Required work, in order:
 5. `[done]` Migrate `shifts_imm` and `shifts_reg`.
 6. `[done]` Migrate `mul` and `mulh`.
 7. `[done]` Migrate `load_store`.
-8. `[in progress]` Migrate `div` last.
-9. `[in progress]` Preserve one real guest prove/verify test plus focused
+8. `[done]` Migrate `div` last.
+9. `[done]` Preserve one real guest prove/verify test plus focused
    malformed-witness coverage for every family before deleting its old schema
-   and handler. LUI, AUIPC, JAL, JALR, both base ALUs, both comparisons, and the
-   branch, shift, multiplication, and load/store families have both gates.
-10. Delete the obsolete opcode `define_air!` trace block, `components!` support,
-    and `runner/src/ops` only after the last family moves.
-11. Re-derive the VM AIR program and recursion manifest from the final roster
-    and rerun every root conformance test under a new protocol identity.
+   and handler. Every family has both gates.
+10. `[done]` Delete obsolete opcode `define_air!` trace blocks, bare opcode
+    component routes, and handwritten runner witnesses after the last family
+    moves.
+11. `[in progress]` Re-derive the VM AIR program and recursion manifest from the
+    final roster and rerun every root conformance test under the new protocol
+    identity. The manifest is frozen; root reruns remain.
 
 Done when opcode execution, witness filling, and AIR constraints have one
 felt-function source and no duplicated per-opcode semantics remain.
@@ -1797,6 +1797,53 @@ the recorded command without committing a machine-specific path.
 - Implementation commit `273cc005` was pushed to
   `origin/chore/scratchpad-cleanups`. Recursive-root proofs remain deferred
   until division freezes the final opcode roster.
+
+### `FELT-002 division checkpoint` — 2026-08-07
+
+- `crates/air/src/opcodes/div.rs` is the sole source for DIV, DIVU, REM, and
+  REMU state transitions, witness rows, constraints, relations, and component
+  evaluation through a direct `define_air_fns!` invocation. The runner now
+  supplies only the decoded one-hot tuple; the handwritten division witness, M31
+  inverse helper, manual schema block, and bare component route are gone.
+- The existing felt DSL gained one reusable `divrem_u32` witness intrinsic. It
+  commits quotient, remainder, zero-divisor, zero-remainder, overflow, and
+  inverse columns but adds no hidden soundness rule. The felt function binds
+  them through canonical byte ranges, exact signed 64-bit product-plus-remainder
+  equality, absolute-remainder comparison, divide-by-zero behavior, and the
+  `INT_MIN / -1` overflow case. No standalone or opcode-specific macro exists.
+- `cargo test --release -p stwo-macros --test air_fns -- --test-threads=12`
+  passed all 75 compiler, access, intrinsic, relation, malformed-row, and toy
+  proof tests. Seven focused division-intrinsic cases cover signed quotients and
+  remainders, unsigned maxima, zero divisors, zero remainders, and overflow.
+- The twelve direct runner boundaries passed concurrently in 0.00 seconds after
+  release compilation. They cover every sign combination, divide-by-zero, signed
+  overflow, unsigned maxima, and destination aliases of both sources.
+- The four opcode component fixtures and the range-check fixture passed
+  concurrently in 2.62 seconds. The generated evaluator has no constraint above
+  degree three; separate quotient and remainder corruptions both violated its
+  local constraints.
+- `cargo test --release -p prover --test max_mul test_div_edge_cases_satisfy_aggregate_constraints -- --exact --test-threads=1`
+  closed the aggregate relations for the exact division edge-case chunk in 5.38
+  seconds after release linking.
+- `/usr/bin/time -l cargo test --release -p prover --test max_mul test_full_proof_div_edge_cases -- --exact --test-threads=1`
+  proved and verified that same single chunk in 6.69 seconds with 2.046 GB
+  maximum RSS and zero swaps.
+- `/usr/bin/time -l cargo test --release -p recursion --lib profile::tests:: -- --nocapture --test-threads=7`
+  passed all seven generated-geometry, digest, registry, and fixed-root-wire
+  checks. The test body took 0.36 seconds; release compilation took 332.09
+  seconds with 3.18 GB maximum RSS and zero swaps. The final opcode roster has
+  1,905 VM tables, 2,013 sampled values, 787 AIR instructions, protocol
+  identifier
+  `[1201321936, 1233882972, 279865999, 1954284523, 1154633417, 1357347584, 450458594, 1504555888]`,
+  and VM AIR digest
+  `[989155288, 580703196, 976117667, 521366381, 1764914922, 1795063835, 1935043607, 1312613651]`.
+- `cargo test --release -p recursion --test air_dsl_guard -- --nocapture --test-threads=6`
+  passed all six roster, owner, direct-DSL, component-route, and
+  no-manual-runner guards. Host release clippy passed with warnings denied, and
+  repository plus commit hooks passed.
+- Implementation commit `04b6dc6b` was pushed to
+  `origin/chore/scratchpad-cleanups`. The final manifest is frozen; recursive
+  root conformance is now the active gate.
 
 ## Project finish line
 

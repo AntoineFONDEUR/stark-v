@@ -415,19 +415,19 @@ set.
     mode; detailed evidence is recorded below.
 - `[in progress] FELT-002` Migrate opcode execution and retire duplicate
   semantics.
-  - LUI, AUIPC, JAL, JALR, both base ALUs, both comparisons, and both branch and
-    shift families now derive execution, witness rows, AIR, interactions, and VM
-    component routes from direct `define_air_fns!` definitions; their runner
-    modules retain decode adapters only.
+  - LUI, AUIPC, JAL, JALR, both base ALUs, both comparisons, and the branch,
+    shift, and multiplication families now derive execution, witness rows, AIR,
+    interactions, and VM component routes from direct `define_air_fns!`
+    definitions; their runner modules retain decode adapters only.
   - The existing felt DSL now provides proof-bound canonical M31 splitting and
     byte-level AND/OR/XOR intrinsics plus wrapping `u32` add/subtract with a
     constrained carry/borrow chain. Batched LogUp arguments with nonlinear
     expressions are materialized by the same compiler so generated constraints
     stay within the declared cubic degree. JALR constrains both its M31 source
     address and the low-bit clearing lookup.
-  - The active checkpoint has 1,677 VM tables, 1,785 sampled values, and 646 VM
+  - The active checkpoint has 1,681 VM tables, 1,789 sampled values, and 683 VM
     AIR instructions. Its protocol identifier is
-    `[1496761093, 943642719, 1615269435, 2129355053, 368726675, 2114118801, 2126697374, 1055584304]`.
+    `[915081946, 1206305469, 307660850, 106314972, 1803682289, 1766607321, 444822829, 1292162663]`.
   - Fast boundary, component, and malformed-relation tests precede one
     sequential single-chunk VM proof per migrated family; root E2Es remain
     deferred until the final VM roster.
@@ -840,13 +840,13 @@ Required work, in order:
 3. `[done]` Migrate `base_alu_imm` and `base_alu_reg`.
 4. `[done]` Migrate `lt_imm`, `lt_reg`, `branch_eq`, and `branch_lt`.
 5. `[done]` Migrate `shifts_imm` and `shifts_reg`.
-6. `[in progress]` Migrate `mul` and `mulh`.
-7. Migrate `load_store`.
+6. `[done]` Migrate `mul` and `mulh`.
+7. `[in progress]` Migrate `load_store`.
 8. Migrate `div` last.
 9. `[in progress]` Preserve one real guest prove/verify test plus focused
    malformed-witness coverage for every family before deleting its old schema
-   and handler. LUI, AUIPC, JAL, JALR, both base ALUs, both comparisons, and
-   both branch and shift families have both gates.
+   and handler. LUI, AUIPC, JAL, JALR, both base ALUs, both comparisons, and the
+   branch, shift, and multiplication families have both gates.
 10. Delete the obsolete opcode `define_air!` trace block, `components!` support,
     and `runner/src/ops` only after the last family moves.
 11. Re-derive the VM AIR program and recursion manifest from the final roster
@@ -1704,6 +1704,50 @@ the recorded command without committing a machine-specific path.
   `origin/chore/scratchpad-cleanups`. Recursive-root proofs remain deferred
   until the final opcode roster because this slice changes VM geometry but not a
   root construction boundary.
+
+### `FELT-002 multiplication checkpoint` — 2026-08-07
+
+- `crates/air/src/opcodes/{mul,mulh}.rs` are the sole sources for MUL, MULH,
+  MULHSU, and MULHU state transitions, witness rows, constraints, relations, and
+  component evaluators through direct `define_air_fns!` invocations. The runner
+  retains only opcode decoding and generated-fill adapters; the two manual
+  schema blocks and the handwritten high-product witness are gone.
+- The migration composes only existing DSL operations. Canonical `split_m31`
+  decompositions bind every schoolbook product limb and carry. The existing
+  bitwise relation authenticates signed operand extension for MULH and MULHSU.
+  No DSL extension, standalone macro, or opcode-specific wrapper was added.
+- The seven generated-runner boundary cases passed in release mode, covering
+  low-word wrapping, signed, signed-unsigned, and unsigned high products plus
+  writes aliasing either source register.
+- The four MUL/MULH/MULHSU/MULHU component fixtures passed concurrently. Both
+  generated evaluators have no constraint above degree three; a forged product
+  limb violated component constraints and a forged sign mask left a non-zero
+  relation sum.
+- The MUL and MULHU single-chunk aggregate AIR checks passed concurrently in
+  2.68 seconds. An equality-qualified nextest listing selected exactly the two
+  intended prove/verify tests, excluding the larger `mul_output_many` fixture.
+- `/usr/bin/time -l cargo nextest run --release -p prover --test integration -j 1 ...`:
+  the exact MUL and MULHU single-chunk guests proved and verified sequentially
+  in 14.51 seconds with 2.01 GB maximum RSS and zero swaps.
+- `cargo test --release -p air --lib -- --test-threads=12`: all 46 AIR tests
+  passed. Standalone guest release clippy passed with warnings denied for
+  `mul_output` and `mulhu_no_alias`.
+- `/usr/bin/time -l cargo test --release -p recursion --lib profile::tests:: -- --nocapture --test-threads=7`:
+  all seven generated-geometry, digest, registry, and fixed-root-wire checks
+  passed. The active checkpoint has 1,681 VM tables, 1,789 sampled values, 683
+  AIR instructions, protocol identifier
+  `[915081946, 1206305469, 307660850, 106314972, 1803682289, 1766607321, 444822829, 1292162663]`,
+  and VM AIR digest
+  `[30389008, 734083804, 1159035147, 924691055, 1836516683, 2044817792, 1768787824, 1059211173]`.
+- `cargo test --release -p recursion --test air_dsl_guard -- --nocapture --test-threads=5`:
+  all five roster, owner, direct-DSL, and generated-component route guards
+  passed after moving both exact owners and routes out of the manual schema.
+- Host release clippy passed with warnings denied for `air`, `runner`, `prover`,
+  and `recursion`; `prek run --all-files` passed. Implementation commit
+  `2e9f1fd4` was pushed to `origin/chore/scratchpad-cleanups`.
+- Recursive-root proofs remain deferred until the final opcode roster because
+  this slice changes VM geometry and protocol identity but not a root
+  construction boundary.
 
 ## Project finish line
 

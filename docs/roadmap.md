@@ -365,6 +365,16 @@ set.
     than with outer Rayon alone.
   - Completion slice: step 8 evidence is recorded below; PRE-001 is complete.
 - `[active] SYS-001` Implement proof-bound syscalls and output journal.
+  - Completed slice: canonical `ecall` decoding, canonical program tuples, and
+    an internal `a7`/`a0` dispatcher are implemented. Every syscall remains
+    rejected before state mutation, so no unauthenticated runner value is
+    exposed.
+  - Front-end evidence: commit `8289ca1d`; focused decoder, program, dispatcher,
+    and real guest-ELF tests passed, the complete air and runner release suites
+    passed, scoped clippy with warnings denied passed, and repository hooks
+    passed.
+  - Next slice: define the minimal COMMIT AIR directly through the existing DSL
+    and close its standard relations before adding journal semantics.
 - `[pending] FELT-001` Complete witness-side felt-function VM access.
 - `[pending] FELT-002` Migrate opcode execution and retire duplicate semantics.
 - `[pending] REL-001` Harden and measure the completed system.
@@ -726,18 +736,21 @@ Design authority: `docs/syscalls.md`.
 
 Required work, in order:
 
-1. Add `ecall` decoding and internal runner dispatch without exposing an
-   unauthenticated journal value.
-2. Define the COMMIT syscall AIR through `define_air!` or `define_air_fns!`.
-3. Prove standard relation multiplicities and interaction closure for the new
-   table before adding journal logic.
-4. Bind the register value, Poseidon2 transition, ordered journal relation, and
-   public initial/final endpoints.
-5. Add the endpoints to VM public data and the Fiat-Shamir transcript.
-6. Chain endpoints in `continuation` and map them into recursive leaf and root
-   statements under a new protocol identity.
-7. Expose the guest SDK only after VM, continuation, and recursive-root tests
-   reject changed words, broken states, dropped, inserted, and reordered steps.
+1. `[done]` Add `ecall` decoding and internal runner dispatch without exposing
+   an unauthenticated journal value.
+2. `[in progress]` Define the COMMIT syscall AIR through `define_air!` or
+   `define_air_fns!`.
+3. `[pending]` Prove standard relation multiplicities and interaction closure
+   for the new table before adding journal logic.
+4. `[pending]` Bind the register value, Poseidon2 transition, ordered journal
+   relation, and public initial/final endpoints.
+5. `[pending]` Add the endpoints to VM public data and the Fiat-Shamir
+   transcript.
+6. `[pending]` Chain endpoints in `continuation` and map them into recursive
+   leaf and root statements under a new protocol identity.
+7. `[pending]` Expose the guest SDK only after VM, continuation, and
+   recursive-root tests reject changed words, broken states, dropped, inserted,
+   and reordered steps.
 
 Done when an application verifies one proof-bound journal digest at the root and
 no runner-only value can affect it.
@@ -1262,6 +1275,27 @@ the recorded command without committing a machine-specific path.
   configuration, outer-only was 20.10% slower and used 0.55 GB more peak RSS.
 - The supported scheduler remains the checked-in two-proof outer wave plus STWO
   inner parallelism in one Rayon pool. PRE-001 is complete.
+
+### `SYS-001` — 2026-08-06
+
+- `cargo test --release -p air instructions::tests:: -- --nocapture`: canonical
+  ECALL decoded as `Opcode::Ecall` and EBREAK remained unsupported; both cases
+  passed.
+- `cargo test --release -p runner syscalls::tests:: -- --nocapture` and the
+  exact program-row test passed, pinning the internal `a7` dispatch and
+  canonical `[Opcode::Ecall, 0, 0, 0]` tuple.
+- `cargo test --release -p runner --test syscalls unsupported_ecall_reaches_the_internal_dispatcher -- --exact --nocapture`:
+  a real RISC-V guest containing `ecall` reached
+  `RunError::UnsupportedSyscall { id: 7, .. }` instead of failing instruction
+  decode; the test passed in 0.37 seconds.
+- `cargo test --release -p air -p runner -- --test-threads=1`: all 62 air unit,
+  1 air integration, 51 runner unit, 15 existing runner integration, and 1 new
+  syscall integration tests passed.
+- `cargo clippy --release -p air -p runner --all-targets --no-deps -- -D warnings`,
+  focused repository hooks, and the commit hooks passed.
+- Commit `8289ca1d` pushed to `origin/chore/scratchpad-cleanups`.
+- SYS-001 step 1 is complete. No syscall ID succeeds and no journal value is
+  present in `RunResult` or public data.
 
 ## Project finish line
 

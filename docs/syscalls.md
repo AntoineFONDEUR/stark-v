@@ -1,11 +1,11 @@
-# Syscalls and an output journal (proposal — not implemented)
+# Syscalls and an output journal
 
-> **Status: design only.** Nothing in this document is implemented. The VM
-> currently has no `ecall`/syscall support; a guest containing an `ecall`
-> instruction fails to decode (`RunError::InvalidInstruction`). This file
-> records the target design. It deliberately claims no working feature: an
-> unproven capability that looks like a committed output would be worse than no
-> capability at all.
+> **Status: syscall front end implemented; proof-bound calls remain planned.**
+> The decoder accepts only canonical `ecall` (`0x00000073`), program commitment
+> rows encode it canonically, and the runner routes `a7`/`a0` through an
+> internal dispatcher. Every syscall ID currently fails with
+> `RunError::UnsupportedSyscall` before the PC advances. No runner journal,
+> public digest, COMMIT handler, or guest SDK call exists yet.
 
 ## Motivation
 
@@ -64,20 +64,20 @@ value would look like a commitment while being forgeable.
 
 ## Implementation order
 
-1. Add `ecall` decoding and a runner dispatch interface without exposing any
-   unauthenticated journal value.
-2. Define the COMMIT component through `define_air!` or `define_air_fns!`; no
-   manual `FrameworkEval` component is allowed because the recursion leaf
-   verifier will consume this AIR.
-3. Prove, in a focused release test, that a minimal new table's standard
-   relation multiplicities and interaction trace close before adding journal
-   logic.
-4. Add the Poseidon2 transition and journal-chain relation, with one negative
-   test for a changed word, broken state, dropped step, inserted step, and
-   reordered step.
-5. Bind per-segment journal endpoints into VM `PublicData` and the Fiat-Shamir
-   transcript.
-6. Extend the recursion leaf adapter and statement semantics to map the proven
-   endpoints into `MachineState::public_io_state`.
-7. Expose a guest SDK COMMIT call only after VM proof, continuation, and
-   recursive-root tests all reject forged journal data.
+1. `[done]` Add `ecall` decoding and a runner dispatch interface without
+   exposing any unauthenticated journal value.
+2. `[in progress]` Define the COMMIT component through `define_air!` or
+   `define_air_fns!`; no manual `FrameworkEval` component is allowed because the
+   recursion leaf verifier will consume this AIR.
+3. `[pending]` Prove, in a focused release test, that a minimal new table's
+   standard relation multiplicities and interaction trace close before adding
+   journal logic.
+4. `[pending]` Add the Poseidon2 transition and journal-chain relation, with one
+   negative test for a changed word, broken state, dropped step, inserted step,
+   and reordered step.
+5. `[pending]` Bind per-segment journal endpoints into VM `PublicData` and the
+   Fiat-Shamir transcript.
+6. `[pending]` Extend the recursion leaf adapter and statement semantics to map
+   the proven endpoints into `MachineState::public_io_state`.
+7. `[pending]` Expose a guest SDK COMMIT call only after VM proof, continuation,
+   and recursive-root tests all reject forged journal data.

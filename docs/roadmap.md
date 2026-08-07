@@ -1963,9 +1963,12 @@ the recorded command without committing a machine-specific path.
 - `/usr/bin/time -l cargo test --release -p recursion --features parallel --lib tree::tests::one_commit_recursion_leaf_is_the_complete_root -- --ignored --exact --nocapture --test-threads=1`:
   the final-identity one-segment root passed in 549.17 seconds of test time and
   549.35 seconds wall time with 19.355 GB maximum RSS and zero swaps.
-- Remaining gate: run the two-segment and three-segment padded root proofs
-  sequentially under this final protocol identity, then close the task with
-  release clippy, repository hooks, and pushed evidence.
+- `/usr/bin/time -l cargo test --release -p recursion --features parallel --lib tree::tests::capacity_segmented_guest_produces_a_two_leaf_root -- --ignored --exact --nocapture --test-threads=1`:
+  the final-identity two-segment root passed in 942.85 seconds of test time and
+  943.28 seconds wall time with 29.808 GB maximum RSS and zero swaps.
+- Remaining gate: run the three-segment padded root proof under this final
+  protocol identity, then close the task with release clippy, repository hooks,
+  and pushed evidence.
 
 ## Project finish line
 

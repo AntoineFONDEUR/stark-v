@@ -5,6 +5,9 @@ use rustc_hash::FxHashMap;
 /// Instruction cache: maps PC address to decoded instruction.
 pub type InstCache = FxHashMap<u32, DecodedInst>;
 
+/// Internal ABI selector for the proof-bound COMMIT syscall.
+pub const COMMIT_SYSCALL_ID: u32 = 1;
+
 /// All RV32IM opcodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Opcode {

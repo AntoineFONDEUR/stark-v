@@ -1,11 +1,12 @@
 # Syscalls and an output journal
 
-> **Status: syscall front end implemented; proof-bound calls remain planned.**
+> **Status: proof-bound COMMIT front end implemented; journal remains planned.**
 > The decoder accepts only canonical `ecall` (`0x00000073`), program commitment
 > rows encode it canonically, and the runner routes `a7`/`a0` through an
-> internal dispatcher. Every syscall ID currently fails with
-> `RunError::UnsupportedSyscall` before the PC advances. No runner journal,
-> public digest, COMMIT handler, or guest SDK call exists yet.
+> internal dispatcher. Syscall ID 1 emits a DSL-generated COMMIT row that
+> authenticates the `a7` selector and `a0` argument reads; every other ID fails
+> with `RunError::UnsupportedSyscall` before the PC advances. No runner journal,
+> public digest, Poseidon2 transition, or guest SDK call exists yet.
 
 ## Motivation
 
@@ -40,16 +41,30 @@ recursive `MachineState::public_io_state` once the AIR enforces it. A
 runner-level journal with no AIR backing must not exist, because its `final`
 value would look like a commitment while being forgeable.
 
-## Proposed in-AIR construction
+## Current proof-bound COMMIT boundary
 
-- **`ecall` trace table** (`define_air!` or `define_air_fns!`): one row per
-  COMMIT — `clock`, `pc`, the `a0` register read, a per-segment `step` index,
-  the 16-lane `prev` and `next` states. Derived: the permutation input
-  `in = prev + a0-in-rate` (degree 1). Lookups: `program_access`, the
-  `pc`/`clock` `registers_state` transition, the `a0` `memory_access` read,
-  `range_check_20` on the clock gap, an atomic `poseidon2_io(in, next)` binding
-  discharged by the Poseidon2 component's `io` rows, and a `journal` chain
-  (consume `journal(step, prev)`, emit `journal(step+1, next)`).
+The `commit` table is defined directly in the existing `define_air!` schema. A
+row commits `clock`, `pc`, the `a7` selector read, and the `a0` argument read.
+Its constraints require selector ID 1 and make both register accesses reads. Its
+lookups bind canonical `ecall` program data, the `pc`/`clock` `registers_state`
+transition, both register-file `memory_access` transitions, and both clock-gap
+range checks. A focused VM proof verifies that these standard relations close
+before any journal state is exposed.
+
+Authenticating `a0` alone would be unsound because every syscall shares the same
+`ecall` instruction. The AIR must authenticate `a7` as well so a prover cannot
+reinterpret another syscall row as COMMIT.
+
+## Remaining in-AIR construction
+
+- **Extend the `commit` table through the existing DSL** with a per-segment
+  `step` index and the 16-lane `prev` and `next` states. Derived: the
+  permutation input `in = prev + a0-in-rate` (degree 1). Lookups:
+  `program_access`, the `pc`/`clock` `registers_state` transition, both
+  authenticated register reads, clock-gap range checks, an atomic
+  `poseidon2_io(in, next)` binding discharged by the Poseidon2 component's `io`
+  rows, and a `journal` chain (consume `journal(step, prev)`, emit
+  `journal(step+1, next)`).
 - **`journal` relation** (arity 17: `step` + 16 lanes): the per-row consume/emit
   telescopes across the segment; endpoints are anchored by public
   `journal(0, initial)` and `journal(n_commits, final)` terms.
@@ -66,15 +81,15 @@ value would look like a commitment while being forgeable.
 
 1. `[done]` Add `ecall` decoding and a runner dispatch interface without
    exposing any unauthenticated journal value.
-2. `[in progress]` Define the COMMIT component through `define_air!` or
+2. `[done]` Define the COMMIT component through `define_air!` or
    `define_air_fns!`; no manual `FrameworkEval` component is allowed because the
    recursion leaf verifier will consume this AIR.
-3. `[pending]` Prove, in a focused release test, that a minimal new table's
+3. `[done]` Prove, in a focused release test, that a minimal new table's
    standard relation multiplicities and interaction trace close before adding
    journal logic.
-4. `[pending]` Add the Poseidon2 transition and journal-chain relation, with one
-   negative test for a changed word, broken state, dropped step, inserted step,
-   and reordered step.
+4. `[in progress]` Add the Poseidon2 transition and journal-chain relation, with
+   one negative test for a changed word, broken state, dropped step, inserted
+   step, and reordered step.
 5. `[pending]` Bind per-segment journal endpoints into VM `PublicData` and the
    Fiat-Shamir transcript.
 6. `[pending]` Extend the recursion leaf adapter and statement semantics to map

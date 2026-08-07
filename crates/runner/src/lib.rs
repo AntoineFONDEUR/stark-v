@@ -8,10 +8,10 @@ mod execute;
 mod io;
 mod memory;
 mod program;
-mod syscalls;
 #[macro_use]
 mod trace;
 mod ops;
+mod syscalls;
 
 use thiserror::Error;
 

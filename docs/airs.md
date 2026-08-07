@@ -27,8 +27,8 @@ second handwritten specification.
 The decoder and AIR support RV32I integer arithmetic, shifts, comparisons,
 loads, stores, branches, jumps, upper immediates, and the RV32M multiplication,
 division, and remainder instructions. `crates/air/src/instructions.rs` is the
-canonical opcode list. System instructions, including `ecall`, are not
-implemented.
+canonical opcode list. Canonical `ecall` dispatches internal syscalls; COMMIT ID
+1 has a proof-bound execution row, while journal semantics remain planned.
 
 The active execution-table families are:
 
@@ -40,6 +40,7 @@ The active execution-table families are:
 - loads and stores;
 - low and high multiplication;
 - division and remainder;
+- proof-bound COMMIT selector and argument reads;
 - program, memory, Merkle, and clock-update support tables in the VM
   constituent, plus the detached Poseidon2 support table.
 

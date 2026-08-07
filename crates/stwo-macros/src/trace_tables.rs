@@ -328,7 +328,10 @@ impl Parse for TraceTablesDef {
 
 /// Check if a field name represents an Access type (needs flattening)
 fn is_access_field(name: &str) -> bool {
-    matches!(name, "rd" | "rs1" | "rs2" | "mem" | "dst" | "src")
+    matches!(
+        name,
+        "rd" | "rs1" | "rs2" | "mem" | "dst" | "src" | "selector" | "argument"
+    )
 }
 
 /// Check if a field name is an opcode flag (matches pattern `opcode_*_flag`)

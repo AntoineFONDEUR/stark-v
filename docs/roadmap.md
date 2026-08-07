@@ -195,9 +195,9 @@ set.
   - STWO-omitted FRI query values are reconstructed from the DEEP answer and
     prior folds before both Merkle and folding checks; PCS periodicity uses the
     committed-domain log sizes.
-  - The active profile has 22 recursion FRI layers, a 3,479,096-byte fixed proof
-    wire, and protocol identifier limbs
-    `[1367177019, 1287613895, 1066887904, 1957561640, 1756805490, 987259214, 2076002296, 748188730]`.
+  - The assembler derives its exact verifier geometry and conformance vectors
+    from the generated AIR programs; a VM AIR change therefore changes the
+    protocol identity instead of silently reusing an incompatible profile.
   - Evidence: commit `827ec9a9`; deterministic real-proof assembly, all 36
     direct component checks, focused malformed-FRI tests, the ordinary prover
     integration, the full recursion and workspace release suites, clippy, DSL
@@ -366,15 +366,21 @@ set.
   - Completion slice: step 8 evidence is recorded below; PRE-001 is complete.
 - `[active] SYS-001` Implement proof-bound syscalls and output journal.
   - Completed slice: canonical `ecall` decoding, canonical program tuples, and
-    an internal `a7`/`a0` dispatcher are implemented. Every syscall remains
-    rejected before state mutation, so no unauthenticated runner value is
-    exposed.
+    an internal `a7`/`a0` dispatcher are implemented. Unsupported calls remain
+    rejected before state mutation.
   - Front-end evidence: commit `8289ca1d`; focused decoder, program, dispatcher,
     and real guest-ELF tests passed, the complete air and runner release suites
     passed, scoped clippy with warnings denied passed, and repository hooks
     passed.
-  - Next slice: define the minimal COMMIT AIR directly through the existing DSL
-    and close its standard relations before adding journal semantics.
+  - Completed slice: the minimal COMMIT AIR is defined directly through the
+    existing DSL, authenticates both the syscall selector and argument reads,
+    and closes its program, state, register, and range relations in one focused
+    VM proof. No journal value is exposed.
+  - The measured VM profile is now 1,347 tables, 1,455 sampled values, and 512
+    AIR instructions. The protocol identifier is
+    `[87219592, 815551637, 878998301, 1724434594, 1454088342, 641814846, 1892908453, 1264513145]`,
+    while the universal root wire remains 3,479,096 bytes.
+  - Next slice: add the Poseidon2 transition and ordered journal relation.
 - `[pending] FELT-001` Complete witness-side felt-function VM access.
 - `[pending] FELT-002` Migrate opcode execution and retire duplicate semantics.
 - `[pending] REL-001` Harden and measure the completed system.
@@ -738,12 +744,12 @@ Required work, in order:
 
 1. `[done]` Add `ecall` decoding and internal runner dispatch without exposing
    an unauthenticated journal value.
-2. `[in progress]` Define the COMMIT syscall AIR through `define_air!` or
+2. `[done]` Define the COMMIT syscall AIR through `define_air!` or
    `define_air_fns!`.
-3. `[pending]` Prove standard relation multiplicities and interaction closure
-   for the new table before adding journal logic.
-4. `[pending]` Bind the register value, Poseidon2 transition, ordered journal
-   relation, and public initial/final endpoints.
+3. `[done]` Prove standard relation multiplicities and interaction closure for
+   the new table before adding journal logic.
+4. `[in progress]` Bind the register value, Poseidon2 transition, ordered
+   journal relation, and public initial/final endpoints.
 5. `[pending]` Add the endpoints to VM public data and the Fiat-Shamir
    transcript.
 6. `[pending]` Chain endpoints in `continuation` and map them into recursive
@@ -1294,8 +1300,29 @@ the recorded command without committing a machine-specific path.
 - `cargo clippy --release -p air -p runner --all-targets --no-deps -- -D warnings`,
   focused repository hooks, and the commit hooks passed.
 - Commit `8289ca1d` pushed to `origin/chore/scratchpad-cleanups`.
-- SYS-001 step 1 is complete. No syscall ID succeeds and no journal value is
+- SYS-001 step 1 completed with every syscall ID rejected and no journal value
   present in `RunResult` or public data.
+- The direct `define_air!` COMMIT table authenticates canonical `ecall`, the
+  `a7 == 1` selector read, the `a0` argument read, the execution-state
+  transition, and both register clock gaps. The existing DSL access-field
+  generator was extended; no standalone macro or manual component was added.
+- `cargo test --release -p air commit_ -- --nocapture`: all 3 focused COMMIT
+  constraint-boundary tests passed.
+- `cargo test --release -p runner --test syscalls commit_ecall_records_the_authenticated_register_reads -- --exact --nocapture`:
+  the one-COMMIT guest chunk emitted the expected selector and argument reads.
+- `/usr/bin/time -lp cargo test --release -p prover --test integration commit_standard_relations_prove_and_verify -- --exact --nocapture`:
+  the one-chunk VM proof verified in 6.72 seconds with 1.95 GB maximum RSS and
+  zero swaps.
+- The exact DSL-owner and VM-roster guards passed. Focused profile tests pinned
+  1,347 VM tables, 1,455 sampled values, 512 AIR instructions, the new protocol
+  identifier, and the unchanged 3,479,096-byte universal root wire.
+- `/usr/bin/time -lp cargo test --release -p stwo-macros -p air -p runner -- --test-threads=8`:
+  all macro DSL, AIR, and runner release tests passed in 76.52 seconds with 1.40
+  GB maximum RSS and zero swaps.
+- `cargo clippy --release -p stwo-macros -p air -p runner -p prover -p recursion --all-targets --no-deps -- -D warnings`:
+  the affected crates passed with warnings denied.
+- SYS-001 steps 2 and 3 are complete. Step 4 is active; no journal state or
+  public digest exists yet.
 
 ## Project finish line
 

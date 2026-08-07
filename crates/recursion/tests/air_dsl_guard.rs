@@ -182,7 +182,7 @@ const UNIVERSAL_INVENTORY: [ComponentOwner; 36] = [
     },
 ];
 
-const VM_INVENTORY: [ComponentOwner; 26] = [
+const VM_INVENTORY: [ComponentOwner; 27] = [
     ComponentOwner {
         name: "auipc",
         source: "crates/air/src/schema.rs",
@@ -201,6 +201,10 @@ const VM_INVENTORY: [ComponentOwner; 26] = [
     },
     ComponentOwner {
         name: "branch_lt",
+        source: "crates/air/src/schema.rs",
+    },
+    ComponentOwner {
+        name: "commit",
         source: "crates/air/src/schema.rs",
     },
     ComponentOwner {

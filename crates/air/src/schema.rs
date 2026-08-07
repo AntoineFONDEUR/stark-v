@@ -1366,7 +1366,67 @@ stwo_macros::define_air! {
         },
 
         // ==========================================================================
-        // 17. Program commitment table
+        // 17. COMMIT syscall
+        // ==========================================================================
+        commit: {
+            committed: {
+                clock, pc, selector, argument,
+            },
+            derived: {
+                pc_next: pc + 4,
+                clock_next: clock + 1,
+                selector_clock_diff: clock - selector_clock_prev,
+                argument_clock_diff: clock - argument_clock_prev,
+            },
+            constraints: {
+                // The shared ECALL instruction is a COMMIT only when a7 selects it.
+                enabler * (selector_addr - constant(17)),
+                enabler * (selector_next_0 - constant(crate::instructions::COMMIT_SYSCALL_ID)),
+                enabler * selector_next_1,
+                enabler * selector_next_2,
+                enabler * selector_next_3,
+                // Selector and argument accesses are reads, not hidden writes.
+                enabler * (selector_prev_0 - selector_next_0),
+                enabler * (selector_prev_1 - selector_next_1),
+                enabler * (selector_prev_2 - selector_next_2),
+                enabler * (selector_prev_3 - selector_next_3),
+                enabler * (argument_addr - constant(10)),
+                enabler * (argument_prev_0 - argument_next_0),
+                enabler * (argument_prev_1 - argument_next_1),
+                enabler * (argument_prev_2 - argument_next_2),
+                enabler * (argument_prev_3 - argument_next_3),
+            },
+            lookups: {
+                -enabler * program_access(
+                    pc, constant(crate::instructions::Opcode::Ecall as u32), 0, 0, 0,
+                ),
+                -enabler * registers_state(pc, clock),
+                enabler * registers_state(pc_next, clock_next),
+                // Read a7 (REG_AS = 0) to authenticate the syscall selector.
+                -enabler * memory_access(
+                    0, selector_addr, selector_clock_prev,
+                    selector_prev_0, selector_prev_1, selector_prev_2, selector_prev_3,
+                ),
+                enabler * memory_access(
+                    0, selector_addr, clock,
+                    selector_next_0, selector_next_1, selector_next_2, selector_next_3,
+                ),
+                -enabler * range_check_20(selector_clock_diff),
+                // Read a0 to bind the committed word to the register file.
+                -enabler * memory_access(
+                    0, argument_addr, argument_clock_prev,
+                    argument_prev_0, argument_prev_1, argument_prev_2, argument_prev_3,
+                ),
+                enabler * memory_access(
+                    0, argument_addr, clock,
+                    argument_next_0, argument_next_1, argument_next_2, argument_next_3,
+                ),
+                -enabler * range_check_20(argument_clock_diff),
+            },
+        },
+
+        // ==========================================================================
+        // 18. Program commitment table
         // ==========================================================================
         program: {
             committed: {
@@ -1403,7 +1463,7 @@ stwo_macros::define_air! {
         },
 
         // ==========================================================================
-        // 18. Memory commitment table (initial/final)
+        // 19. Memory commitment table (initial/final)
         // ==========================================================================
         memory: {
             committed: {
@@ -1449,7 +1509,7 @@ stwo_macros::define_air! {
         },
 
         // ==========================================================================
-        // 19. Merkle tree nodes
+        // 20. Merkle tree nodes
         // ==========================================================================
         merkle: {
             committed: {

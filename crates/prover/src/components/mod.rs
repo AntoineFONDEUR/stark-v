@@ -10,6 +10,7 @@ stwo_macros::components! {
         base_alu_reg,
         branch_eq,
         branch_lt,
+        commit,
         div,
         jal,
         jalr,

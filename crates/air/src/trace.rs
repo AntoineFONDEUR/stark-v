@@ -187,6 +187,27 @@ mod tests {
             BaseAluImmColumns::from_iter(std::iter::repeat_n(f(0), BaseAluImmColumns::<()>::SIZE))
         }
 
+        /// A valid COMMIT row starts from a zeroed generated column layout.
+        fn valid_commit_cols() -> CommitColumns<BaseField> {
+            let mut cols =
+                CommitColumns::from_iter(std::iter::repeat_n(f(0), CommitColumns::<()>::SIZE));
+            cols.enabler = f(1);
+            cols.clock = f(1);
+            cols.selector_addr = f(17);
+            cols.selector_prev_0 = f(crate::instructions::COMMIT_SYSCALL_ID);
+            cols.selector_next_0 = f(crate::instructions::COMMIT_SYSCALL_ID);
+            cols.argument_addr = f(10);
+            cols.argument_prev_0 = f(0x78);
+            cols.argument_prev_1 = f(0x56);
+            cols.argument_prev_2 = f(0x34);
+            cols.argument_prev_3 = f(0x12);
+            cols.argument_next_0 = f(0x78);
+            cols.argument_next_1 = f(0x56);
+            cols.argument_next_2 = f(0x34);
+            cols.argument_next_3 = f(0x12);
+            cols
+        }
+
         #[test]
         fn test_lui_imm_combines_limbs() {
             let mut cols = zero_lui_cols();
@@ -275,6 +296,41 @@ mod tests {
             cols.rd_next_0 = f(0);
             cols.rd_next_1 = f(1);
             assert!(cols.constraints().iter().all(|c| *c == f(0)));
+        }
+
+        #[test]
+        fn commit_accepts_the_authenticated_selector_and_argument_reads() {
+            assert!(
+                valid_commit_cols()
+                    .constraints()
+                    .iter()
+                    .all(|constraint| *constraint == f(0))
+            );
+        }
+
+        #[test]
+        fn commit_rejects_a_non_commit_selector() {
+            let mut cols = valid_commit_cols();
+            cols.selector_prev_0 = f(crate::instructions::COMMIT_SYSCALL_ID + 1);
+            cols.selector_next_0 = f(crate::instructions::COMMIT_SYSCALL_ID + 1);
+
+            assert!(
+                cols.constraints()
+                    .iter()
+                    .any(|constraint| *constraint != f(0))
+            );
+        }
+
+        #[test]
+        fn commit_rejects_a_hidden_argument_write() {
+            let mut cols = valid_commit_cols();
+            cols.argument_next_0 = f(0x79);
+
+            assert!(
+                cols.constraints()
+                    .iter()
+                    .any(|constraint| *constraint != f(0))
+            );
         }
 
         #[test]

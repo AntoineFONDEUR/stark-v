@@ -74,7 +74,7 @@ pub fn execute(
 
         // Dispatch before advancing so rejected calls cannot mutate execution state.
         Opcode::Ecall => {
-            syscalls::dispatch(cpu)?;
+            syscalls::dispatch(cpu, tracer)?;
             cpu.advance_pc();
         }
     }

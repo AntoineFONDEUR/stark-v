@@ -143,6 +143,24 @@ fn test_prove_verify_mulhu_alias() {
     .expect("Verification failed");
 }
 
+/// A COMMIT row closes its program, state, register, and range relations.
+#[test_log::test]
+fn commit_standard_relations_prove_and_verify() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("commit_once");
+    let elf = std::fs::read(&elf_path).expect("read commit_once ELF");
+    let run_result = run(&elf, 10_000).expect("execute one COMMIT call");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
+}
+
 /// The supplied preprocessing commitment is part of the verifier-owned statement.
 #[test_log::test]
 fn test_verify_rejects_mismatched_preprocessing_commitment() {

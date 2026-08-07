@@ -294,8 +294,8 @@ set.
     plan with one checked digest.
   - The earlier integrated-Poseidon profile produced real segment-leaf, binary,
     padded-binary, 4-segment, and 8-segment roots through the same fixed wire
-    and verifier plan. The active split-proof profile has revalidated a real
-    segment-leaf root; PRE-001 step 7 tracks its binary and padded reruns.
+    and verifier plan. The active split-proof profile has revalidated real
+    segment-leaf and binary roots; PRE-001 step 7 tracks its padded rerun.
   - Evidence: real 1-, 2-, and 3-segment roots encoded and verified under the
     prior profile, fixed wire and verifier-shape vectors passed, and outer-only
     proof parallelism was measured and rejected as slower than the retained
@@ -350,8 +350,11 @@ set.
     clippy with warnings denied passed.
   - Binary-closure slice: commit `ba793a61` pushed to
     `origin/chore/scratchpad-cleanups`.
-  - Next slice: rerun current binary and padded-root conformance before
-    benchmarking the split.
+  - Completed slice: the real active-profile binary root encoded to the frozen
+    wire size, matched the frozen verifier plan, and passed the application
+    verifier in 949.04 seconds with 34.62 GB peak RSS and zero swaps.
+  - Next slice: rerun current padded-root conformance before benchmarking the
+    split.
 - `[pending] SYS-001` Implement proof-bound syscalls and output journal.
 - `[pending] FELT-001` Complete witness-side felt-function VM access.
 - `[pending] FELT-002` Migrate opcode execution and retire duplicate semantics.
@@ -696,8 +699,8 @@ Required work, in order:
 6. `[done]` Extend `continuation` and the recursive leaf branch to replay the
    joint draw, verify both proofs, and require exact sum cancellation.
 7. `[in progress]` Bind the changed artifact to a new protocol manifest and
-   rerun root conformance tests. The active profile and one real segment root
-   pass; binary and padded roots remain.
+   rerun root conformance tests. The active profile plus real segment and binary
+   roots pass; the padded root remains.
 8. `[pending]` Measure the split against the integrated Poseidon2 component and
    record the supported profile rather than assuming a performance win.
 
@@ -1225,8 +1228,13 @@ the recorded command without committing a machine-specific path.
   warnings from `external/stwo`; the submodule remains unchanged.
 - `prek run --files <changed-files>` and repository commit hooks passed.
 - Commit `ba793a61` pushed to `origin/chore/scratchpad-cleanups`.
-- Current-profile binary and padded-root conformance remain required before
-  PRE-001 step 7 is complete.
+- `/usr/bin/time -l cargo test --release -p recursion --features parallel --lib tree::tests::capacity_segmented_guest_produces_a_two_leaf_root -- --ignored --exact --nocapture --test-threads=1`:
+  the active-profile binary root encoded to the 3,479,096-byte wire, matched the
+  4,943-step verifier plan, and passed the application verifier. The test took
+  949.04 seconds; the command took 1,002.32 seconds including compilation, with
+  34.62 GB maximum RSS and zero swaps.
+- Current-profile padded-root conformance remains required before PRE-001 step 7
+  is complete.
 
 ## Project finish line
 

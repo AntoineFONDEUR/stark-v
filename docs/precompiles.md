@@ -9,8 +9,8 @@
 > verified one real split-proof recursive root. Production tests reject missing
 > and extra tuples at the host binder, re-paired outputs in the generated
 > Poseidon2 AIR, and mutations across every recursive Poseidon2 proof region.
-> PRE-001 still requires binary and padded-root conformance for the changed
-> profile and comparative performance measurements.
+> PRE-001 still requires padded-root conformance for the changed profile and
+> comparative performance measurements; the real binary root passes.
 
 The implemented split takes the Poseidon2 table out of the RV32IM STWO instance
 and proves it in its own instance, binding the two proofs through their shared
@@ -106,9 +106,8 @@ before deriving the segment statement.
 
 ## Remaining work
 
-- **Current-profile conformance**: rerun binary and padded-root constructions
-  after the manifest change; the real one-segment split-proof root already
-  passes.
+- **Current-profile conformance**: rerun the padded-root construction after the
+  manifest change; the real one-segment and binary split-proof roots pass.
 - **Cost crossover**: for tiny segments the fixed cost of a second proof
   (commitments, FRI) may exceed the column savings. Measure representative
   segment sizes before selecting an outer scheduling policy or claiming a

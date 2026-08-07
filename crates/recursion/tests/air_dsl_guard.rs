@@ -237,11 +237,11 @@ const VM_INVENTORY: [ComponentOwner; 27] = [
     },
     ComponentOwner {
         name: "mul",
-        source: "crates/air/src/schema.rs",
+        source: "crates/air/src/opcodes/mul.rs",
     },
     ComponentOwner {
         name: "mulh",
-        source: "crates/air/src/schema.rs",
+        source: "crates/air/src/opcodes/mulh.rs",
     },
     ComponentOwner {
         name: "shifts_imm",
@@ -293,7 +293,7 @@ const VM_INVENTORY: [ComponentOwner; 27] = [
     },
 ];
 
-const OWNER_POLICIES: [OwnerPolicy; 44] = [
+const OWNER_POLICIES: [OwnerPolicy; 46] = [
     OwnerPolicy {
         source: "crates/air/src/opcodes/auipc.rs",
         accepted_macro_count: 1,
@@ -332,6 +332,14 @@ const OWNER_POLICIES: [OwnerPolicy; 44] = [
     },
     OwnerPolicy {
         source: "crates/air/src/opcodes/lui.rs",
+        accepted_macro_count: 1,
+    },
+    OwnerPolicy {
+        source: "crates/air/src/opcodes/mul.rs",
+        accepted_macro_count: 1,
+    },
+    OwnerPolicy {
+        source: "crates/air/src/opcodes/mulh.rs",
         accepted_macro_count: 1,
     },
     OwnerPolicy {
@@ -559,6 +567,11 @@ fn vm_component_router_uses_only_the_expected_dsl_routes() {
                     "air::opcodes::lt_reg::component".to_owned(),
                 ),
                 ("lui".to_owned(), "air::opcodes::lui::component".to_owned()),
+                ("mul".to_owned(), "air::opcodes::mul::component".to_owned()),
+                (
+                    "mulh".to_owned(),
+                    "air::opcodes::mulh::component".to_owned(),
+                ),
                 (
                     "shifts_imm".to_owned(),
                     "air::opcodes::shifts_imm::component".to_owned(),

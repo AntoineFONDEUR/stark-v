@@ -63,10 +63,10 @@ pub fn execute(
         Opcode::Auipc => upper::auipc(cpu, mem, inst, tracer),
 
         // M-extension
-        Opcode::Mul => muldiv::mul(cpu, inst, tracer),
-        Opcode::Mulh => muldiv::mulh(cpu, inst, tracer),
-        Opcode::Mulhsu => muldiv::mulhsu(cpu, inst, tracer),
-        Opcode::Mulhu => muldiv::mulhu(cpu, inst, tracer),
+        Opcode::Mul => muldiv::mul(cpu, mem, inst, tracer),
+        Opcode::Mulh => muldiv::mulh(cpu, mem, inst, tracer),
+        Opcode::Mulhsu => muldiv::mulhsu(cpu, mem, inst, tracer),
+        Opcode::Mulhu => muldiv::mulhu(cpu, mem, inst, tracer),
         Opcode::Div => muldiv::div(cpu, inst, tracer),
         Opcode::Divu => muldiv::divu(cpu, inst, tracer),
         Opcode::Rem => muldiv::rem(cpu, inst, tracer),
@@ -311,5 +311,41 @@ mod tests {
         execute(&mut cpu, &mut memory, &inst, &mut tracer).expect("execution must succeed");
 
         assert_eq!(cpu.reg(3), expected);
+    }
+
+    #[rstest::rstest]
+    #[case(Opcode::Mul, u32::MAX, 2, 3, 0xffff_fffe)]
+    #[case(Opcode::Mulh, u32::MAX, 2, 3, u32::MAX)]
+    #[case(Opcode::Mulh, i32::MIN as u32, u32::MAX, 3, 0)]
+    #[case(Opcode::Mulhsu, u32::MAX, u32::MAX, 3, u32::MAX)]
+    #[case(Opcode::Mulhu, u32::MAX, u32::MAX, 3, 0xffff_fffe)]
+    #[case(Opcode::Mulhu, u32::MAX, 2, 1, 1)]
+    #[case(Opcode::Mul, 3, 7, 2, 21)]
+    fn generated_multiply_honors_signedness_wrapping_and_aliasing(
+        #[case] opcode: Opcode,
+        #[case] lhs: u32,
+        #[case] rhs: u32,
+        #[case] rd: u8,
+        #[case] expected: u32,
+    ) {
+        let mut cpu = Cpu::new(0x1000, 0, 0);
+        cpu.set_reg(1, lhs);
+        cpu.set_reg(2, rhs);
+        let mut memory = Memory::new();
+        let inst = DecodedInst {
+            opcode,
+            rd,
+            rs1: 1,
+            rs2: 2,
+            imm: 0,
+        };
+        let mut tracer = Tracer {
+            clock: 1,
+            ..Default::default()
+        };
+
+        execute(&mut cpu, &mut memory, &inst, &mut tracer).expect("execution must succeed");
+
+        assert_eq!(cpu.reg(rd), expected);
     }
 }

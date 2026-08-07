@@ -18,8 +18,8 @@ stwo_macros::components! {
         lt_imm: air::opcodes::lt_imm::component,
         lt_reg: air::opcodes::lt_reg::component,
         lui: air::opcodes::lui::component,
-        mul,
-        mulh,
+        mul: air::opcodes::mul::component,
+        mulh: air::opcodes::mulh::component,
         shifts_imm: air::opcodes::shifts_imm::component,
         shifts_reg: air::opcodes::shifts_reg::component,
         program,
@@ -139,17 +139,22 @@ mod tests {
     crate::test_bin_e2e!(shifts_reg, srl);
     crate::test_bin_e2e!(shifts_reg, sra);
 
-    // The quadratic carry denominators keep mul/mulh at fixed constraint
-    // counts; a change here means the degree-bound analysis must be redone.
     #[test]
     fn test_mul_constraint_degree_bounds() {
         let eval = super::mul::air::Eval {
             log_size: 6,
             relations: crate::relations::Relations::dummy(),
         };
-        let expr_eval = eval.evaluate(ExprEvaluator::new());
-        let degrees = expr_eval.constraint_degree_bounds();
-        assert_eq!(degrees.len(), 17);
+        let evaluated = eval.evaluate(ExprEvaluator::new());
+        let degrees = evaluated.constraint_degree_bounds();
+        let breaches = degrees
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, degree)| *degree > 3)
+            .collect::<Vec<_>>();
+
+        assert!(breaches.is_empty(), "{breaches:?}");
     }
 
     #[test]
@@ -158,9 +163,16 @@ mod tests {
             log_size: 6,
             relations: crate::relations::Relations::dummy(),
         };
-        let expr_eval = eval.evaluate(ExprEvaluator::new());
-        let degrees = expr_eval.constraint_degree_bounds();
-        assert_eq!(degrees.len(), 28);
+        let evaluated = eval.evaluate(ExprEvaluator::new());
+        let degrees = evaluated.constraint_degree_bounds();
+        let breaches = degrees
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, degree)| *degree > 3)
+            .collect::<Vec<_>>();
+
+        assert!(breaches.is_empty(), "{breaches:?}");
     }
 
     #[test]
@@ -330,6 +342,32 @@ mod tests {
     fn mutated_generated_srai_sign_mask_leaves_a_relation_deficit() {
         let mut tracer = crate::e2e::run_test_bin("srai");
         tracer.shifts_imm.sign_mask[0] ^= 1;
+        let traces = super::gen_trace(tracer);
+        let (_, claimed_sum) =
+            super::gen_interaction_trace(&traces, &crate::relations::Relations::dummy());
+
+        assert!(!claimed_sum.sum().is_zero());
+    }
+
+    #[test]
+    fn mutated_generated_mul_product_limb_fails_component_constraints() {
+        let mut tracer = crate::e2e::run_test_bin("mul");
+        tracer.mul.step_0_0[0] ^= 1;
+        let traces = super::gen_trace(tracer);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::Components::assert_constraints_on_polys(
+                &traces,
+                &crate::relations::Relations::dummy(),
+            );
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mutated_generated_mulh_sign_mask_leaves_a_relation_deficit() {
+        let mut tracer = crate::e2e::run_test_bin("mulh");
+        tracer.mulh.rs1_sign_mask[0] ^= 1;
         let traces = super::gen_trace(tracer);
         let (_, claimed_sum) =
             super::gen_interaction_trace(&traces, &crate::relations::Relations::dummy());

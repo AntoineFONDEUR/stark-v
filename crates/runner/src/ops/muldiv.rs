@@ -6,122 +6,74 @@
 //! - div family: div, divu, rem, remu
 
 use super::utils::{M31_P, m31_inverse};
+use air::opcodes::mul::mul_fill;
+use air::opcodes::mulh::mulh_fill;
+use stwo::core::fields::m31::BaseField;
+
 use crate::trace::Tracer;
-use crate::{Cpu, DecodedInst};
+use crate::{Cpu, DecodedInst, MachineState, Memory};
 
 // =============================================================================
 // MUL
 // =============================================================================
 
-pub fn mul(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
-    let old_pc = cpu.pc;
-    let rs1 = cpu.read_reg(inst.rs1, tracer);
-    let rs2 = cpu.read_reg(inst.rs2, tracer);
-    let rs1_val = rs1.next as i32 as i64;
-    let rs2_val = rs2.next as i32 as i64;
-    let result = rs1_val.wrapping_mul(rs2_val) as u32;
-    let rd = cpu.write_reg(inst.rd, result, tracer);
-    cpu.advance_pc();
-    trace_op!(mul: tracer, old_pc, rd, rs1, rs2);
+pub fn mul(cpu: &mut Cpu, memory: &mut Memory, inst: &DecodedInst, tracer: &mut Tracer) {
+    // Generated execution binds the wrapping product to the traced accesses.
+    let args = [
+        tracer.clock,
+        cpu.pc,
+        u32::from(inst.rd),
+        u32::from(inst.rs1),
+        u32::from(inst.rs2),
+    ]
+    .map(BaseField::from_u32_unchecked);
+    let [next_pc] = {
+        let mut state = MachineState::new(cpu, memory);
+        mul_fill(&mut state, tracer, args, [])
+    };
+    cpu.pc = next_pc.0;
 }
 
 // =============================================================================
 // MULH (mulh/mulhsu/mulhu)
 // =============================================================================
 
-/// Helper to compute 64-bit multiplication high word and witness columns
-fn compute_mulh_witness(
-    rs1_val: u32,
-    rs2_val: u32,
-    rs1_signed: bool,
-    rs2_signed: bool,
-) -> MulhWitness {
-    let a = if rs1_signed {
-        rs1_val as i32 as i64
-    } else {
-        rs1_val as u64 as i64
+fn execute_mulh(
+    cpu: &mut Cpu,
+    memory: &mut Memory,
+    inst: &DecodedInst,
+    tracer: &mut Tracer,
+    flags: [u32; 3],
+) {
+    // Decoding selects signedness; generated execution owns the wide product.
+    let args = [
+        tracer.clock,
+        cpu.pc,
+        u32::from(inst.rd),
+        u32::from(inst.rs1),
+        u32::from(inst.rs2),
+        flags[0],
+        flags[1],
+        flags[2],
+    ]
+    .map(BaseField::from_u32_unchecked);
+    let [next_pc] = {
+        let mut state = MachineState::new(cpu, memory);
+        mulh_fill(&mut state, tracer, args, [])
     };
-    let b = if rs2_signed {
-        rs2_val as i32 as i64
-    } else {
-        rs2_val as u64 as i64
-    };
-    let product = a.wrapping_mul(b);
-    let lo = product as u32;
-    let hi = (product >> 32) as u32;
-
-    // rd_high is the full 64-bit result split into 8 bytes
-    let rd_high = [
-        (lo & 0xFF),
-        ((lo >> 8) & 0xFF),
-        ((lo >> 16) & 0xFF),
-        ((lo >> 24) & 0xFF),
-    ];
-
-    let rs1_sign = if rs1_signed { (rs1_val >> 31) & 1 } else { 0 };
-    let rs2_sign = if rs2_signed { (rs2_val >> 31) & 1 } else { 0 };
-
-    MulhWitness {
-        hi,
-        rd_high,
-        rs1_sign,
-        rs2_sign,
-    }
+    cpu.pc = next_pc.0;
 }
 
-struct MulhWitness {
-    hi: u32,
-    rd_high: [u32; 4],
-    rs1_sign: u32,
-    rs2_sign: u32,
+pub fn mulh(cpu: &mut Cpu, memory: &mut Memory, inst: &DecodedInst, tracer: &mut Tracer) {
+    execute_mulh(cpu, memory, inst, tracer, [1, 0, 0]);
 }
 
-pub fn mulh(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
-    let old_pc = cpu.pc;
-    let rs1 = cpu.read_reg(inst.rs1, tracer);
-    let rs2 = cpu.read_reg(inst.rs2, tracer);
-    let w = compute_mulh_witness(rs1.next, rs2.next, true, true);
-    let rd = cpu.write_reg(inst.rd, w.hi, tracer);
-    cpu.advance_pc();
-
-    // opcode flags: mulh=1, mulhsu=0, mulhu=0
-    trace_op!(mulh: tracer, old_pc, rd, rs1, rs2,
-        w.rd_high[0], w.rd_high[1], w.rd_high[2], w.rd_high[3],
-        w.rs1_sign, w.rs2_sign,
-        1, 0, 0
-    );
+pub fn mulhsu(cpu: &mut Cpu, memory: &mut Memory, inst: &DecodedInst, tracer: &mut Tracer) {
+    execute_mulh(cpu, memory, inst, tracer, [0, 1, 0]);
 }
 
-pub fn mulhsu(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
-    let old_pc = cpu.pc;
-    let rs1 = cpu.read_reg(inst.rs1, tracer);
-    let rs2 = cpu.read_reg(inst.rs2, tracer);
-    let w = compute_mulh_witness(rs1.next, rs2.next, true, false);
-    let rd = cpu.write_reg(inst.rd, w.hi, tracer);
-    cpu.advance_pc();
-
-    // opcode flags: mulh=0, mulhsu=1, mulhu=0
-    trace_op!(mulh: tracer, old_pc, rd, rs1, rs2,
-        w.rd_high[0], w.rd_high[1], w.rd_high[2], w.rd_high[3],
-        w.rs1_sign, w.rs2_sign,
-        0, 1, 0
-    );
-}
-
-pub fn mulhu(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
-    let old_pc = cpu.pc;
-    let rs1 = cpu.read_reg(inst.rs1, tracer);
-    let rs2 = cpu.read_reg(inst.rs2, tracer);
-    let w = compute_mulh_witness(rs1.next, rs2.next, false, false);
-    let rd = cpu.write_reg(inst.rd, w.hi, tracer);
-    cpu.advance_pc();
-
-    // opcode flags: mulh=0, mulhsu=0, mulhu=1
-    trace_op!(mulh: tracer, old_pc, rd, rs1, rs2,
-        w.rd_high[0], w.rd_high[1], w.rd_high[2], w.rd_high[3],
-        w.rs1_sign, w.rs2_sign,
-        0, 0, 1
-    );
+pub fn mulhu(cpu: &mut Cpu, memory: &mut Memory, inst: &DecodedInst, tracer: &mut Tracer) {
+    execute_mulh(cpu, memory, inst, tracer, [0, 0, 1]);
 }
 
 // =============================================================================

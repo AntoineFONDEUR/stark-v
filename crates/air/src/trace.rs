@@ -59,7 +59,7 @@ mod tests {
         assert_eq!(tracer.total_traces(), 3);
     }
 
-    // Manual schema components retain their generated column layouts here.
+    // Component column layouts remain explicit protocol geometry.
     mod prover_column_tests {
         use super::prover_columns::*;
 
@@ -81,8 +81,8 @@ mod tests {
 
         #[test]
         fn test_mul_columns_size() {
-            // MUL: enabler (1), clock, pc, rd (10), rs1 (10), rs2 (10) = 33 total
-            assert_eq!(MulColumns::<()>::SIZE, 33);
+            // Inputs, authenticated accesses, product splits, and next PC.
+            assert_eq!(MulColumns::<()>::SIZE, 51);
         }
     }
 

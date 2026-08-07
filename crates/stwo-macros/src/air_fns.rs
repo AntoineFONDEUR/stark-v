@@ -36,6 +36,8 @@
 //! `bitxor` commit one byte result and bind it through the bitwise relation.
 //! `add_u32` and `sub_u32` commit wrapping word results plus their terminal
 //! carry or borrow and constrain the byte chain in the same frame.
+//! `divrem_u32` commits quotient, remainder, and exceptional-case witnesses;
+//! the felt body binds them through word identities and range relations.
 
 use std::collections::HashMap;
 
@@ -883,6 +885,19 @@ enum FillStep {
         output: [Ident; 4],
         carries: [Ident; 4],
     },
+    /// Evaluate RV32 signed or unsigned quotient and remainder witnesses.
+    DivRemWord {
+        lhs: [Ident; 4],
+        rhs: [Ident; 4],
+        signed: Ident,
+        quotient: [Ident; 4],
+        remainder: [Ident; 4],
+        zero_divisor: Ident,
+        zero_remainder: Ident,
+        overflow: Ident,
+        divisor_sum_inverse: Ident,
+        remainder_sum_inverse: Ident,
+    },
     /// Bind the prior word before a write computes its requested next limbs.
     AccessPrepare {
         kind: AccessKind,
@@ -1517,6 +1532,97 @@ impl Lowerer<'_> {
                         degree: 1,
                     };
                     return Ok(vec![result, terminal]);
+                }
+                "divrem_u32" => {
+                    if names.len() != 7 || call.args.len() != 3 {
+                        return Err(syn::Error::new_spanned(
+                            call,
+                            "divrem_u32 takes two four-limb words and a signed selector, and binds `(quotient, remainder, zero_divisor, zero_remainder, overflow, divisor_sum_inverse, remainder_sum_inverse)`",
+                        ));
+                    }
+                    let lhs = expect_word(&call.args[0], scope)?;
+                    let rhs = expect_word(&call.args[1], scope)?;
+                    let (signed_expr, signed_degree) = self.lower(&call.args[2], scope, budget)?;
+                    let signed = match &signed_expr {
+                        Expr::Path(path) => path.path.require_ident()?.clone(),
+                        _ => self.register_derived(
+                            &format_ident!("{}_signed", names[0]),
+                            signed_expr,
+                            signed_degree,
+                        ),
+                    };
+                    let quotient = std::array::from_fn(|position| {
+                        let base = format_ident!("{}_{}", names[0], position);
+                        let cell = self.register_column(&base);
+                        self.extra_columns.push(cell.clone());
+                        cell
+                    });
+                    let remainder = std::array::from_fn(|position| {
+                        let base = format_ident!("{}_{}", names[1], position);
+                        let cell = self.register_column(&base);
+                        self.extra_columns.push(cell.clone());
+                        cell
+                    });
+                    let scalar_outputs = names[2..]
+                        .iter()
+                        .map(|name| {
+                            let cell = self.register_column(name);
+                            self.extra_columns.push(cell.clone());
+                            cell
+                        })
+                        .collect::<Vec<_>>();
+                    let [
+                        zero_divisor,
+                        zero_remainder,
+                        overflow,
+                        divisor_sum_inverse,
+                        remainder_sum_inverse,
+                    ]: [Ident; 5] = scalar_outputs
+                        .try_into()
+                        .expect("five scalar division outputs");
+                    self.fill.push(FillStep::DivRemWord {
+                        lhs: lhs.clone(),
+                        rhs: rhs.clone(),
+                        signed,
+                        quotient: quotient.clone(),
+                        remainder: remainder.clone(),
+                        zero_divisor: zero_divisor.clone(),
+                        zero_remainder: zero_remainder.clone(),
+                        overflow: overflow.clone(),
+                        divisor_sum_inverse: divisor_sum_inverse.clone(),
+                        remainder_sum_inverse: remainder_sum_inverse.clone(),
+                    });
+                    let word_value = |word: [Ident; 4]| {
+                        Value::Array(
+                            word.into_iter()
+                                .map(|cell| Value::Scalar { cell, degree: 1 })
+                                .collect(),
+                        )
+                    };
+                    return Ok(vec![
+                        word_value(quotient),
+                        word_value(remainder),
+                        Value::Scalar {
+                            cell: zero_divisor,
+                            degree: 1,
+                        },
+                        Value::Scalar {
+                            cell: zero_remainder,
+                            degree: 1,
+                        },
+                        Value::Scalar {
+                            cell: overflow,
+                            degree: 1,
+                        },
+                        Value::Scalar {
+                            cell: divisor_sum_inverse,
+                            degree: 1,
+                        },
+                        Value::Scalar {
+                            cell: remainder_sum_inverse,
+                            degree: 1,
+                        },
+                    ]);
                 }
                 "constant" | "sum" | "pow2" | "inv" => {}
                 _ => {
@@ -4393,6 +4499,88 @@ fn generate_intrinsic_fill_step(step: &FillStep) -> syn::Result<TokenStream2> {
                 #(#steps)*
             })
         }
+        FillStep::DivRemWord {
+            lhs,
+            rhs,
+            signed,
+            quotient,
+            remainder,
+            zero_divisor,
+            zero_remainder,
+            overflow,
+            divisor_sum_inverse,
+            remainder_sum_inverse,
+        } => Ok(quote! {
+            let (
+                [#(#quotient),*],
+                [#(#remainder),*],
+                #zero_divisor,
+                #zero_remainder,
+                #overflow,
+                #divisor_sum_inverse,
+                #remainder_sum_inverse,
+            ) = {
+                let __lhs_bytes = [#(
+                    u8::try_from(#lhs.0).expect("word limb must fit in u8")
+                ),*];
+                let __rhs_bytes = [#(
+                    u8::try_from(#rhs.0).expect("word limb must fit in u8")
+                ),*];
+                let __lhs_word = u32::from_le_bytes(__lhs_bytes);
+                let __rhs_word = u32::from_le_bytes(__rhs_bytes);
+                let __signed = match #signed.0 {
+                    0 => false,
+                    1 => true,
+                    _ => panic!("division signed selector must be zero or one"),
+                };
+                let __zero_divisor = __rhs_word == 0;
+                let __overflow = __signed
+                    && __lhs_word == 0x8000_0000
+                    && __rhs_word == u32::MAX;
+                let (__quotient, __remainder) = if __zero_divisor {
+                    (u32::MAX, __lhs_word)
+                } else if __signed {
+                    let __lhs_signed = __lhs_word as i32;
+                    let __rhs_signed = __rhs_word as i32;
+                    (
+                        __lhs_signed.wrapping_div(__rhs_signed) as u32,
+                        __lhs_signed.wrapping_rem(__rhs_signed) as u32,
+                    )
+                } else {
+                    (__lhs_word / __rhs_word, __lhs_word % __rhs_word)
+                };
+                let __zero_remainder = !__zero_divisor && __remainder == 0;
+                let __divisor_sum = __rhs_bytes
+                    .into_iter()
+                    .map(u32::from)
+                    .sum::<u32>();
+                let __remainder_bytes = __remainder.to_le_bytes();
+                let __remainder_sum = __remainder_bytes
+                    .into_iter()
+                    .map(u32::from)
+                    .sum::<u32>();
+                let __inverse_or_zero = |value| {
+                    if value == 0 {
+                        #base_field::from_u32_unchecked(0)
+                    } else {
+                        #base_field::from_u32_unchecked(value).inverse()
+                    }
+                };
+                (
+                    __quotient.to_le_bytes().map(|limb| {
+                        #base_field::from_u32_unchecked(u32::from(limb))
+                    }),
+                    __remainder_bytes.map(|limb| {
+                        #base_field::from_u32_unchecked(u32::from(limb))
+                    }),
+                    #base_field::from_u32_unchecked(u32::from(__zero_divisor)),
+                    #base_field::from_u32_unchecked(u32::from(__zero_remainder)),
+                    #base_field::from_u32_unchecked(u32::from(__overflow)),
+                    __inverse_or_zero(__divisor_sum),
+                    __inverse_or_zero(__remainder_sum),
+                )
+            };
+        }),
         _ => Err(syn::Error::new(
             proc_macro2::Span::call_site(),
             "expected an intrinsic fill step",
@@ -4423,7 +4611,8 @@ fn generate_embedded_fill(
             FillStep::Call { .. } => unreachable!("embedded functions make no calls"),
             FillStep::SplitM31 { .. }
             | FillStep::Bitwise { .. }
-            | FillStep::WordArithmetic { .. } => {
+            | FillStep::WordArithmetic { .. }
+            | FillStep::DivRemWord { .. } => {
                 steps.push(generate_intrinsic_fill_step(step)?);
             }
             FillStep::AccessPrepare { .. } | FillStep::AccessCommit { .. } => {
@@ -4519,7 +4708,8 @@ fn generate_call_fn(
             }
             FillStep::SplitM31 { .. }
             | FillStep::Bitwise { .. }
-            | FillStep::WordArithmetic { .. } => {
+            | FillStep::WordArithmetic { .. }
+            | FillStep::DivRemWord { .. } => {
                 steps.push(generate_intrinsic_fill_step(step)?);
             }
             FillStep::AccessPrepare { .. } | FillStep::AccessCommit { .. } => {

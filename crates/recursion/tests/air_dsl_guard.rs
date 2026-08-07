@@ -209,7 +209,7 @@ const VM_INVENTORY: [ComponentOwner; 27] = [
     },
     ComponentOwner {
         name: "div",
-        source: "crates/air/src/schema.rs",
+        source: "crates/air/src/opcodes/div.rs",
     },
     ComponentOwner {
         name: "jal",
@@ -293,7 +293,7 @@ const VM_INVENTORY: [ComponentOwner; 27] = [
     },
 ];
 
-const OWNER_POLICIES: [OwnerPolicy; 47] = [
+const OWNER_POLICIES: [OwnerPolicy; 48] = [
     OwnerPolicy {
         source: "crates/air/src/opcodes/auipc.rs",
         accepted_macro_count: 1,
@@ -312,6 +312,10 @@ const OWNER_POLICIES: [OwnerPolicy; 47] = [
     },
     OwnerPolicy {
         source: "crates/air/src/opcodes/branch_lt.rs",
+        accepted_macro_count: 1,
+    },
+    OwnerPolicy {
+        source: "crates/air/src/opcodes/div.rs",
         accepted_macro_count: 1,
     },
     OwnerPolicy {
@@ -531,6 +535,23 @@ fn every_reachable_air_owner_uses_only_the_direct_dsl() {
 }
 
 #[test]
+fn opcode_runners_do_not_construct_manual_air_rows() {
+    let ops = workspace_root().join("crates/runner/src/ops");
+    let violations = fs::read_dir(ops)
+        .expect("read runner opcode directory")
+        .map(|entry| entry.expect("read runner opcode entry").path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+        .filter(|path| {
+            fs::read_to_string(path)
+                .expect("read runner opcode source")
+                .contains("trace_op!")
+        })
+        .collect::<Vec<_>>();
+
+    assert!(violations.is_empty(), "manual opcode rows: {violations:#?}");
+}
+
+#[test]
 fn vm_component_router_uses_only_the_expected_dsl_routes() {
     let (custom_routes, detached) = parse_vm_component_router();
     assert_eq!(
@@ -557,6 +578,7 @@ fn vm_component_router_uses_only_the_expected_dsl_routes() {
                     "branch_lt".to_owned(),
                     "air::opcodes::branch_lt::component".to_owned(),
                 ),
+                ("div".to_owned(), "air::opcodes::div::component".to_owned()),
                 ("jal".to_owned(), "air::opcodes::jal::component".to_owned(),),
                 (
                     "jalr".to_owned(),

@@ -772,6 +772,27 @@ mod word_intrinsics {
             let (difference, borrow) = sub_u32(lhs, rhs);
             return (sum, carry, difference, borrow);
         }
+
+        fn divide_words(lhs: [felt; 4], rhs: [felt; 4], signed) {
+            let (
+                quotient,
+                remainder,
+                zero_divisor,
+                zero_remainder,
+                overflow,
+                divisor_sum_inverse,
+                remainder_sum_inverse,
+            ) = divrem_u32(lhs, rhs, signed);
+            return (
+                quotient,
+                remainder,
+                zero_divisor,
+                zero_remainder,
+                overflow,
+                divisor_sum_inverse,
+                remainder_sum_inverse,
+            );
+        }
     }
 }
 
@@ -834,6 +855,65 @@ fn word_arithmetic_sets_terminal_borrow_on_underflow() {
     let outputs = word_intrinsics::call_wrapping_math(&mut tables, inputs);
 
     assert_eq!(outputs[9], felt(1));
+}
+
+fn divide_word_outputs(lhs: u32, rhs: u32, signed: u32) -> [BaseField; 13] {
+    let mut tables = word_intrinsics::Tables::default();
+    let lhs = lhs.to_le_bytes().map(|limb| felt(limb.into()));
+    let rhs = rhs.to_le_bytes().map(|limb| felt(limb.into()));
+    word_intrinsics::call_divide_words(
+        &mut tables,
+        [
+            lhs[0],
+            lhs[1],
+            lhs[2],
+            lhs[3],
+            rhs[0],
+            rhs[1],
+            rhs[2],
+            rhs[3],
+            felt(signed),
+        ],
+    )
+}
+
+fn output_word(outputs: &[BaseField], start: usize) -> u32 {
+    u32::from_le_bytes(std::array::from_fn(|position| {
+        outputs[start + position].0 as u8
+    }))
+}
+
+#[rstest::rstest]
+#[case(7, (-3i32) as u32, 1, 0, (-2i32) as u32)]
+#[case((-7i32) as u32, 3, 1, 4, (-1i32) as u32)]
+#[case(u32::MAX, 2, 0, 0, u32::MAX / 2)]
+fn division_witness_binds_expected_word(
+    #[case] lhs: u32,
+    #[case] rhs: u32,
+    #[case] signed: u32,
+    #[case] start: usize,
+    #[case] expected: u32,
+) {
+    let outputs = divide_word_outputs(lhs, rhs, signed);
+
+    assert_eq!(output_word(&outputs, start), expected);
+}
+
+#[rstest::rstest]
+#[case(5, 0, 1, 8, 1)]
+#[case(5, 0, 1, 9, 0)]
+#[case(0x8000_0000, u32::MAX, 1, 9, 1)]
+#[case(0x8000_0000, u32::MAX, 1, 10, 1)]
+fn division_witness_binds_exception_flag(
+    #[case] lhs: u32,
+    #[case] rhs: u32,
+    #[case] signed: u32,
+    #[case] position: usize,
+    #[case] expected: u32,
+) {
+    let outputs = divide_word_outputs(lhs, rhs, signed);
+
+    assert_eq!(outputs[position], felt(expected));
 }
 
 #[test]

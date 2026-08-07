@@ -11,7 +11,7 @@ stwo_macros::components! {
         branch_eq: air::opcodes::branch_eq::component,
         branch_lt: air::opcodes::branch_lt::component,
         commit,
-        div,
+        div: air::opcodes::div::component,
         jal: air::opcodes::jal::component,
         jalr: air::opcodes::jalr::component,
         load_store: air::opcodes::load_store::component,
@@ -158,6 +158,24 @@ mod tests {
     }
 
     #[test]
+    fn div_constraint_degrees_fit_the_declared_bound() {
+        let eval = super::div::air::Eval {
+            log_size: 6,
+            relations: crate::relations::Relations::dummy(),
+        };
+        let evaluated = eval.evaluate(ExprEvaluator::new());
+        let degrees = evaluated.constraint_degree_bounds();
+        let breaches = degrees
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, degree)| *degree > 3)
+            .collect::<Vec<_>>();
+
+        assert!(breaches.is_empty(), "{breaches:?}");
+    }
+
+    #[test]
     fn test_mul_constraint_degree_bounds() {
         let eval = super::mul::air::Eval {
             log_size: 6,
@@ -282,6 +300,36 @@ mod tests {
     fn mutated_generated_store_preserved_limb_fails_component_constraints() {
         let mut tracer = crate::e2e::run_test_bin("sb");
         tracer.load_store.destination_next_3[0] ^= 1;
+        let traces = super::gen_trace(tracer);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::Components::assert_constraints_on_polys(
+                &traces,
+                &crate::relations::Relations::dummy(),
+            );
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mutated_generated_division_quotient_fails_component_constraints() {
+        let mut tracer = crate::e2e::run_test_bin("div");
+        tracer.div.quotient_0[0] ^= 1;
+        let traces = super::gen_trace(tracer);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::Components::assert_constraints_on_polys(
+                &traces,
+                &crate::relations::Relations::dummy(),
+            );
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mutated_generated_division_remainder_fails_component_constraints() {
+        let mut tracer = crate::e2e::run_test_bin("rem");
+        tracer.div.remainder_0[0] ^= 1;
         let traces = super::gen_trace(tracer);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             super::Components::assert_constraints_on_polys(

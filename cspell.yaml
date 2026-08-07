@@ -35,6 +35,7 @@ words:
   - decommitted
   - dedup
   - denoms
+  - divrem
   - divu
   - docstrings
   - doctest

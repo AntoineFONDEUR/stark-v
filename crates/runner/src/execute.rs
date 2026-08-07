@@ -67,10 +67,10 @@ pub fn execute(
         Opcode::Mulh => muldiv::mulh(cpu, mem, inst, tracer),
         Opcode::Mulhsu => muldiv::mulhsu(cpu, mem, inst, tracer),
         Opcode::Mulhu => muldiv::mulhu(cpu, mem, inst, tracer),
-        Opcode::Div => muldiv::div(cpu, inst, tracer),
-        Opcode::Divu => muldiv::divu(cpu, inst, tracer),
-        Opcode::Rem => muldiv::rem(cpu, inst, tracer),
-        Opcode::Remu => muldiv::remu(cpu, inst, tracer),
+        Opcode::Div => muldiv::div(cpu, mem, inst, tracer),
+        Opcode::Divu => muldiv::divu(cpu, mem, inst, tracer),
+        Opcode::Rem => muldiv::rem(cpu, mem, inst, tracer),
+        Opcode::Remu => muldiv::remu(cpu, mem, inst, tracer),
 
         // Dispatch before advancing so rejected calls cannot mutate execution state.
         Opcode::Ecall => {
@@ -322,6 +322,47 @@ mod tests {
     #[case(Opcode::Mulhu, u32::MAX, 2, 1, 1)]
     #[case(Opcode::Mul, 3, 7, 2, 21)]
     fn generated_multiply_honors_signedness_wrapping_and_aliasing(
+        #[case] opcode: Opcode,
+        #[case] lhs: u32,
+        #[case] rhs: u32,
+        #[case] rd: u8,
+        #[case] expected: u32,
+    ) {
+        let mut cpu = Cpu::new(0x1000, 0, 0);
+        cpu.set_reg(1, lhs);
+        cpu.set_reg(2, rhs);
+        let mut memory = Memory::new();
+        let inst = DecodedInst {
+            opcode,
+            rd,
+            rs1: 1,
+            rs2: 2,
+            imm: 0,
+        };
+        let mut tracer = Tracer {
+            clock: 1,
+            ..Default::default()
+        };
+
+        execute(&mut cpu, &mut memory, &inst, &mut tracer).expect("execution must succeed");
+
+        assert_eq!(cpu.reg(rd), expected);
+    }
+
+    #[rstest::rstest]
+    #[case(Opcode::Div, 7, (-3i32) as u32, 3, (-2i32) as u32)]
+    #[case(Opcode::Div, (-7i32) as u32, 3, 3, (-2i32) as u32)]
+    #[case(Opcode::Rem, 7, (-3i32) as u32, 3, 1)]
+    #[case(Opcode::Rem, (-7i32) as u32, 3, 3, (-1i32) as u32)]
+    #[case(Opcode::Div, i32::MIN as u32, u32::MAX, 3, i32::MIN as u32)]
+    #[case(Opcode::Rem, i32::MIN as u32, u32::MAX, 3, 0)]
+    #[case(Opcode::Divu, 5, 0, 3, u32::MAX)]
+    #[case(Opcode::Remu, 5, 0, 3, 5)]
+    #[case(Opcode::Divu, u32::MAX, 2, 3, u32::MAX / 2)]
+    #[case(Opcode::Remu, u32::MAX, 2, 3, 1)]
+    #[case(Opcode::Divu, 21, 3, 1, 7)]
+    #[case(Opcode::Remu, 21, 4, 2, 1)]
+    fn generated_division_honors_signedness_exceptions_and_aliasing(
         #[case] opcode: Opcode,
         #[case] lhs: u32,
         #[case] rhs: u32,

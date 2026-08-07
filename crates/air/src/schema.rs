@@ -36,6 +36,7 @@ stwo_macros::define_air! {
         base_alu_reg: crate::opcodes::base_alu_reg,
         branch_eq: crate::opcodes::branch_eq,
         branch_lt: crate::opcodes::branch_lt,
+        div: crate::opcodes::div,
         jal: crate::opcodes::jal,
         jalr: crate::opcodes::jalr,
         load_store: crate::opcodes::load_store,
@@ -51,206 +52,7 @@ stwo_macros::define_air! {
     trace: {
 
         // ==========================================================================
-        // 16. DIV (div/divu/rem/remu)
-        // ==========================================================================
-        div: {
-            committed: {
-                clock, pc, rd, rs1, rs2,
-                zero_divisor, r_zero,
-                q_0, q_1, q_2, q_3,
-                r_0, r_1, r_2, r_3,
-                b_sign, c_sign, q_sign, sign_xor,
-                c_sum_inv, r_sum_inv,
-                r_abs_0, r_abs_1, r_abs_2, r_abs_3,
-                r_inv_0, r_inv_1, r_inv_2, r_inv_3,
-                lt_marker_0, lt_marker_1, lt_marker_2, lt_marker_3,
-                lt_diff,
-                opcode_div_flag, opcode_divu_flag, opcode_rem_flag, opcode_remu_flag,
-            },
-            derived: {
-                expected_opcode_id: opcode_div_flag * constant(crate::instructions::Opcode::Div as u32)
-                    + opcode_divu_flag * constant(crate::instructions::Opcode::Divu as u32)
-                    + opcode_rem_flag * constant(crate::instructions::Opcode::Rem as u32)
-                    + opcode_remu_flag * constant(crate::instructions::Opcode::Remu as u32),
-                is_div: opcode_div_flag + opcode_divu_flag,
-                is_signed: opcode_div_flag + opcode_rem_flag,
-                special_case: zero_divisor + r_zero,
-                valid_not_zero_divisor: enabler - zero_divisor,
-                valid_not_special: enabler - special_case,
-                q_sum: q_0 + q_1 + q_2 + q_3,
-                c_sum: rs2_next_0 + rs2_next_1 + rs2_next_2 + rs2_next_3,
-                r_sum: r_0 + r_1 + r_2 + r_3,
-                c_sign_factor: 1 - 2 * c_sign,
-                // |r| vs |c| limb differences under the divisor sign
-                diff_0: c_sign_factor * (rs2_next_0 - r_abs_0),
-                diff_1: c_sign_factor * (rs2_next_1 - r_abs_1),
-                diff_2: c_sign_factor * (rs2_next_2 - r_abs_2),
-                diff_3: c_sign_factor * (rs2_next_3 - r_abs_3),
-                // Result selection: quotient for div/divu, remainder for rem/remu
-                a_0: is_div * q_0 + (1 - is_div) * r_0,
-                a_1: is_div * q_1 + (1 - is_div) * r_1,
-                a_2: is_div * q_2 + (1 - is_div) * r_2,
-                a_3: is_div * q_3 + (1 - is_div) * r_3,
-                // Carry chain of r + |r| = 2^32 (two's complement negation)
-                carry_lt_0: (r_0 + r_abs_0) * inv(pow2(8)),
-                carry_lt_1: (carry_lt_0 + r_1 + r_abs_1) * inv(pow2(8)),
-                carry_lt_2: (carry_lt_1 + r_2 + r_abs_2) * inv(pow2(8)),
-                carry_lt_3: (carry_lt_2 + r_3 + r_abs_3) * inv(pow2(8)),
-                // Comparison scan prefixes, seeded by the special cases
-                prefix_3: special_case + lt_marker_3,
-                prefix_2: prefix_3 + lt_marker_2,
-                prefix_1: prefix_2 + lt_marker_1,
-                prefix_0: prefix_1 + lt_marker_0,
-                lt_diff_minus_1: lt_diff - 1,
-                // Sign-extension limbs (64-bit two's complement): every limb
-                // above the low four equals sign * 0xFF. The remainder's sign is
-                // the dividend's, except r = 0 which extends with zeros; the
-                // zero-divisor case (r = b) keeps b's sign through b_sign.
-                c_hi: 255 * c_sign,
-                q_hi: 255 * q_sign,
-                b_hi: 255 * b_sign,
-                r_hi: 255 * b_sign * (1 - r_zero),
-                // Schoolbook carries of rs1 = rs2 * q + r over the sign-extended
-                // limbs: carry_k integral and below 2^11 makes the
-                // limb equations an exact 64-bit identity, which pins (q, r) to
-                // the dividend (the overflow case is exact too: q_sign = 0 reads
-                // 0x80000000 as +2^31).
-                carry_0: (rs2_next_0 * q_0 + r_0 - rs1_next_0) * inv(pow2(8)),
-                carry_1: (carry_0 + rs2_next_0 * q_1 + rs2_next_1 * q_0 + r_1 - rs1_next_1)
-                        * inv(pow2(8)),
-                carry_2: (carry_1 + rs2_next_0 * q_2 + rs2_next_1 * q_1 + rs2_next_2 * q_0 + r_2
-                        - rs1_next_2) * inv(pow2(8)),
-                carry_3: (carry_2 + rs2_next_0 * q_3 + rs2_next_1 * q_2 + rs2_next_2 * q_1
-                        + rs2_next_3 * q_0 + r_3 - rs1_next_3) * inv(pow2(8)),
-                carry_4: (carry_3 + rs2_next_0 * q_hi + rs2_next_1 * q_3 + rs2_next_2 * q_2
-                        + rs2_next_3 * q_1 + c_hi * q_0 + r_hi - b_hi) * inv(pow2(8)),
-                carry_5: (carry_4 + (rs2_next_0 + rs2_next_1) * q_hi + rs2_next_2 * q_3
-                        + rs2_next_3 * q_2 + c_hi * (q_0 + q_1) + r_hi - b_hi)
-                        * inv(pow2(8)),
-                carry_6: (carry_5 + (c_sum - rs2_next_3) * q_hi + rs2_next_3 * q_3
-                        + c_hi * (q_sum - q_3) + r_hi - b_hi) * inv(pow2(8)),
-                carry_7: (carry_6 + c_sum * q_hi + c_hi * q_sum + r_hi - b_hi) * inv(pow2(8)),
-                // Sign bits bound to the operands' top limbs under signed
-                // opcodes: 2 * (top_limb - sign * 2^7) is a byte iff the sign
-                // bit matches (without this, a sign lie with r = 0 slips past
-                // the special-case-gated comparison scan).
-                b_sign_check: 2 * is_signed * (rs1_next_3 - b_sign * pow2(7)),
-                c_sign_check: 2 * is_signed * (rs2_next_3 - c_sign * pow2(7)),
-                pc_next: pc + 4,
-                clock_next: clock + 1,
-                rs1_clock_diff: clock - rs1_clock_prev,
-                rs2_clock_diff: clock - rs2_clock_prev,
-                rd_clock_diff: clock - rd_clock_prev,
-            },
-            constraints: {
-                zero_divisor * (1 - zero_divisor),
-                r_zero * (1 - r_zero),
-                b_sign * (1 - b_sign),
-                c_sign * (1 - c_sign),
-                q_sign * (1 - q_sign),
-                sign_xor * (1 - sign_xor),
-                lt_marker_0 * (1 - lt_marker_0),
-                lt_marker_1 * (1 - lt_marker_1),
-                lt_marker_2 * (1 - lt_marker_2),
-                lt_marker_3 * (1 - lt_marker_3),
-                special_case * (1 - special_case),
-                valid_not_zero_divisor * (1 - valid_not_zero_divisor),
-                valid_not_special * (1 - valid_not_special),
-                // Zero divisor: all-one quotient, zero divisor limbs
-                zero_divisor * rs2_next_0,
-                zero_divisor * rs2_next_1,
-                zero_divisor * rs2_next_2,
-                zero_divisor * rs2_next_3,
-                zero_divisor * (q_0 - (pow2(8) - 1)),
-                zero_divisor * (q_1 - (pow2(8) - 1)),
-                zero_divisor * (q_2 - (pow2(8) - 1)),
-                zero_divisor * (q_3 - (pow2(8) - 1)),
-                valid_not_zero_divisor * (c_sum * c_sum_inv - 1),
-                // Zero remainder detection
-                r_zero * r_0,
-                r_zero * r_1,
-                r_zero * r_2,
-                r_zero * r_3,
-                valid_not_special * (r_sum * r_sum_inv - 1),
-                // Signs only under signed opcodes; sign_xor = b_sign XOR c_sign
-                (1 - is_signed) * b_sign,
-                (1 - is_signed) * c_sign,
-                enabler * (sign_xor - b_sign - c_sign + 2 * b_sign * c_sign),
-                // Quotient sign selection
-                (1 - zero_divisor) * q_sum * (q_sign - sign_xor),
-                (1 - zero_divisor) * (q_sign - sign_xor) * q_sign,
-                // Absolute remainder: identity without sign flip, two's
-                // complement otherwise
-                (1 - sign_xor) * (r_abs_0 - r_0),
-                sign_xor * carry_lt_0 * (carry_lt_0 - 1),
-                sign_xor * (1 - carry_lt_0) * r_abs_0,
-                sign_xor * ((r_abs_0 - pow2(8)) * r_inv_0 - 1),
-                (1 - sign_xor) * (r_abs_1 - r_1),
-                sign_xor * (carry_lt_1 - carry_lt_0) * (carry_lt_1 - 1),
-                sign_xor * (1 - carry_lt_1) * r_abs_1,
-                sign_xor * ((r_abs_1 - pow2(8)) * r_inv_1 - 1),
-                (1 - sign_xor) * (r_abs_2 - r_2),
-                sign_xor * (carry_lt_2 - carry_lt_1) * (carry_lt_2 - 1),
-                sign_xor * (1 - carry_lt_2) * r_abs_2,
-                sign_xor * ((r_abs_2 - pow2(8)) * r_inv_2 - 1),
-                (1 - sign_xor) * (r_abs_3 - r_3),
-                sign_xor * (carry_lt_3 - carry_lt_2) * (carry_lt_3 - 1),
-                sign_xor * (1 - carry_lt_3) * r_abs_3,
-                sign_xor * ((r_abs_3 - pow2(8)) * r_inv_3 - 1),
-                // < scan from the most significant limb. The enabler gate is
-                // omitted: diff and lt_diff vanish on padding rows, and without
-                // it the constraints stay within the degree-3 bound (diff is
-                // already quadratic).
-                (1 - prefix_3) * diff_3,
-                lt_marker_3 * (lt_diff - diff_3),
-                (1 - prefix_2) * diff_2,
-                lt_marker_2 * (lt_diff - diff_2),
-                (1 - prefix_1) * diff_1,
-                lt_marker_1 * (lt_diff - diff_1),
-                (1 - prefix_0) * diff_0,
-                lt_marker_0 * (lt_diff - diff_0),
-                enabler * (1 - prefix_0),
-            },
-            lookups: {
-                // Quadratic carry denominators: every fraction must stay in a
-                // singleton batch to hold the constraint degree bound.
-                batch: 1,
-                // Program access (R-type): Program(pc, opcode, rd_idx, rs1_idx, rs2_idx)
-                -enabler * program_access(pc, expected_opcode_id, rd_addr, rs1_addr, rs2_addr),
-                -enabler * registers_state(pc, clock),
-                enabler * registers_state(pc_next, clock_next),
-                // Read rs1 (REG_AS = 0).
-                -enabler * memory_access(0, rs1_addr, rs1_clock_prev, rs1_prev_0, rs1_prev_1, rs1_prev_2, rs1_prev_3),
-                enabler * memory_access(0, rs1_addr, clock, rs1_next_0, rs1_next_1, rs1_next_2, rs1_next_3),
-                - enabler * range_check_20(rs1_clock_diff),
-                // Read rs2.
-                -enabler * memory_access(0, rs2_addr, rs2_clock_prev, rs2_prev_0, rs2_prev_1, rs2_prev_2, rs2_prev_3),
-                enabler * memory_access(0, rs2_addr, clock, rs2_next_0, rs2_next_1, rs2_next_2, rs2_next_3),
-                - enabler * range_check_20(rs2_clock_diff),
-                // Quotient and remainder limbs are bytes and the rs1 = rs2*q + r
-                // schoolbook carries fit 11 bits.
-                - enabler * range_check_8_11(q_0, carry_0),
-                - enabler * range_check_8_11(q_1, carry_1),
-                - enabler * range_check_8_11(q_2, carry_2),
-                - enabler * range_check_8_11(q_3, carry_3),
-                - enabler * range_check_8_11(r_0, carry_4),
-                - enabler * range_check_8_11(r_1, carry_5),
-                - enabler * range_check_8_11(r_2, carry_6),
-                - enabler * range_check_8_11(r_3, carry_7),
-                // b_sign / c_sign match the operands' top bits.
-                - enabler * range_check_8_8(b_sign_check, c_sign_check),
-                // |r| < |c| on regular divisions: the comparison scan difference
-                // is > 0.
-                - valid_not_special * range_check_20(lt_diff_minus_1),
-                // Write rd := the division result under the special-case rules.
-                -enabler * memory_access(0, rd_addr, rd_clock_prev, rd_prev_0, rd_prev_1, rd_prev_2, rd_prev_3),
-                enabler * memory_access(0, rd_addr, clock, a_0, a_1, a_2, a_3),
-                - enabler * range_check_20(rd_clock_diff),
-            },
-        },
-
-        // ==========================================================================
-        // 17. COMMIT syscall
+        // COMMIT syscall
         // ==========================================================================
         commit: {
             committed: {
@@ -346,7 +148,7 @@ stwo_macros::define_air! {
         },
 
         // ==========================================================================
-        // 18. Program commitment table
+        // Program commitment table
         // ==========================================================================
         program: {
             committed: {
@@ -383,7 +185,7 @@ stwo_macros::define_air! {
         },
 
         // ==========================================================================
-        // 19. Memory commitment table (initial/final)
+        // Memory commitment table (initial/final)
         // ==========================================================================
         memory: {
             committed: {
@@ -429,7 +231,7 @@ stwo_macros::define_air! {
         },
 
         // ==========================================================================
-        // 20. Merkle tree nodes
+        // Merkle tree nodes
         // ==========================================================================
         merkle: {
             committed: {

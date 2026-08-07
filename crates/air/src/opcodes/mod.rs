@@ -5,6 +5,7 @@ pub mod base_alu_imm;
 pub mod base_alu_reg;
 pub mod branch_eq;
 pub mod branch_lt;
+pub mod div;
 pub mod jal;
 pub mod jalr;
 pub mod load_store;

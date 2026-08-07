@@ -208,9 +208,13 @@ Opcode compiler capabilities, in dependency order:
    `bitxor` commit one byte output and consume the corresponding preprocessed
    `bitwise` row, optionally under an opcode multiplicity. `add_u32` and
    `sub_u32` commit four wrapping result limbs plus the carry/borrow chain,
-   constrain every chain bit, and range-check an active result. AUIPC and JAL
-   use the split for their written word; JALR splits its canonical target and
-   binds the cleared low bit through `bitand`; the base ALU families compose the
+   constrain every chain bit, and range-check an active result. `divrem_u32`
+   commits RV32 signed or unsigned quotient, remainder, zero, overflow, and
+   inverse witnesses; it adds no implicit soundness rule, so the felt body binds
+   those columns through the wide product identity, absolute-remainder bound,
+   special-case constraints, and explicit range relations. AUIPC and JAL use the
+   split for their written word; JALR splits its canonical target and binds the
+   cleared low bit through `bitand`; the base ALU families compose the
    arithmetic and bitwise primitives under one-hot opcode flags. Comparisons use
    the terminal borrow from `sub_u32`; signed comparisons authenticate the
    standard sign-bit ordering transform through `bitxor`. Equality branches

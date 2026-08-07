@@ -348,4 +348,80 @@ mod tests {
 
         assert_eq!(cpu.reg(rd), expected);
     }
+
+    #[rstest::rstest]
+    #[case(Opcode::Lb, 0x0000_0080, 0, 3, 0xffff_ff80)]
+    #[case(Opcode::Lb, 0x8000_0000, 3, 3, 0xffff_ff80)]
+    #[case(Opcode::Lbu, 0x0000_ab00, 1, 3, 0x0000_00ab)]
+    #[case(Opcode::Lh, 0x0000_8001, 0, 3, 0xffff_8001)]
+    #[case(Opcode::Lh, 0x8001_0000, 2, 3, 0xffff_8001)]
+    #[case(Opcode::Lhu, 0xabcd_0000, 2, 3, 0x0000_abcd)]
+    #[case(Opcode::Lw, 0x89ab_cdef, 0, 3, 0x89ab_cdef)]
+    #[case(Opcode::Lw, 0x89ab_cdef, 0, 1, 0x89ab_cdef)]
+    fn generated_loads_select_extend_and_alias(
+        #[case] opcode: Opcode,
+        #[case] word: u32,
+        #[case] offset: i32,
+        #[case] rd: u8,
+        #[case] expected: u32,
+    ) {
+        let mut cpu = Cpu::new(0x1000, 0, 0);
+        cpu.set_reg(1, 0x2000);
+        let mut memory = Memory::new();
+        memory.write_u32(0x2000, word);
+        let inst = DecodedInst {
+            opcode,
+            rd,
+            rs1: 1,
+            rs2: 0,
+            imm: offset,
+        };
+        let mut tracer = Tracer {
+            clock: 1,
+            ..Default::default()
+        };
+
+        execute(&mut cpu, &mut memory, &inst, &mut tracer).expect("execution must succeed");
+
+        assert_eq!(cpu.reg(rd), expected);
+    }
+
+    #[rstest::rstest]
+    #[case(Opcode::Sb, 0x4433_2211, 0x0000_00aa, 0, 2, 0x4433_22aa)]
+    #[case(Opcode::Sb, 0x4433_2211, 0x0000_00aa, 1, 2, 0x4433_aa11)]
+    #[case(Opcode::Sb, 0x4433_2211, 0x0000_00aa, 2, 2, 0x44aa_2211)]
+    #[case(Opcode::Sb, 0x4433_2211, 0x0000_00aa, 3, 2, 0xaa33_2211)]
+    #[case(Opcode::Sh, 0x4433_2211, 0x0000_aabb, 0, 2, 0x4433_aabb)]
+    #[case(Opcode::Sh, 0x4433_2211, 0x0000_aabb, 2, 2, 0xaabb_2211)]
+    #[case(Opcode::Sw, 0x4433_2211, 0xaabb_ccdd, 0, 2, 0xaabb_ccdd)]
+    #[case(Opcode::Sh, 0x4433_2211, 0x0000_2000, 2, 1, 0x2000_2211)]
+    fn generated_stores_select_lanes_preserve_bytes_and_alias(
+        #[case] opcode: Opcode,
+        #[case] initial: u32,
+        #[case] source: u32,
+        #[case] offset: i32,
+        #[case] rs2: u8,
+        #[case] expected: u32,
+    ) {
+        let mut cpu = Cpu::new(0x1000, 0, 0);
+        cpu.set_reg(1, 0x2000);
+        cpu.set_reg(2, source);
+        let mut memory = Memory::new();
+        memory.write_u32(0x2000, initial);
+        let inst = DecodedInst {
+            opcode,
+            rd: 0,
+            rs1: 1,
+            rs2,
+            imm: offset,
+        };
+        let mut tracer = Tracer {
+            clock: 1,
+            ..Default::default()
+        };
+
+        execute(&mut cpu, &mut memory, &inst, &mut tracer).expect("execution must succeed");
+
+        assert_eq!(memory.read_u32(0x2000), expected);
+    }
 }

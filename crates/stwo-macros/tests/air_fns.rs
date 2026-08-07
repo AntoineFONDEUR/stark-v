@@ -1015,6 +1015,16 @@ mod access_vm {
             return src_next;
         }
 
+        fn read_addressed_word(clock, addr_space, addr) {
+            read_word src(clock, addr_space, addr);
+            return src_next;
+        }
+
+        fn write_addressed_word(clock, addr_space, addr, requested: [felt; 4]) {
+            write_word dst(clock, addr_space, addr, requested);
+            return dst_next;
+        }
+
         fn close_access(
             addr,
             before_clock,
@@ -1039,6 +1049,21 @@ mod access_vm {
         ) {
             emit memory_access(1, addr, before_clock, before);
             consume memory_access(1, addr, after_clock, after);
+            emit range_check_20(diff);
+            return addr;
+        }
+
+        fn close_word_access(
+            addr_space,
+            addr,
+            before_clock,
+            before: [felt; 4],
+            after_clock,
+            after: [felt; 4],
+            diff,
+        ) {
+            emit memory_access(addr_space, addr, before_clock, before);
+            consume memory_access(addr_space, addr, after_clock, after);
             emit range_check_20(diff);
             return addr;
         }
@@ -1185,6 +1210,377 @@ fn test_generated_memory_read_returns_aligned_word() {
     );
 
     assert_eq!(output, [felt(0x11), felt(0x22), felt(0x33), felt(0x44)]);
+}
+
+#[test]
+fn test_generated_addressed_read_selects_registers() {
+    let mut tables = access_vm::Tables::default();
+    let mut state = AccessMachine::new();
+    state.cpu.set_reg(5, 0x4433_2211);
+    let mut tracer = runner::Tracer {
+        clock: 1,
+        ..Default::default()
+    };
+
+    let output = access_vm::call_read_addressed_word(
+        &mut tables,
+        &mut state,
+        &mut tracer,
+        [felt(1), felt(0), felt(5)],
+    );
+
+    assert_eq!(output, [felt(0x11), felt(0x22), felt(0x33), felt(0x44)]);
+}
+
+#[test]
+fn test_generated_addressed_read_selects_memory() {
+    let mut tables = access_vm::Tables::default();
+    let mut state = AccessMachine::new();
+    state.memory.write_u32(0x1000, 0x4433_2211);
+    let mut tracer = runner::Tracer {
+        clock: 1,
+        ..Default::default()
+    };
+
+    let output = access_vm::call_read_addressed_word(
+        &mut tables,
+        &mut state,
+        &mut tracer,
+        [felt(1), felt(1), felt(0x1000)],
+    );
+
+    assert_eq!(output, [felt(0x11), felt(0x22), felt(0x33), felt(0x44)]);
+}
+
+#[test]
+fn test_generated_addressed_write_selects_registers() {
+    let mut tables = access_vm::Tables::default();
+    let mut state = AccessMachine::new();
+    let mut tracer = runner::Tracer {
+        clock: 1,
+        ..Default::default()
+    };
+
+    access_vm::call_write_addressed_word(
+        &mut tables,
+        &mut state,
+        &mut tracer,
+        [
+            felt(1),
+            felt(0),
+            felt(5),
+            felt(0x78),
+            felt(0x56),
+            felt(0x34),
+            felt(0x12),
+        ],
+    );
+
+    assert_eq!(state.cpu.reg(5), 0x1234_5678);
+}
+
+#[test]
+fn test_generated_addressed_write_selects_memory() {
+    let mut tables = access_vm::Tables::default();
+    let mut state = AccessMachine::new();
+    let mut tracer = runner::Tracer {
+        clock: 1,
+        ..Default::default()
+    };
+
+    access_vm::call_write_addressed_word(
+        &mut tables,
+        &mut state,
+        &mut tracer,
+        [
+            felt(1),
+            felt(1),
+            felt(0x1000),
+            felt(0x78),
+            felt(0x56),
+            felt(0x34),
+            felt(0x12),
+        ],
+    );
+
+    assert_eq!(state.memory.read_u32(0x1000), 0x1234_5678);
+}
+
+#[test]
+fn test_generated_addressed_write_preserves_x0() {
+    let mut tables = access_vm::Tables::default();
+    let mut state = AccessMachine::new();
+    let mut tracer = runner::Tracer {
+        clock: 1,
+        ..Default::default()
+    };
+
+    access_vm::call_write_addressed_word(
+        &mut tables,
+        &mut state,
+        &mut tracer,
+        [
+            felt(1),
+            felt(0),
+            felt(0),
+            felt(0x78),
+            felt(0x56),
+            felt(0x34),
+            felt(0x12),
+        ],
+    );
+
+    assert_eq!(state.cpu.reg(0), 0);
+}
+
+#[test]
+fn test_generated_addressed_access_rejects_unknown_address_space() {
+    let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut tables = access_vm::Tables::default();
+        let mut state = AccessMachine::new();
+        let mut tracer = runner::Tracer {
+            clock: 1,
+            ..Default::default()
+        };
+        access_vm::call_read_addressed_word(
+            &mut tables,
+            &mut state,
+            &mut tracer,
+            [felt(1), felt(2), felt(5)],
+        );
+    }));
+
+    assert!(rejected.is_err());
+}
+
+#[test]
+fn test_generated_addressed_access_proves_and_verifies() {
+    let mut tables = access_vm::Tables::default();
+    let mut state = AccessMachine::new();
+    state.memory.write_u32(0x1000, 0x4433_2211);
+    let mut tracer = runner::Tracer {
+        clock: 10,
+        ..Default::default()
+    };
+    let output = access_vm::call_read_addressed_word(
+        &mut tables,
+        &mut state,
+        &mut tracer,
+        [felt(10), felt(1), felt(0x1000)],
+    );
+    let before = [felt(0x11), felt(0x22), felt(0x33), felt(0x44)];
+    let boundary_inputs = [
+        felt(1),
+        felt(0x1000),
+        felt(0),
+        before[0],
+        before[1],
+        before[2],
+        before[3],
+        felt(10),
+        output[0],
+        output[1],
+        output[2],
+        output[3],
+        felt(10),
+    ];
+    let boundary =
+        access_vm::call_close_word_access(&mut tables, &mut state, &mut tracer, boundary_inputs);
+    let activations = vec![
+        access_vm::Activation::ReadAddressedWord {
+            inputs: [felt(10), felt(1), felt(0x1000)],
+            outputs: output,
+        },
+        access_vm::Activation::CloseWordAccess {
+            inputs: boundary_inputs,
+            outputs: boundary,
+        },
+    ];
+
+    let proof = access_vm::prove_air_fns(tables, activations, PcsConfig::default());
+    assert!(access_vm::verify_air_fns(proof, PcsConfig::default()).is_ok());
+}
+
+#[test]
+fn test_generated_addressed_access_rejects_non_boolean_air_row() {
+    let mut tables = access_vm::Tables::default();
+    let mut state = AccessMachine::new();
+    state.memory.write_u32(0x1000, 0x4433_2211);
+    let mut tracer = runner::Tracer {
+        clock: 10,
+        ..Default::default()
+    };
+    let output = access_vm::call_read_addressed_word(
+        &mut tables,
+        &mut state,
+        &mut tracer,
+        [felt(10), felt(1), felt(0x1000)],
+    );
+    tables.read_addressed_word.addr_space[0] = 2;
+    let before = [felt(0x11), felt(0x22), felt(0x33), felt(0x44)];
+    let boundary_inputs = [
+        felt(2),
+        felt(0x1000),
+        felt(0),
+        before[0],
+        before[1],
+        before[2],
+        before[3],
+        felt(10),
+        output[0],
+        output[1],
+        output[2],
+        output[3],
+        felt(10),
+    ];
+    let boundary =
+        access_vm::call_close_word_access(&mut tables, &mut state, &mut tracer, boundary_inputs);
+    let activations = vec![
+        access_vm::Activation::ReadAddressedWord {
+            inputs: [felt(10), felt(2), felt(0x1000)],
+            outputs: output,
+        },
+        access_vm::Activation::CloseWordAccess {
+            inputs: boundary_inputs,
+            outputs: boundary,
+        },
+    ];
+
+    let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        access_vm::prove_air_fns(tables, activations, PcsConfig::default())
+    }));
+    assert!(rejected.is_err());
+}
+
+#[test]
+fn test_generated_addressed_memory_write_at_zero_proves_and_verifies() {
+    let mut tables = access_vm::Tables::default();
+    let mut state = AccessMachine::new();
+    let mut tracer = runner::Tracer {
+        clock: 10,
+        ..Default::default()
+    };
+    let requested = [felt(1), felt(0), felt(0), felt(0)];
+    let output = access_vm::call_write_addressed_word(
+        &mut tables,
+        &mut state,
+        &mut tracer,
+        [
+            felt(10),
+            felt(1),
+            felt(0),
+            requested[0],
+            requested[1],
+            requested[2],
+            requested[3],
+        ],
+    );
+    let before = [felt(0), felt(0), felt(0), felt(0)];
+    let boundary_inputs = [
+        felt(1),
+        felt(0),
+        felt(0),
+        before[0],
+        before[1],
+        before[2],
+        before[3],
+        felt(10),
+        output[0],
+        output[1],
+        output[2],
+        output[3],
+        felt(10),
+    ];
+    let boundary =
+        access_vm::call_close_word_access(&mut tables, &mut state, &mut tracer, boundary_inputs);
+    let activations = vec![
+        access_vm::Activation::WriteAddressedWord {
+            inputs: [
+                felt(10),
+                felt(1),
+                felt(0),
+                requested[0],
+                requested[1],
+                requested[2],
+                requested[3],
+            ],
+            outputs: output,
+        },
+        access_vm::Activation::CloseWordAccess {
+            inputs: boundary_inputs,
+            outputs: boundary,
+        },
+    ];
+
+    let proof = access_vm::prove_air_fns(tables, activations, PcsConfig::default());
+    assert!(access_vm::verify_air_fns(proof, PcsConfig::default()).is_ok());
+}
+
+#[test]
+fn test_generated_addressed_register_write_rejects_nonzero_x0_air_row() {
+    let mut tables = access_vm::Tables::default();
+    let mut state = AccessMachine::new();
+    let mut tracer = runner::Tracer {
+        clock: 10,
+        ..Default::default()
+    };
+    let requested = [felt(1), felt(0), felt(0), felt(0)];
+    access_vm::call_write_addressed_word(
+        &mut tables,
+        &mut state,
+        &mut tracer,
+        [
+            felt(10),
+            felt(0),
+            felt(0),
+            requested[0],
+            requested[1],
+            requested[2],
+            requested[3],
+        ],
+    );
+    tables.write_addressed_word.dst_next_0[0] = 1;
+    let zero = [felt(0), felt(0), felt(0), felt(0)];
+    let boundary_inputs = [
+        felt(0),
+        felt(0),
+        felt(0),
+        zero[0],
+        zero[1],
+        zero[2],
+        zero[3],
+        felt(10),
+        requested[0],
+        requested[1],
+        requested[2],
+        requested[3],
+        felt(10),
+    ];
+    let boundary =
+        access_vm::call_close_word_access(&mut tables, &mut state, &mut tracer, boundary_inputs);
+    let activations = vec![
+        access_vm::Activation::WriteAddressedWord {
+            inputs: [
+                felt(10),
+                felt(0),
+                felt(0),
+                requested[0],
+                requested[1],
+                requested[2],
+                requested[3],
+            ],
+            outputs: requested,
+        },
+        access_vm::Activation::CloseWordAccess {
+            inputs: boundary_inputs,
+            outputs: boundary,
+        },
+    ];
+
+    let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        access_vm::prove_air_fns(tables, activations, PcsConfig::default())
+    }));
+    assert!(rejected.is_err());
 }
 
 #[test]

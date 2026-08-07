@@ -221,7 +221,7 @@ const VM_INVENTORY: [ComponentOwner; 27] = [
     },
     ComponentOwner {
         name: "load_store",
-        source: "crates/air/src/schema.rs",
+        source: "crates/air/src/opcodes/load_store.rs",
     },
     ComponentOwner {
         name: "lt_imm",
@@ -293,7 +293,7 @@ const VM_INVENTORY: [ComponentOwner; 27] = [
     },
 ];
 
-const OWNER_POLICIES: [OwnerPolicy; 46] = [
+const OWNER_POLICIES: [OwnerPolicy; 47] = [
     OwnerPolicy {
         source: "crates/air/src/opcodes/auipc.rs",
         accepted_macro_count: 1,
@@ -320,6 +320,10 @@ const OWNER_POLICIES: [OwnerPolicy; 46] = [
     },
     OwnerPolicy {
         source: "crates/air/src/opcodes/jalr.rs",
+        accepted_macro_count: 1,
+    },
+    OwnerPolicy {
+        source: "crates/air/src/opcodes/load_store.rs",
         accepted_macro_count: 1,
     },
     OwnerPolicy {
@@ -557,6 +561,10 @@ fn vm_component_router_uses_only_the_expected_dsl_routes() {
                 (
                     "jalr".to_owned(),
                     "air::opcodes::jalr::component".to_owned(),
+                ),
+                (
+                    "load_store".to_owned(),
+                    "air::opcodes::load_store::component".to_owned(),
                 ),
                 (
                     "lt_imm".to_owned(),

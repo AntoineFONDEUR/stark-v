@@ -176,9 +176,13 @@ Opcode compiler capabilities, in dependency order:
    `range_check_20` clock-diff entry, and x0-safe write constraints. `read_reg`
    additionally proves that a read cannot mutate the value. `read_mem` and
    `write_mem` provide the same behavior for aligned words in address space 1.
-   Byte and half-word opcodes select and replace lanes in felt code before the
-   aligned-word write. State transitions and opcode-specific range checks stay
-   explicit relation statements.
+   `read_word name(clock, address_space, address)` and
+   `write_word name(clock, address_space, address, limbs)` select register
+   address space 0 or aligned-memory address space 1 in the felt function; the
+   compiler constrains the selector to be boolean and preserves x0 semantics for
+   dynamic register writes. Byte and half-word opcodes select and replace lanes
+   in felt code before the aligned-word write. State transitions and
+   opcode-specific range checks stay explicit relation statements.
 
 2. **Witness-side access resolution.** ✅ _Implemented._ A `vm_access` block
    supplies the architectural-state trait and tracer paths. Generated calls read

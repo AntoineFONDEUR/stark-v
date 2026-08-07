@@ -14,7 +14,7 @@ stwo_macros::components! {
         div,
         jal: air::opcodes::jal::component,
         jalr: air::opcodes::jalr::component,
-        load_store,
+        load_store: air::opcodes::load_store::component,
         lt_imm: air::opcodes::lt_imm::component,
         lt_reg: air::opcodes::lt_reg::component,
         lui: air::opcodes::lui::component,
@@ -140,6 +140,24 @@ mod tests {
     crate::test_bin_e2e!(shifts_reg, sra);
 
     #[test]
+    fn load_store_constraint_degrees_fit_the_declared_bound() {
+        let eval = super::load_store::air::Eval {
+            log_size: 6,
+            relations: crate::relations::Relations::dummy(),
+        };
+        let evaluated = eval.evaluate(ExprEvaluator::new());
+        let degrees = evaluated.constraint_degree_bounds();
+        let breaches = degrees
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, degree)| *degree > 3)
+            .collect::<Vec<_>>();
+
+        assert!(breaches.is_empty(), "{breaches:?}");
+    }
+
+    #[test]
     fn test_mul_constraint_degree_bounds() {
         let eval = super::mul::air::Eval {
             log_size: 6,
@@ -244,6 +262,36 @@ mod tests {
 
     crate::test_lookup_e2e!(base_alu_reg, range_check_20, add);
     crate::test_lookup_e2e!(load_store, range_check_20, lw);
+
+    #[test]
+    fn mutated_generated_load_result_fails_component_constraints() {
+        let mut tracer = crate::e2e::run_test_bin("lb");
+        tracer.load_store.destination_next_0[0] ^= 1;
+        let traces = super::gen_trace(tracer);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::Components::assert_constraints_on_polys(
+                &traces,
+                &crate::relations::Relations::dummy(),
+            );
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mutated_generated_store_preserved_limb_fails_component_constraints() {
+        let mut tracer = crate::e2e::run_test_bin("sb");
+        tracer.load_store.destination_next_3[0] ^= 1;
+        let traces = super::gen_trace(tracer);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::Components::assert_constraints_on_polys(
+                &traces,
+                &crate::relations::Relations::dummy(),
+            );
+        }));
+
+        assert!(result.is_err());
+    }
 
     #[test]
     fn mutated_generated_add_result_fails_component_constraints() {

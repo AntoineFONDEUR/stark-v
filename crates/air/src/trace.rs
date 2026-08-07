@@ -65,11 +65,8 @@ mod tests {
 
         #[test]
         fn test_load_store_columns_size() {
-            // load_store: clock (1), pc (1), dst (10), rs1 (10), src (10),
-            // + r2_idx, imm_felt, src_msb, shift_amount (4)
-            // + src_addr_selector, dst_addr_selector (2)
-            // + marker_0..3 (4) + 8 opcode flags = 50 total (no enabler - has flags)
-            assert_eq!(LoadStoreColumns::<()>::SIZE, 50);
+            // Inputs, dynamic accesses, lane selectors, and materialized products.
+            assert_eq!(LoadStoreColumns::<()>::SIZE, 75);
         }
 
         #[test]

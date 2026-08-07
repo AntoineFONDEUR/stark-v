@@ -25,10 +25,12 @@
 //! values, recursively activates callees, and pushes the rows.
 //!
 //! With `vm_access: { state: Trait, tracer: Type },`, `read_reg`,
-//! `write_reg`, `read_mem`, and `write_mem` statements resolve architectural
-//! state on the witness path while generating the standard memory-access and
-//! clock-range relations in the same lowered frame. Memory operations address
-//! aligned 32-bit words; byte and half-word lane semantics stay in felt code.
+//! `write_reg`, `read_mem`, `write_mem`, `read_word`, and `write_word`
+//! statements resolve architectural state on the witness path while generating
+//! the standard memory-access and clock-range relations in the same lowered
+//! frame. The word forms take an explicit address space. Memory operations
+//! address aligned 32-bit words; byte and half-word lane semantics stay in felt
+//! code.
 //! `split_m31(value)` commits the canonical four-byte representation of a felt
 //! and binds it through the standard range relations. `bitand`, `bitor`, and
 //! `bitxor` commit one byte result and bind it through the bitwise relation.
@@ -120,6 +122,7 @@ struct AccessStmt {
     kind: AccessKind,
     name: Ident,
     clock: Expr,
+    addr_space: Option<Expr>,
     addr: Expr,
     next: Option<Expr>,
 }
@@ -130,15 +133,21 @@ enum AccessKind {
     WriteReg,
     ReadMem,
     WriteMem,
+    ReadWord,
+    WriteWord,
 }
 
 impl AccessKind {
     fn is_write(self) -> bool {
-        matches!(self, Self::WriteReg | Self::WriteMem)
+        matches!(self, Self::WriteReg | Self::WriteMem | Self::WriteWord)
     }
 
     fn is_register(self) -> bool {
         matches!(self, Self::ReadReg | Self::WriteReg)
+    }
+
+    fn is_dynamic(self) -> bool {
+        matches!(self, Self::ReadWord | Self::WriteWord)
     }
 }
 
@@ -624,7 +633,12 @@ fn parse_block(
             && input.cursor().ident().is_some_and(|(ident, _)| {
                 matches!(
                     ident.to_string().as_str(),
-                    "read_reg" | "write_reg" | "read_mem" | "write_mem"
+                    "read_reg"
+                        | "write_reg"
+                        | "read_mem"
+                        | "write_mem"
+                        | "read_word"
+                        | "write_word"
                 )
             })
         {
@@ -634,6 +648,8 @@ fn parse_block(
                 "write_reg" => AccessKind::WriteReg,
                 "read_mem" => AccessKind::ReadMem,
                 "write_mem" => AccessKind::WriteMem,
+                "read_word" => AccessKind::ReadWord,
+                "write_word" => AccessKind::WriteWord,
                 _ => unreachable!("matched access keyword"),
             };
             let name: Ident = input.parse()?;
@@ -644,19 +660,26 @@ fn parse_block(
                 .into_iter()
                 .collect();
             input.parse::<Token![;]>()?;
-            let expected = if kind.is_write() { 3 } else { 2 };
+            let expected = usize::from(kind.is_dynamic()) + if kind.is_write() { 3 } else { 2 };
             if args.len() != expected {
+                let signature = if kind.is_dynamic() {
+                    "clock, address space, address[, next limbs]"
+                } else {
+                    "clock, address[, next limbs]"
+                };
                 return Err(syn::Error::new_spanned(
                     keyword,
-                    format!("access takes {expected} arguments: clock, address[, next limbs]"),
+                    format!("access takes {expected} arguments: {signature}"),
                 ));
             }
+            let address_index = usize::from(kind.is_dynamic()) + 1;
             body.push(FnStmt::Access(Box::new(AccessStmt {
                 kind,
                 name,
                 clock: args[0].clone(),
-                addr: args[1].clone(),
-                next: args.get(2).cloned(),
+                addr_space: kind.is_dynamic().then(|| args[1].clone()),
+                addr: args[address_index].clone(),
+                next: args.get(address_index + 1).cloned(),
             })));
         } else if allow_return && input.peek(Token![return]) {
             input.parse::<Token![return]>()?;
@@ -761,6 +784,10 @@ fn substitute_stmt(stmt: &FnStmt, var: &Ident, value: usize) -> FnStmt {
             kind: access.kind,
             name: access.name.clone(),
             clock: substitute(&access.clock, var, value),
+            addr_space: access
+                .addr_space
+                .as_ref()
+                .map(|expr| substitute(expr, var, value)),
             addr: substitute(&access.addr, var, value),
             next: access
                 .next
@@ -859,12 +886,14 @@ enum FillStep {
     /// Bind the prior word before a write computes its requested next limbs.
     AccessPrepare {
         kind: AccessKind,
+        addr_space: Option<Ident>,
         addr: Ident,
         prev: [Ident; 4],
     },
     /// Apply or observe one architectural access and bind its remaining cells.
     AccessCommit {
         kind: AccessKind,
+        addr_space: Option<Ident>,
         clock: Ident,
         addr: Ident,
         prev: [Ident; 4],
@@ -1814,6 +1843,7 @@ impl Lowerer<'_> {
             kind,
             name,
             clock,
+            addr_space,
             addr,
             next: requested_next,
         } = access;
@@ -1843,6 +1873,28 @@ impl Lowerer<'_> {
                 cell: clock_cell.clone(),
                 degree: clock_degree,
             });
+        let addr_space_cell = match addr_space {
+            Some(addr_space) => {
+                let (expr, degree) = self.lower(addr_space, scope, budget)?;
+                let cell = match &expr {
+                    Expr::Path(path) => path.path.require_ident()?.clone(),
+                    _ => self.register_derived(&format_ident!("{}_addr_space", name), expr, degree),
+                };
+                scope
+                    .entry(cell.to_string())
+                    .or_insert_with(|| Value::Scalar {
+                        cell: cell.clone(),
+                        degree,
+                    });
+                self.add_assert(
+                    syn::parse_quote!(#cell * (1 - #cell)),
+                    syn::parse_quote!(0),
+                    scope,
+                )?;
+                Some(cell)
+            }
+            None => None,
+        };
         let (addr_expr, addr_degree) = self.lower(addr, scope, budget)?;
         let addr_cell = match &addr_expr {
             Expr::Path(path) => path.path.require_ident()?.clone(),
@@ -1871,6 +1923,7 @@ impl Lowerer<'_> {
         if kind.is_write() {
             self.fill.push(FillStep::AccessPrepare {
                 kind,
+                addr_space: addr_space_cell.clone(),
                 addr: addr_cell.clone(),
                 prev: prev.clone(),
             });
@@ -1920,7 +1973,7 @@ impl Lowerer<'_> {
             }
         };
 
-        let addr_inverse = if kind == AccessKind::WriteReg {
+        let addr_inverse = if kind == AccessKind::WriteReg || kind == AccessKind::WriteWord {
             let base = format_ident!("{}_addr_inverse", name);
             let cell = self.register_column(&base);
             self.extra_columns.push(cell.clone());
@@ -1952,6 +2005,7 @@ impl Lowerer<'_> {
 
         self.fill.push(FillStep::AccessCommit {
             kind,
+            addr_space: addr_space_cell.clone(),
             clock: clock_cell.clone(),
             addr: addr_cell.clone(),
             prev: prev.clone(),
@@ -1964,7 +2018,11 @@ impl Lowerer<'_> {
         let prev_name = format_ident!("{}_prev", name);
         let next_name = format_ident!("{}_next", name);
         let clock_prev_name = format_ident!("{}_clock_prev", name);
-        let addr_space = if kind.is_register() { 0u32 } else { 1u32 };
+        let addr_space: Expr = match &addr_space_cell {
+            Some(cell) => syn::parse_quote!(#cell),
+            None if kind.is_register() => syn::parse_quote!(0),
+            None => syn::parse_quote!(1),
+        };
         self.add_relation_entry(
             format_ident!("memory_access"),
             &[
@@ -2003,7 +2061,53 @@ impl Lowerer<'_> {
 
         if kind.is_write() {
             let desired = desired.as_ref().expect("write has desired limbs");
-            if kind.is_register() {
+            if kind == AccessKind::WriteWord {
+                let addr_space = addr_space_cell
+                    .as_ref()
+                    .expect("dynamic access address space");
+                let inverse = addr_inverse.as_ref().expect("dynamic write inverse");
+                let is_nonzero_expr: Expr = syn::parse_quote!(#addr_cell * #inverse);
+                let (is_nonzero_expr, _) = self.lower(&is_nonzero_expr, scope, budget)?;
+                let is_nonzero_expr = self.materialize(is_nonzero_expr);
+                let Expr::Path(is_nonzero_path) = is_nonzero_expr else {
+                    unreachable!("materialized expressions are cells")
+                };
+                let is_nonzero = is_nonzero_path.path.require_ident()?.clone();
+                scope.insert(
+                    is_nonzero.to_string(),
+                    Value::Scalar {
+                        cell: is_nonzero.clone(),
+                        degree: 1,
+                    },
+                );
+                self.add_assert(
+                    syn::parse_quote!(#addr_cell),
+                    syn::parse_quote!(#addr_cell * #is_nonzero),
+                    scope,
+                )?;
+                let write_enabled_expr: Expr =
+                    syn::parse_quote!(#addr_space + (1 - #addr_space) * #is_nonzero);
+                let (write_enabled_expr, _) = self.lower(&write_enabled_expr, scope, budget)?;
+                let write_enabled_expr = self.materialize(write_enabled_expr);
+                let Expr::Path(write_enabled_path) = write_enabled_expr else {
+                    unreachable!("materialized expressions are cells")
+                };
+                let write_enabled = write_enabled_path.path.require_ident()?.clone();
+                scope.insert(
+                    write_enabled.to_string(),
+                    Value::Scalar {
+                        cell: write_enabled.clone(),
+                        degree: 1,
+                    },
+                );
+                for (next, desired) in next.iter().zip(desired) {
+                    self.add_assert(
+                        syn::parse_quote!(#next),
+                        syn::parse_quote!(#write_enabled * #desired),
+                        scope,
+                    )?;
+                }
+            } else if kind.is_register() {
                 let inverse = addr_inverse.as_ref().expect("register write inverse");
                 let is_nonzero_expr: Expr = syn::parse_quote!(#addr_cell * #inverse);
                 let (is_nonzero_expr, degree) = self.lower(&is_nonzero_expr, scope, budget)?;
@@ -2255,6 +2359,7 @@ fn clone_body(body: &[FnStmt]) -> Vec<FnStmt> {
                 kind: access.kind,
                 name: access.name.clone(),
                 clock: access.clock.clone(),
+                addr_space: access.addr_space.clone(),
                 addr: access.addr.clone(),
                 next: access.next.clone(),
             })),
@@ -4030,17 +4135,33 @@ fn generate_embedded_poseidon2_component(
 fn generate_access_fill_step(step: &FillStep, state_path: &Path) -> syn::Result<TokenStream2> {
     let base_field = quote!(stwo::core::fields::m31::BaseField);
     match step {
-        FillStep::AccessPrepare { kind, addr, prev } => {
+        FillStep::AccessPrepare {
+            kind,
+            addr_space,
+            addr,
+            prev,
+        } => {
             let raw = format_ident!("__{}_prior_word", prev[0]);
-            let read = if kind.is_register() {
+            let register_read = quote! {
+                #state_path::read_register(
+                    state,
+                    u8::try_from(#addr.0).expect("register index must fit in u8"),
+                )
+            };
+            let memory_read = quote! { #state_path::read_memory_word(state, #addr.0) };
+            let read = if kind.is_dynamic() {
+                let addr_space = addr_space.as_ref().expect("dynamic access address space");
                 quote! {
-                    #state_path::read_register(
-                        state,
-                        u8::try_from(#addr.0).expect("register index must fit in u8"),
-                    )
+                    match #addr_space.0 {
+                        0 => #register_read,
+                        1 => #memory_read,
+                        _ => panic!("word access address space must be zero or one"),
+                    }
                 }
+            } else if kind.is_register() {
+                register_read
             } else {
-                quote! { #state_path::read_memory_word(state, #addr.0) }
+                memory_read
             };
             Ok(quote! {
                 let #raw = #read;
@@ -4051,6 +4172,7 @@ fn generate_access_fill_step(step: &FillStep, state_path: &Path) -> syn::Result<
         }
         FillStep::AccessCommit {
             kind,
+            addr_space,
             clock,
             addr,
             prev,
@@ -4061,42 +4183,76 @@ fn generate_access_fill_step(step: &FillStep, state_path: &Path) -> syn::Result<
         } => {
             let record = format_ident!("__{}_record", clock_prev);
             let raw = format_ident!("__{}_prior_word", prev[0]);
-            let read = if kind.is_register() {
-                quote! {
+            let register_read = quote! {
                     #state_path::read_register(
                         state,
                         u8::try_from(#addr.0).expect("register index must fit in u8"),
                     )
-                }
-            } else {
-                quote! { #state_path::read_memory_word(state, #addr.0) }
             };
-            let trace = if kind.is_register() {
+            let memory_read = quote! { #state_path::read_memory_word(state, #addr.0) };
+            let read = if kind.is_dynamic() {
+                let addr_space = addr_space.as_ref().expect("dynamic access address space");
                 quote! {
-                    tracer.trace_reg_access(
-                        u8::try_from(#addr.0).expect("register index must fit in u8"),
-                        #raw,
-                        __next_word,
-                    )
+                    match #addr_space.0 {
+                        0 => #register_read,
+                        1 => #memory_read,
+                        _ => panic!("word access address space must be zero or one"),
+                    }
                 }
+            } else if kind.is_register() {
+                register_read
             } else {
-                quote! { tracer.trace_mem_access(#addr.0, #raw, __next_word) }
+                memory_read
+            };
+            let register_trace = quote! {
+                tracer.trace_reg_access(
+                    u8::try_from(#addr.0).expect("register index must fit in u8"),
+                    #raw,
+                    __next_word,
+                )
+            };
+            let memory_trace = quote! { tracer.trace_mem_access(#addr.0, #raw, __next_word) };
+            let trace = if kind.is_dynamic() {
+                let addr_space = addr_space.as_ref().expect("dynamic access address space");
+                quote! {
+                    match #addr_space.0 {
+                        0 => #register_trace,
+                        1 => #memory_trace,
+                        _ => panic!("word access address space must be zero or one"),
+                    }
+                }
+            } else if kind.is_register() {
+                register_trace
+            } else {
+                memory_trace
             };
             let prepare = if kind.is_write() {
                 let desired = desired.as_ref().expect("write access has desired limbs");
                 let desired_bytes = desired.iter().map(|limb| {
                     quote! { u8::try_from(#limb.0).expect("access limb must fit in u8") }
                 });
-                let write = if kind.is_register() {
+                let register_write = quote! {
+                    #state_path::write_register(
+                        state,
+                        u8::try_from(#addr.0).expect("register index must fit in u8"),
+                        __requested_word,
+                    );
+                };
+                let memory_write =
+                    quote! { #state_path::write_memory_word(state, #addr.0, __requested_word); };
+                let write = if kind.is_dynamic() {
+                    let addr_space = addr_space.as_ref().expect("dynamic access address space");
                     quote! {
-                        #state_path::write_register(
-                            state,
-                            u8::try_from(#addr.0).expect("register index must fit in u8"),
-                            __requested_word,
-                        );
+                        match #addr_space.0 {
+                            0 => { #register_write }
+                            1 => { #memory_write }
+                            _ => panic!("word access address space must be zero or one"),
+                        }
                     }
+                } else if kind.is_register() {
+                    register_write
                 } else {
-                    quote! { #state_path::write_memory_word(state, #addr.0, __requested_word); }
+                    memory_write
                 };
                 quote! {
                     let __requested_word = u32::from_le_bytes([

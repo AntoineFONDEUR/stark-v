@@ -431,11 +431,12 @@ set.
   - Fast boundary, component, and malformed-relation tests precede one
     sequential single-chunk VM proof per migrated family. One segment-leaf root
     passed on the complete migrated roster. `FELT-003` owns the final protocol
-    freeze because its selector and lowering work changes VM geometry.
-- `[active] FELT-003` Bind opcode selectors and recover shared-output encoding
-  efficiency in the felt compiler.
-  - Every multi-operation component must constrain a boolean, exactly-one
-    selector before an opcode-weighted value can affect a relation or state.
+    freeze because its lowering work changes VM geometry.
+- `[active] FELT-003` Recover shared-output encoding efficiency in the felt
+  compiler.
+  - Preserve the compiler's existing opcode activity invariant: the synthesized
+    enabler is the boolean sum of individually boolean opcode flags, so an
+    active row is exactly one operation and an all-zero row is padding.
   - Reuse the DSL's existing multiplicity-gated, ID-parameterized relation form;
     add only the missing generic shared-output facility inside `define_air_fns!`
     if measurement proves it necessary.
@@ -863,68 +864,64 @@ Required work, in order:
 11. `[done]` Re-derive the VM AIR program and recursion manifest from the
     complete migrated roster and prove the segment-leaf root under its protocol
     identity. The final three-shape conformance run moved to `FELT-003`, whose
-    selector and lowering changes mint the release protocol identity.
+    lowering changes mint the release protocol identity.
 
 Done when opcode execution, witness filling, and AIR constraints have one
 felt-function source and no duplicated per-opcode semantics remain.
 
-### `[active] FELT-003` Selector soundness and shared-output lowering
+### `[active] FELT-003` Shared-output lowering efficiency
 
 Dependencies: `FELT-002`.
 
-The migration checkpoint is deliberately not the release profile. Multiple
-opcode families derive a program selector from committed flags without yet
-requiring those flags to be boolean and exactly one. In particular,
-`Opcode::Add` has identifier zero, so an all-zero base-ALU selector can still
-match an ADD program row. The base-ALU definitions also commit and constrain
+The migration checkpoint is deliberately not the release profile. Opcode table
+activity is already sound: tables with `opcode_*_flag` fields synthesize their
+enabler as the flag sum, constrain that sum boolean, and constrain every flag
+boolean. An active row therefore selects exactly one operation, while an
+all-zero row is intentional padding and contributes no relations. The remaining
+issue is measured efficiency. The base-ALU definitions commit and constrain
 every inactive arithmetic and bitwise candidate before selecting one output.
 That representation increased the base-ALU checkpoint from 1,416 to 1,512 VM
 tables, 1,524 to 1,620 sampled values, and 544 to 597 AIR instructions.
 
 Required work, in order:
 
-1. `[pending]` Add generated-row regressions that demonstrate rejection of an
-   all-zero selector, two active flags, non-boolean flags, and a forged output
-   satisfying only an inactive operation. Cover every multi-operation opcode
-   family with focused cases rather than assuming the base ALU is unique.
-2. `[pending]` Express boolean exactly-one selection through the existing
-   `define_air_fns!` language. Extend that compiler with one generic array-aware
-   assertion only if explicit felt assertions cannot express the invariant
-   without duplicating lowering logic. Do not infer semantics from parameter
-   names and do not add a standalone or wrapper macro.
-3. `[pending]` Measure committed columns, constraints, and relation entries per
-   opcode family at the migration checkpoint. Separate selector-soundness cost
-   from candidate-materialization cost so an apparent optimization cannot hide a
+1. `[pending]` Pin the existing activity convention with focused tests: two
+   active flags and non-boolean flags fail locally, an all-zero row is valid
+   padding, and replacing a required execution row with padding leaves a global
+   relation deficit. These tests protect the optimizer from weakening activity.
+2. `[pending]` Measure committed columns, constraints, and relation entries per
+   opcode family at the migration checkpoint. Separate activity constraints from
+   candidate-materialization cost so an apparent optimization cannot hide a
    weakened AIR.
-4. `[pending]` Reuse the existing `consume(multiplicity) relation(args...)` form
+3. `[pending]` Reuse the existing `consume(multiplicity) relation(args...)` form
    for the shared bitwise relation with its operation ID. Do not add a second
    ID-parameterized lookup API.
-5. `[pending]` Add a generic shared-output binding/fusion facility inside
+4. `[pending]` Add a generic shared-output binding/fusion facility inside
    `define_air_fns!` only where the profile proves that the current DSL cannot
    express the efficient encoding. The result column must be range-bound before
    it is shared, active constraints must select exactly one operation, and
    inactive relations must contribute zero. Explicit direct-DSL opcode edits are
    allowed; compiler magic tied to an opcode or identifier spelling is not.
-6. `[pending]` Apply the facility to every family for which it is sound and
+5. `[pending]` Apply the facility to every family for which it is sound and
    beneficial. Record before/after VM table, sampled-value, and AIR-instruction
    counts per family; revert any lowering whose measured geometry does not
    improve unless it is required for soundness.
-7. `[pending]` Run the unchanged opcode boundary/component suites plus focused
-   malformed-selector, malformed-output, and relation-deficit tests, followed by
-   exactly one release-mode single-chunk proof for each changed family.
-8. `[pending]` Measure the same base-ALU guest before and after with wall time
+6. `[pending]` Run the unchanged opcode boundary/component suites plus focused
+   activity, malformed-output, and relation-deficit tests, followed by exactly
+   one release-mode single-chunk proof for each changed family.
+7. `[pending]` Measure the same base-ALU guest before and after with wall time
    and peak RSS. Treat constraint count as a proxy, not a performance result.
-9. `[pending]` Re-derive the fixed VM profile and protocol identity, then run
+8. `[pending]` Re-derive the fixed VM profile and protocol identity, then run
    the one-segment leaf, two-segment binary, and three-segment padded root
    proofs sequentially under that final identity. Do not rerun larger equivalent
    tree shapes.
-10. `[pending]` Update current-state compiler, AIR, recursion, and roadmap
-    documentation; run release clippy and repository hooks; commit and push.
+9. `[pending]` Update current-state compiler, AIR, recursion, and roadmap
+   documentation; run release clippy and repository hooks; commit and push.
 
-Done when all opcode selectors are proof-bound exactly once, eligible operations
-share their committed output without weakening the AIR, every claimed geometry
-or performance change is measured, and all three final root shapes pass under
-one release protocol identity.
+Done when eligible operations share their committed output without weakening the
+existing activity invariant, every claimed geometry or performance change is
+measured, and all three final root shapes pass under one release protocol
+identity.
 
 ## Final hardening
 

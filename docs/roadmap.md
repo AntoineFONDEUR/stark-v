@@ -1321,6 +1321,8 @@ the recorded command without committing a machine-specific path.
   GB maximum RSS and zero swaps.
 - `cargo clippy --release -p stwo-macros -p air -p runner -p prover -p recursion --all-targets --no-deps -- -D warnings`:
   the affected crates passed with warnings denied.
+- Commit `01c6eb4c` contains the proof-bound COMMIT register boundary and frozen
+  profile update.
 - SYS-001 steps 2 and 3 are complete. Step 4 is active; no journal state or
   public digest exists yet.
 

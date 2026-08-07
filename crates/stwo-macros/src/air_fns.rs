@@ -23,6 +23,12 @@
 //! the system. The witness side is the same program run concretely: the
 //! generated `call_<fn>` executes the lowered cells over `BaseField`
 //! values, recursively activates callees, and pushes the rows.
+//!
+//! With `vm_access: { state: Trait, tracer: Type },`, `read_reg`,
+//! `write_reg`, `read_mem`, and `write_mem` statements resolve architectural
+//! state on the witness path while generating the standard memory-access and
+//! clock-range relations in the same lowered frame. Memory operations address
+//! aligned 32-bit words; byte and half-word lane semantics stay in felt code.
 
 use std::collections::HashMap;
 
@@ -100,6 +106,35 @@ enum FnStmt {
     /// enabler too would breach the degree budget; the flag zeroes the
     /// constraint on padding rows.
     Constrain { expr: Expr },
+    /// A register or aligned-memory access resolved by the witness VM while
+    /// compiling to the standard memory and clock-range relations.
+    Access(Box<AccessStmt>),
+}
+
+struct AccessStmt {
+    kind: AccessKind,
+    name: Ident,
+    clock: Expr,
+    addr: Expr,
+    next: Option<Expr>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AccessKind {
+    ReadReg,
+    WriteReg,
+    ReadMem,
+    WriteMem,
+}
+
+impl AccessKind {
+    fn is_write(self) -> bool {
+        matches!(self, Self::WriteReg | Self::WriteMem)
+    }
+
+    fn is_register(self) -> bool {
+        matches!(self, Self::ReadReg | Self::WriteReg)
+    }
 }
 
 struct AirFn {
@@ -147,6 +182,8 @@ struct AirFnsInput {
     /// Per-proof field constants supplied to both the generated AIR and its
     /// interaction witness. These parameters are not committed columns.
     embedded_params: Vec<Ident>,
+    /// Optional witness VM integration used by generated access statements.
+    vm_access: Option<(Path, Path)>,
     /// Externally declared relations `relation name(arity);`, referenced by
     /// `emit`/`consume` in bodies. Each becomes a `relation!` type and an
     /// `AirFnRelations` field, so two function systems can share one
@@ -326,6 +363,40 @@ impl Parse for AirFnsInput {
             Vec::new()
         };
 
+        let vm_access = if input
+            .cursor()
+            .ident()
+            .is_some_and(|(ident, _)| ident == "vm_access")
+        {
+            input.parse::<Ident>()?;
+            input.parse::<Token![:]>()?;
+            let access_content;
+            braced!(access_content in input);
+            let state_key: Ident = access_content.parse()?;
+            if state_key != "state" {
+                return Err(syn::Error::new(state_key.span(), "expected `state: path`"));
+            }
+            access_content.parse::<Token![:]>()?;
+            let state = access_content.parse::<Path>()?;
+            access_content.parse::<Token![,]>()?;
+            let tracer_key: Ident = access_content.parse()?;
+            if tracer_key != "tracer" {
+                return Err(syn::Error::new(
+                    tracer_key.span(),
+                    "expected `tracer: path`",
+                ));
+            }
+            access_content.parse::<Token![:]>()?;
+            let tracer = access_content.parse::<Path>()?;
+            if access_content.peek(Token![,]) {
+                access_content.parse::<Token![,]>()?;
+            }
+            input.parse::<Token![,]>()?;
+            Some((state, tracer))
+        } else {
+            None
+        };
+
         // Externally declared relations: `relation name(arity);`.
         let mut relations = Vec::new();
         while input
@@ -357,6 +428,7 @@ impl Parse for AirFnsInput {
             embedded_dynamic_component,
             embedded_preprocessed,
             embedded_params,
+            vm_access,
             relations,
             fns,
         })
@@ -543,6 +615,44 @@ fn parse_block(
                 emit,
                 mult,
             });
+        } else if input.peek(Ident)
+            && input.cursor().ident().is_some_and(|(ident, _)| {
+                matches!(
+                    ident.to_string().as_str(),
+                    "read_reg" | "write_reg" | "read_mem" | "write_mem"
+                )
+            })
+        {
+            let keyword: Ident = input.parse()?;
+            let kind = match keyword.to_string().as_str() {
+                "read_reg" => AccessKind::ReadReg,
+                "write_reg" => AccessKind::WriteReg,
+                "read_mem" => AccessKind::ReadMem,
+                "write_mem" => AccessKind::WriteMem,
+                _ => unreachable!("matched access keyword"),
+            };
+            let name: Ident = input.parse()?;
+            let args_content;
+            parenthesized!(args_content in input);
+            let args: Vec<Expr> = args_content
+                .parse_terminated(Expr::parse, Token![,])?
+                .into_iter()
+                .collect();
+            input.parse::<Token![;]>()?;
+            let expected = if kind.is_write() { 3 } else { 2 };
+            if args.len() != expected {
+                return Err(syn::Error::new_spanned(
+                    keyword,
+                    format!("access takes {expected} arguments: clock, address[, next limbs]"),
+                ));
+            }
+            body.push(FnStmt::Access(Box::new(AccessStmt {
+                kind,
+                name,
+                clock: args[0].clone(),
+                addr: args[1].clone(),
+                next: args.get(2).cloned(),
+            })));
         } else if allow_return && input.peek(Token![return]) {
             input.parse::<Token![return]>()?;
             let exprs: Vec<Expr> = if input.peek(syn::token::Paren) {
@@ -565,7 +675,7 @@ fn parse_block(
         } else {
             return Err(syn::Error::new(
                 input.span(),
-                "expected `let`, `assert`, `for`, `emit`, `consume`, or `return`",
+                "expected a felt-function statement or `return`",
             ));
         }
     }
@@ -642,6 +752,16 @@ fn substitute_stmt(stmt: &FnStmt, var: &Ident, value: usize) -> FnStmt {
         FnStmt::Constrain { expr } => FnStmt::Constrain {
             expr: substitute(expr, var, value),
         },
+        FnStmt::Access(access) => FnStmt::Access(Box::new(AccessStmt {
+            kind: access.kind,
+            name: access.name.clone(),
+            clock: substitute(&access.clock, var, value),
+            addr: substitute(&access.addr, var, value),
+            next: access
+                .next
+                .as_ref()
+                .map(|expr| substitute(expr, var, value)),
+        })),
     }
 }
 
@@ -714,6 +834,23 @@ enum FillStep {
         callee: Ident,
         args: Vec<Ident>,
     },
+    /// Bind the prior word before a write computes its requested next limbs.
+    AccessPrepare {
+        kind: AccessKind,
+        addr: Ident,
+        prev: [Ident; 4],
+    },
+    /// Apply or observe one architectural access and bind its remaining cells.
+    AccessCommit {
+        kind: AccessKind,
+        clock: Ident,
+        addr: Ident,
+        prev: [Ident; 4],
+        clock_prev: Ident,
+        next: [Ident; 4],
+        desired: Option<[Ident; 4]>,
+        addr_inverse: Option<Ident>,
+    },
 }
 
 struct Lowerer<'a> {
@@ -744,6 +881,7 @@ struct Lowerer<'a> {
     relation_arities: &'a HashMap<String, usize>,
     inline_fns: &'a HashMap<String, AirFn>,
     fn_name: Ident,
+    vm_access_enabled: bool,
 }
 
 impl Lowerer<'_> {
@@ -1232,6 +1370,386 @@ impl Lowerer<'_> {
         Ok(rets)
     }
 
+    fn add_assert(
+        &mut self,
+        lhs: Expr,
+        rhs: Expr,
+        scope: &HashMap<String, Value>,
+    ) -> syn::Result<()> {
+        let difference: Expr = syn::parse_quote!((#lhs) - (#rhs));
+        let (lowered, _) = self.lower(&difference, scope, self.max_degree - 1)?;
+        self.constraints.push(lowered);
+        Ok(())
+    }
+
+    fn add_relation_entry(
+        &mut self,
+        relation: Ident,
+        args: &[Expr],
+        emit: bool,
+        mult: Option<&Expr>,
+        scope: &HashMap<String, Value>,
+        budget: usize,
+    ) -> syn::Result<()> {
+        let Some(&arity) = self.relation_arities.get(&relation.to_string()) else {
+            return Err(syn::Error::new_spanned(
+                &relation,
+                format!(
+                    "unknown relation `{relation}` (declare it with `relation {relation}(arity);`)"
+                ),
+            ));
+        };
+        let to_cell = |lowerer: &mut Self, expr: &Expr, base: Ident| -> syn::Result<Ident> {
+            let (lowered, degree) = lowerer.lower(expr, scope, budget)?;
+            if let Expr::Path(path) = &lowered
+                && let Some(ident) = path.path.get_ident()
+            {
+                return Ok(ident.clone());
+            }
+            Ok(lowerer.register_derived(&base, lowered, degree))
+        };
+        let mult_cell = match mult {
+            None => None,
+            Some(expr) => {
+                let base = format_ident!("{}_mult{}", relation, self.relation_entries.len());
+                Some(to_cell(self, expr, base)?)
+            }
+        };
+        let mut arg_cells = Vec::new();
+        for arg in args {
+            if let Ok(ident) = expect_ident(arg)
+                && let Some(value @ Value::Array(_)) = scope.get(&ident.to_string())
+            {
+                for (cell, _) in value.flatten() {
+                    arg_cells.push(cell);
+                }
+                continue;
+            }
+            let base = format_ident!("{}_e{}", relation, self.relation_entries.len());
+            arg_cells.push(to_cell(self, arg, base)?);
+        }
+        if arg_cells.len() != arity {
+            return Err(syn::Error::new_spanned(
+                relation,
+                format!("relation has arity {arity}, got {} felts", arg_cells.len()),
+            ));
+        }
+        self.relation_entries
+            .push((relation, arg_cells, emit, mult_cell));
+        Ok(())
+    }
+
+    fn register_access_columns(
+        &mut self,
+        name: &Ident,
+        scope: &mut HashMap<String, Value>,
+    ) -> syn::Result<([Ident; 4], Ident, [Ident; 4])> {
+        for suffix in ["prev", "clock_prev", "next"] {
+            let binding = format!("{name}_{suffix}");
+            if scope.contains_key(&binding) {
+                return Err(syn::Error::new(
+                    name.span(),
+                    format!("access binding `{binding}` is already defined"),
+                ));
+            }
+        }
+        let mut prev = Vec::with_capacity(4);
+        for index in 0usize..4 {
+            let base = format_ident!("{}_prev_{}", name, index);
+            let cell = self.register_column(&base);
+            self.extra_columns.push(cell.clone());
+            prev.push(cell);
+        }
+        let prev: [Ident; 4] = prev.try_into().expect("four prior limbs");
+        let clock_prev_base = format_ident!("{}_clock_prev", name);
+        let clock_prev = self.register_column(&clock_prev_base);
+        self.extra_columns.push(clock_prev.clone());
+        let mut next = Vec::with_capacity(4);
+        for index in 0usize..4 {
+            let base = format_ident!("{}_next_{}", name, index);
+            let cell = self.register_column(&base);
+            self.extra_columns.push(cell.clone());
+            next.push(cell);
+        }
+        let next: [Ident; 4] = next.try_into().expect("four next limbs");
+        scope.insert(
+            format!("{name}_prev"),
+            Value::Array(
+                prev.iter()
+                    .cloned()
+                    .map(|cell| Value::Scalar { cell, degree: 1 })
+                    .collect(),
+            ),
+        );
+        scope.insert(
+            format!("{name}_clock_prev"),
+            Value::Scalar {
+                cell: clock_prev.clone(),
+                degree: 1,
+            },
+        );
+        scope.insert(
+            format!("{name}_next"),
+            Value::Array(
+                next.iter()
+                    .cloned()
+                    .map(|cell| Value::Scalar { cell, degree: 1 })
+                    .collect(),
+            ),
+        );
+        for cell in prev.iter().chain(next.iter()) {
+            scope.insert(
+                cell.to_string(),
+                Value::Scalar {
+                    cell: cell.clone(),
+                    degree: 1,
+                },
+            );
+        }
+        Ok((prev, clock_prev, next))
+    }
+
+    fn lower_access(
+        &mut self,
+        access: &AccessStmt,
+        scope: &mut HashMap<String, Value>,
+        budget: usize,
+    ) -> syn::Result<()> {
+        let AccessStmt {
+            kind,
+            name,
+            clock,
+            addr,
+            next: requested_next,
+        } = access;
+        let kind = *kind;
+        if !self.vm_access_enabled {
+            return Err(syn::Error::new(
+                name.span(),
+                "access statements require `vm_access: { state: ..., tracer: ... },`",
+            ));
+        }
+        for (relation, arity) in [("memory_access", 7usize), ("range_check_20", 1usize)] {
+            if self.relation_arities.get(relation) != Some(&arity) {
+                return Err(syn::Error::new(
+                    name.span(),
+                    format!("access statements require `relation {relation}({arity});`"),
+                ));
+            }
+        }
+        let (clock_expr, clock_degree) = self.lower(clock, scope, budget)?;
+        let clock_cell = match &clock_expr {
+            Expr::Path(path) => path.path.require_ident()?.clone(),
+            _ => self.register_derived(&format_ident!("{}_clock", name), clock_expr, clock_degree),
+        };
+        scope
+            .entry(clock_cell.to_string())
+            .or_insert_with(|| Value::Scalar {
+                cell: clock_cell.clone(),
+                degree: clock_degree,
+            });
+        let (addr_expr, addr_degree) = self.lower(addr, scope, budget)?;
+        let addr_cell = match &addr_expr {
+            Expr::Path(path) => path.path.require_ident()?.clone(),
+            _ => self.register_derived(&format_ident!("{}_addr", name), addr_expr, addr_degree),
+        };
+        let addr_binding = format!("{name}_addr");
+        if let Some(existing) = scope.get(&addr_binding) {
+            let (existing, _) = existing.scalar()?;
+            if existing != &addr_cell {
+                return Err(syn::Error::new(
+                    name.span(),
+                    format!("access binding `{addr_binding}` is already defined"),
+                ));
+            }
+        } else {
+            scope.insert(
+                addr_binding,
+                Value::Scalar {
+                    cell: addr_cell.clone(),
+                    degree: addr_degree,
+                },
+            );
+        }
+        let (prev, clock_prev, next) = self.register_access_columns(name, scope)?;
+
+        if kind.is_write() {
+            self.fill.push(FillStep::AccessPrepare {
+                kind,
+                addr: addr_cell.clone(),
+                prev: prev.clone(),
+            });
+        }
+
+        let desired: Option<[Ident; 4]> = match requested_next.as_ref() {
+            None => None,
+            Some(Expr::Path(path))
+                if path.path.get_ident().is_some_and(|ident| {
+                    matches!(scope.get(&ident.to_string()), Some(Value::Array(values)) if values.len() == 4)
+                }) =>
+            {
+                let ident = path.path.require_ident()?;
+                let Some(Value::Array(values)) = scope.get(&ident.to_string()) else {
+                    unreachable!("guarded four-limb array")
+                };
+                Some(
+                    values
+                        .iter()
+                        .map(|value| value.scalar().map(|(cell, _)| cell.clone()))
+                        .collect::<syn::Result<Vec<_>>>()?
+                        .try_into()
+                        .expect("four desired limbs"),
+                )
+            }
+            Some(Expr::Array(array)) if array.elems.len() == 4 => {
+                let mut cells = Vec::with_capacity(4);
+                for (index, expr) in array.elems.iter().enumerate() {
+                    let (lowered, degree) = self.lower(expr, scope, budget)?;
+                    let cell = match &lowered {
+                        Expr::Path(path) => path.path.require_ident()?.clone(),
+                        _ => self.register_derived(
+                            &format_ident!("{}_desired_{}", name, index),
+                            lowered,
+                            degree,
+                        ),
+                    };
+                    cells.push(cell);
+                }
+                Some(cells.try_into().expect("four desired limbs"))
+            }
+            Some(expr) => {
+                return Err(syn::Error::new_spanned(
+                    expr,
+                    "write access requires a four-limb array",
+                ));
+            }
+        };
+
+        let addr_inverse = if kind == AccessKind::WriteReg {
+            let base = format_ident!("{}_addr_inverse", name);
+            let cell = self.register_column(&base);
+            self.extra_columns.push(cell.clone());
+            scope.insert(
+                base.to_string(),
+                Value::Scalar {
+                    cell: cell.clone(),
+                    degree: 1,
+                },
+            );
+            Some(cell)
+        } else {
+            None
+        };
+        if let Some(desired) = &desired {
+            for cell in desired {
+                let degree = *self
+                    .cells
+                    .get(&cell.to_string())
+                    .expect("desired cell degree");
+                scope
+                    .entry(cell.to_string())
+                    .or_insert_with(|| Value::Scalar {
+                        cell: cell.clone(),
+                        degree,
+                    });
+            }
+        }
+
+        self.fill.push(FillStep::AccessCommit {
+            kind,
+            clock: clock_cell.clone(),
+            addr: addr_cell.clone(),
+            prev: prev.clone(),
+            clock_prev: clock_prev.clone(),
+            next: next.clone(),
+            desired: desired.clone(),
+            addr_inverse: addr_inverse.clone(),
+        });
+
+        let prev_name = format_ident!("{}_prev", name);
+        let next_name = format_ident!("{}_next", name);
+        let clock_prev_name = format_ident!("{}_clock_prev", name);
+        let addr_space = if kind.is_register() { 0u32 } else { 1u32 };
+        self.add_relation_entry(
+            format_ident!("memory_access"),
+            &[
+                syn::parse_quote!(#addr_space),
+                syn::parse_quote!(#addr_cell),
+                syn::parse_quote!(#clock_prev_name),
+                syn::parse_quote!(#prev_name),
+            ],
+            false,
+            None,
+            scope,
+            budget,
+        )?;
+        self.add_relation_entry(
+            format_ident!("memory_access"),
+            &[
+                syn::parse_quote!(#addr_space),
+                syn::parse_quote!(#addr_cell),
+                syn::parse_quote!(#clock_cell),
+                syn::parse_quote!(#next_name),
+            ],
+            true,
+            None,
+            scope,
+            budget,
+        )?;
+        let clock_diff: Expr = syn::parse_quote!(#clock_cell - #clock_prev_name);
+        self.add_relation_entry(
+            format_ident!("range_check_20"),
+            &[clock_diff],
+            false,
+            None,
+            scope,
+            budget,
+        )?;
+
+        if kind.is_write() {
+            let desired = desired.as_ref().expect("write has desired limbs");
+            if kind.is_register() {
+                let inverse = addr_inverse.as_ref().expect("register write inverse");
+                let is_nonzero_expr: Expr = syn::parse_quote!(#addr_cell * #inverse);
+                let (is_nonzero_expr, degree) = self.lower(&is_nonzero_expr, scope, budget)?;
+                let is_nonzero = self.register_derived(
+                    &format_ident!("{}_is_nonzero", name),
+                    is_nonzero_expr,
+                    degree,
+                );
+                scope.insert(
+                    is_nonzero.to_string(),
+                    Value::Scalar {
+                        cell: is_nonzero.clone(),
+                        degree,
+                    },
+                );
+                self.add_assert(
+                    syn::parse_quote!(#addr_cell),
+                    syn::parse_quote!(#addr_cell * #is_nonzero),
+                    scope,
+                )?;
+                for (next, desired) in next.iter().zip(desired) {
+                    self.add_assert(
+                        syn::parse_quote!(#next),
+                        syn::parse_quote!(#is_nonzero * #desired),
+                        scope,
+                    )?;
+                }
+            } else {
+                for (next, desired) in next.iter().zip(desired) {
+                    self.add_assert(syn::parse_quote!(#next), syn::parse_quote!(#desired), scope)?;
+                }
+            }
+        } else {
+            for (prev, next) in prev.iter().zip(&next) {
+                self.add_assert(syn::parse_quote!(#prev), syn::parse_quote!(#next), scope)?;
+            }
+        }
+
+        Ok(())
+    }
+
     fn lower_block(
         &mut self,
         body: &[FnStmt],
@@ -1254,11 +1772,7 @@ impl Lowerer<'_> {
                     }
                 }
                 FnStmt::Assert { lhs, rhs } => {
-                    // The enabler gate on emitted constraints costs one
-                    // degree: asserts share the cell budget.
-                    let difference: Expr = syn::parse_quote!((#lhs) - (#rhs));
-                    let (lowered, _) = self.lower(&difference, scope, self.max_degree - 1)?;
-                    self.constraints.push(lowered);
+                    self.add_assert(lhs.clone(), rhs.clone(), scope)?;
                 }
                 FnStmt::For {
                     var,
@@ -1280,63 +1794,14 @@ impl Lowerer<'_> {
                     emit,
                     mult,
                 } => {
-                    let Some(&arity) = self.relation_arities.get(&relation.to_string()) else {
-                        return Err(syn::Error::new_spanned(
-                            relation,
-                            format!(
-                                "unknown relation `{relation}` (declare it with `relation {relation}(arity);`)"
-                            ),
-                        ));
-                    };
-                    // Lower an expression to a cell, reusing a bare column/cell
-                    // directly (only compound expressions get a fresh cell).
-                    let to_cell =
-                        |lowerer: &mut Self, expr: &Expr, base: Ident| -> syn::Result<Ident> {
-                            let (lowered, degree) = lowerer.lower(expr, scope, budget)?;
-                            if let Expr::Path(path) = &lowered
-                                && let Some(ident) = path.path.get_ident()
-                            {
-                                return Ok(ident.clone());
-                            }
-                            Ok(lowerer.register_derived(&base, lowered, degree))
-                        };
-
-                    // Optional multiplicity (default: enabler).
-                    let mult_cell = match mult {
-                        None => None,
-                        Some(expr) => {
-                            let base =
-                                format_ident!("{}_mult{}", relation, self.relation_entries.len());
-                            Some(to_cell(self, expr, base)?)
-                        }
-                    };
-
-                    // Mirror activation-argument lowering: arrays flatten,
-                    // scalars lower into cells so the tuple references cells.
-                    let mut arg_cells = Vec::new();
-                    for arg in args {
-                        if let Ok(ident) = expect_ident(arg)
-                            && let Some(value @ Value::Array(_)) = scope.get(&ident.to_string())
-                        {
-                            for (cell, _) in value.flatten() {
-                                arg_cells.push(cell);
-                            }
-                            continue;
-                        }
-                        let base = format_ident!("{}_e{}", relation, self.relation_entries.len());
-                        arg_cells.push(to_cell(self, arg, base)?);
-                    }
-                    if arg_cells.len() != arity {
-                        return Err(syn::Error::new_spanned(
-                            relation,
-                            format!(
-                                "`{relation}` has arity {arity}, got {} felts",
-                                arg_cells.len()
-                            ),
-                        ));
-                    }
-                    self.relation_entries
-                        .push((relation.clone(), arg_cells, *emit, mult_cell));
+                    self.add_relation_entry(
+                        relation.clone(),
+                        args,
+                        *emit,
+                        mult.as_ref(),
+                        scope,
+                        budget,
+                    )?;
                 }
                 FnStmt::Hint { name, expr } => {
                     // A committed column (free in the AIR), filled by
@@ -1356,6 +1821,9 @@ impl Lowerer<'_> {
                     // own structure (e.g. an opcode-flag factor).
                     let (lowered, _) = self.lower(expr, scope, self.max_degree)?;
                     self.raw_constraints.push(lowered);
+                }
+                FnStmt::Access(access) => {
+                    self.lower_access(access, scope, budget)?;
                 }
             }
         }
@@ -1466,6 +1934,13 @@ fn clone_body(body: &[FnStmt]) -> Vec<FnStmt> {
                 expr: expr.clone(),
             },
             FnStmt::Constrain { expr } => FnStmt::Constrain { expr: expr.clone() },
+            FnStmt::Access(access) => FnStmt::Access(Box::new(AccessStmt {
+                kind: access.kind,
+                name: access.name.clone(),
+                clock: access.clock.clone(),
+                addr: access.addr.clone(),
+                next: access.next.clone(),
+            })),
         })
         .collect()
 }
@@ -1494,14 +1969,19 @@ struct LoweredFn {
     ret_cells: Vec<Ident>,
 }
 
+struct LowerFnOptions<'a> {
+    materialize_rets: bool,
+    fixed_params: &'a std::collections::HashSet<String>,
+    vm_access_enabled: bool,
+}
+
 fn lower_fn(
     function: &AirFn,
     max_degree: usize,
     arities: &HashMap<String, (usize, usize)>,
     relation_arities: &HashMap<String, usize>,
     inline_fns: &HashMap<String, AirFn>,
-    materialize_rets: bool,
-    fixed_params: &std::collections::HashSet<String>,
+    options: LowerFnOptions<'_>,
 ) -> syn::Result<LoweredFn> {
     // Lookup-tuple elements appear in LogUp denominators whose singleton
     // constraint multiplies by one cumsum mask: budget max_degree - 1.
@@ -1522,6 +2002,7 @@ fn lower_fn(
         relation_arities,
         inline_fns,
         fn_name: function.name.clone(),
+        vm_access_enabled: options.vm_access_enabled,
     };
 
     // Every table has one generated activity column. Making it a built-in
@@ -1552,7 +2033,7 @@ fn lower_fn(
             None => {
                 let cell = lowerer.register_column(&param.name);
                 arg_columns.push(cell.clone());
-                let degree = usize::from(!fixed_params.contains(&param.name.to_string()));
+                let degree = usize::from(!options.fixed_params.contains(&param.name.to_string()));
                 Value::Scalar { cell, degree }
             }
             Some(size) => {
@@ -1578,7 +2059,7 @@ fn lower_fn(
         for (cell, degree) in value.flatten() {
             // Embedded hosts pair activation entries, so the tuple must be
             // degree 1: commit every returned cell.
-            if materialize_rets && degree > 1 {
+            if options.materialize_rets && degree > 1 {
                 let expr: Expr = syn::parse_quote!(#cell);
                 let Expr::Path(materialized) = lowerer.materialize(expr) else {
                     unreachable!("materialize returns a cell path");
@@ -1942,6 +2423,7 @@ pub fn define_air_fns(input: TokenStream) -> TokenStream {
         embedded_dynamic_component,
         embedded_preprocessed,
         embedded_params,
+        vm_access,
         relations: external_relations,
         fns,
     } = parse_macro_input!(input as AirFnsInput);
@@ -1989,8 +2471,11 @@ pub fn define_air_fns(input: TokenStream) -> TokenStream {
             &arities,
             &relation_arities,
             &inline_fns,
-            embedded.is_some(),
-            &fixed_params,
+            LowerFnOptions {
+                materialize_rets: embedded.is_some(),
+                fixed_params: &fixed_params,
+                vm_access_enabled: vm_access.is_some(),
+            },
         ) {
             Ok(result) => {
                 arities.insert(function.name.to_string(), (result.n_args, result.n_rets));
@@ -2002,6 +2487,14 @@ pub fn define_air_fns(input: TokenStream) -> TokenStream {
 
     if let Some(flags) = embedded {
         if !embedded_preprocessed.is_empty() {
+            if vm_access.is_some() {
+                return syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    "vm_access is incompatible with embedded_preprocessed",
+                )
+                .to_compile_error()
+                .into();
+            }
             if !embedded_component {
                 return syn::Error::new(
                     proc_macro2::Span::call_site(),
@@ -2036,11 +2529,14 @@ pub fn define_air_fns(input: TokenStream) -> TokenStream {
         return generate_embedded(
             &mut lowered,
             &flags,
-            embedded_component,
-            &embedded_relations,
-            logup_batch,
-            logup_unbatched_tail,
-            embedded_dynamic_component,
+            EmbeddedOptions {
+                component: embedded_component,
+                relations_path: &embedded_relations,
+                logup_batch,
+                logup_unbatched_tail,
+                dynamic_component: embedded_dynamic_component,
+                vm_access: vm_access.as_ref(),
+            },
         );
     }
 
@@ -2117,7 +2613,7 @@ pub fn define_air_fns(input: TokenStream) -> TokenStream {
         .collect();
     let call_fns: Vec<_> = lowered
         .iter()
-        .map(|f| generate_call_fn(f).unwrap_or_else(|e| e.to_compile_error()))
+        .map(|f| generate_call_fn(f, vm_access.as_ref()).unwrap_or_else(|e| e.to_compile_error()))
         .collect();
 
     // Component modules (air + witness) per function.
@@ -2617,14 +3113,19 @@ fn generate_embedded_preprocessed(
     .into()
 }
 
+struct EmbeddedOptions<'a> {
+    component: bool,
+    relations_path: &'a Path,
+    logup_batch: usize,
+    logup_unbatched_tail: usize,
+    dynamic_component: bool,
+    vm_access: Option<&'a (Path, Path)>,
+}
+
 fn generate_embedded(
     lowered: &mut [LoweredFn],
     flags: &[Ident],
-    embedded_component: bool,
-    relations_path: &Path,
-    logup_batch: usize,
-    logup_unbatched_tail: usize,
-    embedded_dynamic_component: bool,
+    options: EmbeddedOptions<'_>,
 ) -> TokenStream {
     let [function] = lowered else {
         return syn::Error::new(
@@ -2648,21 +3149,22 @@ fn generate_embedded(
     let prover_columns =
         generate_prover_columns(&function.table).unwrap_or_else(|e| e.to_compile_error());
     let evaluation = generate_evaluation_impl(function).unwrap_or_else(|e| e.to_compile_error());
-    let fill = generate_embedded_fill(function, flags).unwrap_or_else(|e| e.to_compile_error());
-    let component = if embedded_component {
+    let fill = generate_embedded_fill(function, flags, options.vm_access)
+        .unwrap_or_else(|e| e.to_compile_error());
+    let component = if options.component {
         if function.relation_entries.is_empty() {
             // No emit/consume statements: the Poseidon2 adapter, which emits
             // from the io activation tuple under its narrow/wide/io flags.
-            generate_embedded_poseidon2_component(function, flags, relations_path)
+            generate_embedded_poseidon2_component(function, flags, options.relations_path)
         } else {
             // An opcode: emit its declared relations (emit/consume) against
             // the host `crate::relations::Relations`.
             generate_embedded_opcode_component(
                 function,
-                relations_path,
-                logup_batch,
-                logup_unbatched_tail,
-                embedded_dynamic_component,
+                options.relations_path,
+                options.logup_batch,
+                options.logup_unbatched_tail,
+                options.dynamic_component,
             )
         }
     } else {
@@ -3204,7 +3706,147 @@ fn generate_embedded_poseidon2_component(
 
 /// The embedded row-fill: run the cells, push the row (flags appended),
 /// return the outputs.
-fn generate_embedded_fill(function: &LoweredFn, flags: &[Ident]) -> syn::Result<TokenStream2> {
+fn generate_access_fill_step(step: &FillStep, state_path: &Path) -> syn::Result<TokenStream2> {
+    let base_field = quote!(stwo::core::fields::m31::BaseField);
+    match step {
+        FillStep::AccessPrepare { kind, addr, prev } => {
+            let raw = format_ident!("__{}_prior_word", prev[0]);
+            let read = if kind.is_register() {
+                quote! {
+                    #state_path::read_register(
+                        state,
+                        u8::try_from(#addr.0).expect("register index must fit in u8"),
+                    )
+                }
+            } else {
+                quote! { #state_path::read_memory_word(state, #addr.0) }
+            };
+            Ok(quote! {
+                let #raw = #read;
+                let [#(#prev),*] = #raw.to_le_bytes().map(|limb| {
+                    #base_field::from_u32_unchecked(u32::from(limb))
+                });
+            })
+        }
+        FillStep::AccessCommit {
+            kind,
+            clock,
+            addr,
+            prev,
+            clock_prev,
+            next,
+            desired,
+            addr_inverse,
+        } => {
+            let record = format_ident!("__{}_record", clock_prev);
+            let raw = format_ident!("__{}_prior_word", prev[0]);
+            let read = if kind.is_register() {
+                quote! {
+                    #state_path::read_register(
+                        state,
+                        u8::try_from(#addr.0).expect("register index must fit in u8"),
+                    )
+                }
+            } else {
+                quote! { #state_path::read_memory_word(state, #addr.0) }
+            };
+            let trace = if kind.is_register() {
+                quote! {
+                    tracer.trace_reg_access(
+                        u8::try_from(#addr.0).expect("register index must fit in u8"),
+                        #raw,
+                        __next_word,
+                    )
+                }
+            } else {
+                quote! { tracer.trace_mem_access(#addr.0, #raw, __next_word) }
+            };
+            let prepare = if kind.is_write() {
+                let desired = desired.as_ref().expect("write access has desired limbs");
+                let desired_bytes = desired.iter().map(|limb| {
+                    quote! { u8::try_from(#limb.0).expect("access limb must fit in u8") }
+                });
+                let write = if kind.is_register() {
+                    quote! {
+                        #state_path::write_register(
+                            state,
+                            u8::try_from(#addr.0).expect("register index must fit in u8"),
+                            __requested_word,
+                        );
+                    }
+                } else {
+                    quote! { #state_path::write_memory_word(state, #addr.0, __requested_word); }
+                };
+                quote! {
+                    let __requested_word = u32::from_le_bytes([
+                        #(#desired_bytes),*
+                    ]);
+                    #write
+                    let __next_word = #read;
+                }
+            } else {
+                quote! {
+                    let #raw = #read;
+                    let __next_word = #raw;
+                }
+            };
+            let bind_prev = if kind.is_write() {
+                quote! {}
+            } else {
+                quote! {
+                    let [#(#prev),*] = #record.prev.to_le_bytes().map(|limb| {
+                        #base_field::from_u32_unchecked(u32::from(limb))
+                    });
+                }
+            };
+            let bind_inverse = match addr_inverse {
+                Some(inverse) => quote! {
+                    let #inverse = if #addr.0 == 0 {
+                        #base_field::from_u32_unchecked(0)
+                    } else {
+                        stwo::core::fields::FieldExpOps::inverse(&#addr)
+                    };
+                },
+                None => quote! {},
+            };
+            Ok(quote! {
+                assert_eq!(
+                    #clock.0,
+                    tracer.clock,
+                    "generated access clock must equal the tracer clock",
+                );
+                #prepare
+                let #record = #trace;
+                assert_eq!(
+                    #record.addr,
+                    #addr.0,
+                    "generated access address must match the traced address",
+                );
+                assert_eq!(
+                    #record.prev,
+                    #raw,
+                    "generated access prior value must match architectural state",
+                );
+                #bind_prev
+                let #clock_prev = #base_field::from_u32_unchecked(#record.clock_prev);
+                let [#(#next),*] = #record.next.to_le_bytes().map(|limb| {
+                    #base_field::from_u32_unchecked(u32::from(limb))
+                });
+                #bind_inverse
+            })
+        }
+        _ => Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "expected an access fill step",
+        )),
+    }
+}
+
+fn generate_embedded_fill(
+    function: &LoweredFn,
+    flags: &[Ident],
+    vm_access: Option<&(Path, Path)>,
+) -> syn::Result<TokenStream2> {
     let name = &function.name;
     let fn_name = format_ident!("{}_fill", name);
     let table_type = table_name(name);
@@ -3221,6 +3863,10 @@ fn generate_embedded_fill(function: &LoweredFn, flags: &[Ident]) -> syn::Result<
                 steps.push(quote! { let #cell = #value; });
             }
             FillStep::Call { .. } => unreachable!("embedded functions make no calls"),
+            FillStep::AccessPrepare { .. } | FillStep::AccessCommit { .. } => {
+                let (state_path, _) = vm_access.expect("access lowering requires vm config");
+                steps.push(generate_access_fill_step(step, state_path)?);
+            }
         }
     }
 
@@ -3244,20 +3890,34 @@ fn generate_embedded_fill(function: &LoweredFn, flags: &[Ident]) -> syn::Result<
     let doc = format!(
         "Run `{name}` over the arguments, push the trace row (with the flag          columns appended), and return the outputs."
     );
+    let table_param = if let Some((state_path, tracer_path)) = vm_access {
+        quote! {
+            state: &mut impl #state_path,
+            tracer: &mut #tracer_path,
+        }
+    } else {
+        quote! { table: &mut #table_type, }
+    };
+    let push_row = if vm_access.is_some() {
+        quote! { tracer.#name.push_row(&[#(#row_values),*]); }
+    } else {
+        quote! { table.push_row(&[#(#row_values),*]); }
+    };
+
     Ok(quote! {
         #[doc = #doc]
         // Cells used only in relation tuples / constraints are recomputed in
         // the AIR's `evaluation()`, so their fill bindings can be unused here.
         #[allow(unused_variables)]
         pub fn #fn_name(
-            table: &mut #table_type,
+            #table_param
             args: [stwo::core::fields::m31::BaseField; #n_args],
             flags: [u32; #n_flags],
         ) -> [stwo::core::fields::m31::BaseField; #n_rets] {
             let enabler = stwo::core::fields::m31::BaseField::from_u32_unchecked(1);
             let [#(#arg_cells),*] = args;
             #(#steps)*
-            table.push_row(&[#(#row_values),*]);
+            #push_row
             [#(#ret_cells),*]
         }
     })
@@ -3265,7 +3925,10 @@ fn generate_embedded_fill(function: &LoweredFn, flags: &[Ident]) -> syn::Result<
 
 /// The witness fill: run the lowered cells over `BaseField`, recursively
 /// activate callees, push the row, return the outputs.
-fn generate_call_fn(function: &LoweredFn) -> syn::Result<TokenStream2> {
+fn generate_call_fn(
+    function: &LoweredFn,
+    vm_access: Option<&(Path, Path)>,
+) -> syn::Result<TokenStream2> {
     let name = &function.name;
     let fn_name = format_ident!("call_{}", name);
     let n_args = function.n_args;
@@ -3281,9 +3944,19 @@ fn generate_call_fn(function: &LoweredFn) -> syn::Result<TokenStream2> {
             }
             FillStep::Call { rets, callee, args } => {
                 let callee_fn = format_ident!("call_{}", callee);
-                steps.push(quote! {
-                    let [#(#rets),*] = #callee_fn(tables, [#(#args),*]);
-                });
+                if vm_access.is_some() {
+                    steps.push(quote! {
+                        let [#(#rets),*] = #callee_fn(tables, state, tracer, [#(#args),*]);
+                    });
+                } else {
+                    steps.push(quote! {
+                        let [#(#rets),*] = #callee_fn(tables, [#(#args),*]);
+                    });
+                }
+            }
+            FillStep::AccessPrepare { .. } | FillStep::AccessCommit { .. } => {
+                let (state_path, _) = vm_access.expect("access lowering requires vm config");
+                steps.push(generate_access_fill_step(step, state_path)?);
             }
         }
     }
@@ -3297,6 +3970,14 @@ fn generate_call_fn(function: &LoweredFn) -> syn::Result<TokenStream2> {
 
     let doc =
         format!("Activate `{name}`: run the body, recursively activate callees, push the row.");
+    let access_params = if let Some((state_path, tracer_path)) = vm_access {
+        quote! {
+            state: &mut impl #state_path,
+            tracer: &mut #tracer_path,
+        }
+    } else {
+        quote! {}
+    };
     Ok(quote! {
         #[doc = #doc]
         // Cells used only in relation tuples / constraints are recomputed in
@@ -3304,6 +3985,7 @@ fn generate_call_fn(function: &LoweredFn) -> syn::Result<TokenStream2> {
         #[allow(unused_variables)]
         pub fn #fn_name(
             tables: &mut Tables,
+            #access_params
             args: [stwo::core::fields::m31::BaseField; #n_args],
         ) -> [stwo::core::fields::m31::BaseField; #n_rets] {
             let enabler = stwo::core::fields::m31::BaseField::from_u32_unchecked(1);

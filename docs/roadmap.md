@@ -396,7 +396,16 @@ set.
     runner, ordered-journal, segmented-boundary, VM-proof, and application-root
     gates.
   - Completion slice: step 7 evidence is recorded below; SYS-001 is complete.
-- `[pending] FELT-001` Complete witness-side felt-function VM access.
+- `[done] FELT-001` Complete witness-side felt-function VM access.
+  - `define_air_fns!` now owns generated register and aligned-memory reads and
+    writes through its `vm_access` configuration; no helper or standalone macro
+    was added.
+  - Generated access rows call the existing tracer, automatically contribute the
+    memory and clock-range relations, preserve gap filling and memory-root
+    inputs, and constrain read immutability plus x0 writes.
+  - Completion slice: the focused generated-row, malformed-boundary, embedded
+    tracer-table, toy proof, and runner state-interface tests pass in release
+    mode; detailed evidence is recorded below.
 - `[pending] FELT-002` Migrate opcode execution and retire duplicate semantics.
 - `[pending] REL-001` Harden and measure the completed system.
 
@@ -775,7 +784,7 @@ Required work, in order:
 Done when an application verifies one proof-bound journal digest at the root and
 no runner-only value can affect it.
 
-### `[pending] FELT-001` Witness-side VM access
+### `[done] FELT-001` Witness-side VM access
 
 Dependencies: `SYS-001`.
 
@@ -783,13 +792,14 @@ Design authority: `docs/felt-air-compiler.md`.
 
 Required work:
 
-1. Add generated register read/write and memory read/write abstractions backed
-   by `Tracer::trace_reg_access` and `Tracer::trace_mem_access`.
-2. Generate clock-gap activations and range checks from those access operations.
-3. Preserve write-once witness behavior, gap filling, x0 semantics, and memory
-   roots.
-4. Prove the access layer on a toy generated opcode before migrating production
-   handlers.
+1. `[done]` Add generated register read/write and memory read/write abstractions
+   backed by `Tracer::trace_reg_access` and `Tracer::trace_mem_access`.
+2. `[done]` Generate clock-gap activations and range checks from those access
+   operations.
+3. `[done]` Preserve write-once witness behavior, gap filling, x0 semantics, and
+   memory roots.
+4. `[done]` Prove the access layer on a toy generated opcode before migrating
+   production handlers.
 
 Done when generated felt functions can execute and fill real VM access rows and
 focused tests reject stale clocks, incorrect prior values, and illegal writes.
@@ -1389,6 +1399,37 @@ the recorded command without committing a machine-specific path.
   requests an unavailable Rust test harness. Changed-file repository hooks
   passed.
 - SYS-001 step 7 is complete. SYS-001 is complete.
+
+### `FELT-001` — 2026-08-06
+
+- `define_air_fns!` accepts `vm_access: { state: ..., tracer: ... }` and the
+  `read_reg`, `write_reg`, `read_mem`, and `write_mem` statements. These are
+  additions to the existing felt DSL, not wrapper or standalone macros.
+- Each access generates the prior/next limb and prior-clock columns, paired
+  `memory_access` entries, and a `range_check_20` clock-difference entry. Reads
+  constrain `prev == next`; register writes use an inverse witness to select x0
+  and force its next word to zero.
+- Witness calls use `air::vm::MachineState`, invoke the existing
+  `Tracer::trace_reg_access` or `Tracer::trace_mem_access`, and push embedded
+  rows directly into the configured tracer table. The existing `define_air!`
+  `clock_gap:` component owns gap-row constraints; `ClockGapTable` remains only
+  its columnar witness container.
+- `cargo test --release -p runner machine::tests:: --lib -- --nocapture`: all 3
+  focused architectural-state tests passed.
+- `/usr/bin/time -l cargo test --release -p stwo-macros --test air_fns generated_ -- --nocapture --test-threads=1`:
+  all 10 generated access tests passed in 0.03 seconds after release
+  compilation, with 1.20 GB maximum RSS and zero swaps. They cover register and
+  aligned-memory reads/writes, initial-memory capture, gap filling, valid toy
+  proofs, stale clocks, incorrect prior values, read-side mutation, and x0.
+- `/usr/bin/time -l cargo test --release -p stwo-macros --test air_fns -- --nocapture --test-threads=1`:
+  the complete 37-test fn-DSL suite passed in 0.02 seconds with a warm build,
+  60.46 MB maximum RSS, and zero swaps.
+- `cargo clippy --release -p stwo-macros -p air -p runner --all-targets --no-deps -- -D warnings`:
+  the affected crates and targets passed with warnings denied.
+- FELT-001 does not change the production component roster or recursion
+  protocol, so no VM or recursion-root conformance run is required at this
+  boundary. FELT-002 starts with the production `lui` migration, where the
+  roster and protocol identity first change.
 
 ## Project finish line
 

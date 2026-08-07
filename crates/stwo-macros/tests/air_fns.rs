@@ -791,3 +791,632 @@ fn test_mini_vm_broken_chain_is_rejected() {
     let proof = mini_vm::prove_air_fns(tables, activations, PcsConfig::default());
     assert!(mini_vm::verify_air_fns(proof, PcsConfig::default()).is_err());
 }
+
+trait AccessState {
+    fn read_register(&self, index: u8) -> u32;
+    fn write_register(&mut self, index: u8, value: u32);
+    fn read_memory_word(&self, address: u32) -> u32;
+    fn write_memory_word(&mut self, address: u32, value: u32);
+}
+
+struct AccessMachine {
+    cpu: runner::Cpu,
+    memory: runner::Memory,
+}
+
+impl AccessMachine {
+    fn new() -> Self {
+        Self {
+            cpu: runner::Cpu::new(0, 0, 0),
+            memory: runner::Memory::new(),
+        }
+    }
+}
+
+impl AccessState for AccessMachine {
+    fn read_register(&self, index: u8) -> u32 {
+        self.cpu.reg(index)
+    }
+
+    fn write_register(&mut self, index: u8, value: u32) {
+        self.cpu.set_reg(index, value);
+    }
+
+    fn read_memory_word(&self, address: u32) -> u32 {
+        self.memory.read_u32(address)
+    }
+
+    fn write_memory_word(&mut self, address: u32, value: u32) {
+        self.memory.write_u32(address, value);
+    }
+}
+
+mod access_vm {
+    stwo_macros::define_air_fns! {
+        max_degree: 3,
+        vm_access: {
+            state: crate::AccessState,
+            tracer: runner::Tracer,
+        },
+
+        relation memory_access(7);
+        relation range_check_20(1);
+
+        fn write_register_word(clock, addr, requested: [felt; 4]) {
+            write_reg rd(clock, addr, requested);
+            return rd_next;
+        }
+
+        fn read_register_word(clock, addr) {
+            read_reg rs(clock, addr);
+            return rs_next;
+        }
+
+        fn write_memory_word(clock, addr, requested: [felt; 4]) {
+            write_mem dst(clock, addr, requested);
+            return dst_next;
+        }
+
+        fn read_memory_word(clock, addr) {
+            read_mem src(clock, addr);
+            return src_next;
+        }
+
+        fn close_access(
+            addr,
+            before_clock,
+            before: [felt; 4],
+            after_clock,
+            after: [felt; 4],
+            diff,
+        ) {
+            emit memory_access(0, addr, before_clock, before);
+            consume memory_access(0, addr, after_clock, after);
+            emit range_check_20(diff);
+            return addr;
+        }
+
+        fn close_memory_access(
+            addr,
+            before_clock,
+            before: [felt; 4],
+            after_clock,
+            after: [felt; 4],
+            diff,
+        ) {
+            emit memory_access(1, addr, before_clock, before);
+            consume memory_access(1, addr, after_clock, after);
+            emit range_check_20(diff);
+            return addr;
+        }
+    }
+}
+
+mod embedded_access_vm {
+    stwo_macros::define_air_fns! {
+        max_degree: 3,
+        embedded: [],
+        vm_access: {
+            state: crate::AccessState,
+            tracer: crate::EmbeddedAccessTracer,
+        },
+
+        relation memory_access(7);
+        relation range_check_20(1);
+
+        fn embedded_write(clock, addr, requested: [felt; 4]) {
+            write_reg rd(clock, addr, requested);
+            return rd_next;
+        }
+    }
+}
+
+struct EmbeddedAccessTracer {
+    clock: u32,
+    embedded_write: embedded_access_vm::EmbeddedWriteTable,
+    access: runner::Tracer,
+}
+
+impl EmbeddedAccessTracer {
+    fn new(clock: u32) -> Self {
+        let access = runner::Tracer {
+            clock,
+            ..Default::default()
+        };
+        Self {
+            clock,
+            embedded_write: embedded_access_vm::EmbeddedWriteTable::new(),
+            access,
+        }
+    }
+
+    fn trace_reg_access(&mut self, index: u8, prev: u32, next: u32) -> runner::Access {
+        self.access.trace_reg_access(index, prev, next)
+    }
+}
+
+#[test]
+fn test_generated_register_write_mutates_state() {
+    let mut tables = access_vm::Tables::default();
+    let mut state = AccessMachine::new();
+    let mut tracer = runner::Tracer::with_max_clock_diff(4);
+    tracer.clock = 10;
+
+    access_vm::call_write_register_word(
+        &mut tables,
+        &mut state,
+        &mut tracer,
+        [
+            felt(10),
+            felt(5),
+            felt(0x78),
+            felt(0x56),
+            felt(0x34),
+            felt(0x12),
+        ],
+    );
+
+    assert_eq!(state.cpu.reg(5), 0x1234_5678);
+}
+
+#[test]
+fn test_embedded_access_fill_owns_the_tracer_table() {
+    let mut state = AccessMachine::new();
+    let mut tracer = EmbeddedAccessTracer::new(1);
+
+    embedded_access_vm::embedded_write_fill(
+        &mut state,
+        &mut tracer,
+        [
+            felt(1),
+            felt(5),
+            felt(0x78),
+            felt(0x56),
+            felt(0x34),
+            felt(0x12),
+        ],
+        [],
+    );
+
+    assert_eq!(
+        (state.cpu.reg(5), tracer.embedded_write.len()),
+        (0x1234_5678, 1)
+    );
+}
+
+#[test]
+fn test_generated_memory_write_preserves_initial_word() {
+    let mut tables = access_vm::Tables::default();
+    let mut state = AccessMachine::new();
+    state.memory.write_u32(0x1000, 0x4433_2211);
+    let mut tracer = runner::Tracer {
+        clock: 1,
+        ..Default::default()
+    };
+
+    access_vm::call_write_memory_word(
+        &mut tables,
+        &mut state,
+        &mut tracer,
+        [
+            felt(1),
+            felt(0x1000),
+            felt(0x88),
+            felt(0x77),
+            felt(0x66),
+            felt(0x55),
+        ],
+    );
+
+    assert_eq!(
+        (state.memory.read_u32(0x1000), tracer.mem_initial[&0x1000]),
+        (0x5566_7788, 0x4433_2211),
+    );
+}
+
+#[test]
+fn test_generated_memory_read_returns_aligned_word() {
+    let mut tables = access_vm::Tables::default();
+    let mut state = AccessMachine::new();
+    state.memory.write_u32(0x1000, 0x4433_2211);
+    let mut tracer = runner::Tracer {
+        clock: 1,
+        ..Default::default()
+    };
+
+    let output = access_vm::call_read_memory_word(
+        &mut tables,
+        &mut state,
+        &mut tracer,
+        [felt(1), felt(0x1000)],
+    );
+
+    assert_eq!(output, [felt(0x11), felt(0x22), felt(0x33), felt(0x44)]);
+}
+
+#[test]
+fn test_generated_memory_access_proves_and_verifies() {
+    let mut tables = access_vm::Tables::default();
+    let mut state = AccessMachine::new();
+    state.memory.write_u32(0x1000, 0x4433_2211);
+    let mut tracer = runner::Tracer {
+        clock: 10,
+        ..Default::default()
+    };
+    let requested = [felt(0x88), felt(0x77), felt(0x66), felt(0x55)];
+    let output = access_vm::call_write_memory_word(
+        &mut tables,
+        &mut state,
+        &mut tracer,
+        [
+            felt(10),
+            felt(0x1000),
+            requested[0],
+            requested[1],
+            requested[2],
+            requested[3],
+        ],
+    );
+    let before = [felt(0x11), felt(0x22), felt(0x33), felt(0x44)];
+    let boundary_inputs = [
+        felt(0x1000),
+        felt(0),
+        before[0],
+        before[1],
+        before[2],
+        before[3],
+        felt(10),
+        output[0],
+        output[1],
+        output[2],
+        output[3],
+        felt(10),
+    ];
+    let boundary =
+        access_vm::call_close_memory_access(&mut tables, &mut state, &mut tracer, boundary_inputs);
+    let activations = vec![
+        access_vm::Activation::WriteMemoryWord {
+            inputs: [
+                felt(10),
+                felt(0x1000),
+                requested[0],
+                requested[1],
+                requested[2],
+                requested[3],
+            ],
+            outputs: output,
+        },
+        access_vm::Activation::CloseMemoryAccess {
+            inputs: boundary_inputs,
+            outputs: boundary,
+        },
+    ];
+
+    let proof = access_vm::prove_air_fns(tables, activations, PcsConfig::default());
+    assert!(access_vm::verify_air_fns(proof, PcsConfig::default()).is_ok());
+}
+
+#[test]
+fn test_generated_access_fills_clock_gaps() {
+    let mut tables = access_vm::Tables::default();
+    let mut state = AccessMachine::new();
+    let mut tracer = runner::Tracer::with_max_clock_diff(4);
+    tracer.clock = 10;
+
+    access_vm::call_read_register_word(&mut tables, &mut state, &mut tracer, [felt(10), felt(5)]);
+
+    assert_eq!(tracer.clock_update.len(), 2);
+}
+
+#[test]
+fn test_generated_register_access_proves_and_verifies() {
+    let mut tables = access_vm::Tables::default();
+    let mut state = AccessMachine::new();
+    state.cpu.set_reg(5, 0x4433_2211);
+    let mut tracer = runner::Tracer {
+        clock: 10,
+        ..Default::default()
+    };
+    let requested = [felt(0x88), felt(0x77), felt(0x66), felt(0x55)];
+    let output = access_vm::call_write_register_word(
+        &mut tables,
+        &mut state,
+        &mut tracer,
+        [
+            felt(10),
+            felt(5),
+            requested[0],
+            requested[1],
+            requested[2],
+            requested[3],
+        ],
+    );
+    let before = [felt(0x11), felt(0x22), felt(0x33), felt(0x44)];
+    let boundary = access_vm::call_close_access(
+        &mut tables,
+        &mut state,
+        &mut tracer,
+        [
+            felt(5),
+            felt(0),
+            before[0],
+            before[1],
+            before[2],
+            before[3],
+            felt(10),
+            output[0],
+            output[1],
+            output[2],
+            output[3],
+            felt(10),
+        ],
+    );
+    let activations = vec![
+        access_vm::Activation::WriteRegisterWord {
+            inputs: [
+                felt(10),
+                felt(5),
+                requested[0],
+                requested[1],
+                requested[2],
+                requested[3],
+            ],
+            outputs: output,
+        },
+        access_vm::Activation::CloseAccess {
+            inputs: [
+                felt(5),
+                felt(0),
+                before[0],
+                before[1],
+                before[2],
+                before[3],
+                felt(10),
+                output[0],
+                output[1],
+                output[2],
+                output[3],
+                felt(10),
+            ],
+            outputs: boundary,
+        },
+    ];
+
+    let proof = access_vm::prove_air_fns(tables, activations, PcsConfig::default());
+    assert!(access_vm::verify_air_fns(proof, PcsConfig::default()).is_ok());
+}
+
+#[test]
+fn test_generated_register_access_rejects_stale_clock() {
+    let mut tables = access_vm::Tables::default();
+    let mut state = AccessMachine::new();
+    state.cpu.set_reg(5, 0x4433_2211);
+    let mut tracer = runner::Tracer {
+        clock: 10,
+        ..Default::default()
+    };
+    let requested = [felt(0x88), felt(0x77), felt(0x66), felt(0x55)];
+    let output = access_vm::call_write_register_word(
+        &mut tables,
+        &mut state,
+        &mut tracer,
+        [
+            felt(10),
+            felt(5),
+            requested[0],
+            requested[1],
+            requested[2],
+            requested[3],
+        ],
+    );
+    tables.write_register_word.rd_clock_prev[0] = 1;
+    let before = [felt(0x11), felt(0x22), felt(0x33), felt(0x44)];
+    let boundary_inputs = [
+        felt(5),
+        felt(0),
+        before[0],
+        before[1],
+        before[2],
+        before[3],
+        felt(10),
+        output[0],
+        output[1],
+        output[2],
+        output[3],
+        felt(10),
+    ];
+    let boundary =
+        access_vm::call_close_access(&mut tables, &mut state, &mut tracer, boundary_inputs);
+    let activations = vec![
+        access_vm::Activation::WriteRegisterWord {
+            inputs: [
+                felt(10),
+                felt(5),
+                requested[0],
+                requested[1],
+                requested[2],
+                requested[3],
+            ],
+            outputs: output,
+        },
+        access_vm::Activation::CloseAccess {
+            inputs: boundary_inputs,
+            outputs: boundary,
+        },
+    ];
+
+    let proof = access_vm::prove_air_fns(tables, activations, PcsConfig::default());
+    assert!(access_vm::verify_air_fns(proof, PcsConfig::default()).is_err());
+}
+
+#[test]
+fn test_generated_register_access_rejects_incorrect_prior_value() {
+    let mut tables = access_vm::Tables::default();
+    let mut state = AccessMachine::new();
+    state.cpu.set_reg(5, 0x4433_2211);
+    let mut tracer = runner::Tracer {
+        clock: 10,
+        ..Default::default()
+    };
+    let requested = [felt(0x88), felt(0x77), felt(0x66), felt(0x55)];
+    let output = access_vm::call_write_register_word(
+        &mut tables,
+        &mut state,
+        &mut tracer,
+        [
+            felt(10),
+            felt(5),
+            requested[0],
+            requested[1],
+            requested[2],
+            requested[3],
+        ],
+    );
+    tables.write_register_word.rd_prev_0[0] = 0x12;
+    let before = [felt(0x11), felt(0x22), felt(0x33), felt(0x44)];
+    let boundary_inputs = [
+        felt(5),
+        felt(0),
+        before[0],
+        before[1],
+        before[2],
+        before[3],
+        felt(10),
+        output[0],
+        output[1],
+        output[2],
+        output[3],
+        felt(10),
+    ];
+    let boundary =
+        access_vm::call_close_access(&mut tables, &mut state, &mut tracer, boundary_inputs);
+    let activations = vec![
+        access_vm::Activation::WriteRegisterWord {
+            inputs: [
+                felt(10),
+                felt(5),
+                requested[0],
+                requested[1],
+                requested[2],
+                requested[3],
+            ],
+            outputs: output,
+        },
+        access_vm::Activation::CloseAccess {
+            inputs: boundary_inputs,
+            outputs: boundary,
+        },
+    ];
+
+    let proof = access_vm::prove_air_fns(tables, activations, PcsConfig::default());
+    assert!(access_vm::verify_air_fns(proof, PcsConfig::default()).is_err());
+}
+
+#[test]
+fn test_generated_register_read_rejects_a_write() {
+    let mut tables = access_vm::Tables::default();
+    let mut state = AccessMachine::new();
+    state.cpu.set_reg(5, 0x4433_2211);
+    let mut tracer = runner::Tracer {
+        clock: 10,
+        ..Default::default()
+    };
+    access_vm::call_read_register_word(&mut tables, &mut state, &mut tracer, [felt(10), felt(5)]);
+    tables.read_register_word.rs_next_0[0] = 0x12;
+    let before = [felt(0x11), felt(0x22), felt(0x33), felt(0x44)];
+    let forged_after = [felt(0x12), felt(0x22), felt(0x33), felt(0x44)];
+    let boundary_inputs = [
+        felt(5),
+        felt(0),
+        before[0],
+        before[1],
+        before[2],
+        before[3],
+        felt(10),
+        forged_after[0],
+        forged_after[1],
+        forged_after[2],
+        forged_after[3],
+        felt(10),
+    ];
+    let boundary =
+        access_vm::call_close_access(&mut tables, &mut state, &mut tracer, boundary_inputs);
+    let activations = vec![
+        access_vm::Activation::ReadRegisterWord {
+            inputs: [felt(10), felt(5)],
+            outputs: forged_after,
+        },
+        access_vm::Activation::CloseAccess {
+            inputs: boundary_inputs,
+            outputs: boundary,
+        },
+    ];
+
+    let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        access_vm::prove_air_fns(tables, activations, PcsConfig::default())
+    }));
+    assert!(rejected.is_err());
+}
+
+#[test]
+fn test_generated_register_write_rejects_nonzero_x0() {
+    let mut tables = access_vm::Tables::default();
+    let mut state = AccessMachine::new();
+    let mut tracer = runner::Tracer {
+        clock: 10,
+        ..Default::default()
+    };
+    let requested = [felt(1), felt(0), felt(0), felt(0)];
+    access_vm::call_write_register_word(
+        &mut tables,
+        &mut state,
+        &mut tracer,
+        [
+            felt(10),
+            felt(0),
+            requested[0],
+            requested[1],
+            requested[2],
+            requested[3],
+        ],
+    );
+    tables.write_register_word.rd_next_0[0] = 1;
+    let boundary_inputs = [
+        felt(0),
+        felt(0),
+        felt(0),
+        felt(0),
+        felt(0),
+        felt(0),
+        felt(10),
+        requested[0],
+        requested[1],
+        requested[2],
+        requested[3],
+        felt(10),
+    ];
+    let boundary =
+        access_vm::call_close_access(&mut tables, &mut state, &mut tracer, boundary_inputs);
+    let activations = vec![
+        access_vm::Activation::WriteRegisterWord {
+            inputs: [
+                felt(10),
+                felt(0),
+                requested[0],
+                requested[1],
+                requested[2],
+                requested[3],
+            ],
+            outputs: requested,
+        },
+        access_vm::Activation::CloseAccess {
+            inputs: boundary_inputs,
+            outputs: boundary,
+        },
+    ];
+
+    let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        access_vm::prove_air_fns(tables, activations, PcsConfig::default())
+    }));
+    assert!(rejected.is_err());
+}

@@ -6,6 +6,7 @@ mod cpu;
 mod elf;
 mod execute;
 mod io;
+mod machine;
 mod memory;
 mod program;
 #[macro_use]
@@ -37,6 +38,7 @@ pub use cpu::Cpu;
 pub use elf::{ElfError, load_elf};
 pub use execute::execute;
 pub use instructions::{DecodedInst, InstCache, Opcode};
+pub use machine::MachineState;
 pub use memory::Memory;
 pub use trace::{Access, Tracer};
 

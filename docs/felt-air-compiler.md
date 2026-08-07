@@ -2,11 +2,12 @@
 
 > **Status: partially implemented compiler roadmap.** `define_air_fns!`
 > implements static control flow, functions, hints, degree-budget
-> materialization, relation statements, and embedded components. Poseidon2 and
-> every recursion-local AIR use it in production, while the other inner VM AIRs
-> use `define_air!`. Opcode execution still has separate runner handlers;
-> unifying executable semantics and AIR witness generation remains planned work.
-> Macro source and tests are authoritative for implemented syntax.
+> materialization, relation statements, embedded components, and proof-bound VM
+> register/aligned-memory access. Poseidon2 and every recursion-local AIR use it
+> in production, while the other inner VM AIRs use `define_air!`. Opcode
+> execution still has separate runner handlers; migrating those handlers into
+> felt functions is the remaining unification work. Macro source and tests are
+> authoritative for implemented syntax.
 
 ## The observation
 
@@ -126,12 +127,11 @@ materialization, static `for`/`map`/`sum`, inline functions and function I/O,
 hints, external relation statements, embedded flag columns, and embedded
 component integration. Poseidon2 and every recursion-local AIR use this path.
 
-The remaining compiler work is witness-side VM access plus opcode execution and
-runner migration. It is not a recursion-local macro migration. Every component
-reachable from the recursion roster is already authored directly through
-`define_air!` or `define_air_fns!`; the structural guard rejects a handwritten
-`FrameworkEval`, standalone `define_component_tables!`, or wrapper macro in an
-owner source.
+The remaining compiler work is opcode execution and runner migration. It is not
+a recursion-local macro migration. Every component reachable from the recursion
+roster is already authored directly through `define_air!` or `define_air_fns!`;
+the structural guard rejects a handwritten `FrameworkEval`, standalone
+`define_component_tables!`, or wrapper macro in an owner source.
 
 ## Migrating the opcode AIRs and runner
 
@@ -143,7 +143,7 @@ body compiled to constraints). `define_air!`'s
 macro, and the hand-written opcode handlers in `runner/src/ops/` all collapse
 into these function definitions.
 
-What `define_air_fns!` is missing for opcodes, in dependency order:
+Opcode compiler capabilities, in dependency order:
 
 1. **External relation statements.** ✅ _Implemented._ A system declares
    `relation name(arity);` at the top and function bodies use `emit name(args)`
@@ -179,36 +179,41 @@ What `define_air_fns!` is missing for opcodes, in dependency order:
    }
    ```
 
-   becomes a function whose parameters are the access tuple and whose body reads
-   naturally:
+   becomes a function whose body requests the architectural access directly:
 
    ```text
-   fn lui(clock, pc, rd: Reg, imm_0, imm_1, imm_2) {
-       range_check_8_8_4(imm_1, imm_2, imm_0);
+   fn lui(clock, pc, rd_addr, imm_0, imm_1, imm_2) {
+       consume range_check_8_8_4(imm_1, imm_2, imm_0);
        let imm = imm_0 + 2**4 * imm_1 + 2**12 * imm_2;
-       consume program_access(pc, LUI, rd.addr, imm, 0);
-       rd.write(clock, [0, imm_0 * 2**4, imm_1, imm_2]);
-       step registers_state(pc -> pc + 4, clock -> clock + 1);
+       consume program_access(
+           pc, constant(crate::instructions::Opcode::Lui as u32), rd_addr, imm, 0
+       );
+       write_reg rd(clock, rd_addr, [0, imm_0 * 2**4, imm_1, imm_2]);
+       consume registers_state(pc, clock);
+       emit registers_state(pc + 4, clock + 1);
+       return pc + 4;
    }
    ```
 
-   `Reg` is sugar for the 10-column access bundle (`addr`, `prev_0..3`,
-   `clock_prev`, …) plus the paired `memory_access` consume/emit and the
-   `range_check_20` clock-diff check — the pattern every opcode repeats today.
-   `step` is sugar for the `registers_state` consume/emit pair. Range checks are
-   statements, not lookups the author signs.
+   `write_reg rd(...)` generates the `rd_addr`, `rd_prev`, `rd_clock_prev`, and
+   `rd_next` bindings, the paired `memory_access` consume/emit entries, the
+   `range_check_20` clock-diff entry, and x0-safe write constraints. `read_reg`
+   additionally proves that a read cannot mutate the value. `read_mem` and
+   `write_mem` provide the same behavior for aligned words in address space 1.
+   Byte and half-word opcodes select and replace lanes in felt code before the
+   aligned-word write. State transitions and opcode-specific range checks stay
+   explicit relation statements.
 
-2. **Witness-side access resolution.** `rd.write(...)` on the fill path must ask
-   the VM for `prev`/`clock_prev` — i.e. call
-   `Tracer::trace_reg_access`/`trace_mem_access` (gap-filling included). The
-   generated `call_lui(vm, pc, imm…)` therefore takes the machine state, not raw
-   felts: the function body is the _only_ place opcode semantics are written,
-   and `runner/src/ops/upper.rs` (and friends) are deleted. The clock catch-up
-   rows become activations of a generated `clock_gap` function, which retires
-   the hand-written `air::clock::ClockGapTable` (its layout is pinned to the
-   generated columns by `crates/air/tests/clock_layout.rs` until then. A
-   push-by-`Access` API in `define_air!` would duplicate the witness-side access
-   resolution this step is intended to provide.
+2. **Witness-side access resolution.** ✅ _Implemented._ A `vm_access` block
+   supplies the architectural-state trait and tracer paths. Generated calls read
+   or update that state, invoke `Tracer::trace_reg_access` or
+   `Tracer::trace_mem_access`, bind the returned access cells, and push the same
+   function row into the configured tracer table in embedded mode. The tracer
+   performs gap filling and preserves `mem_initial`; the `clock_gap:` section of
+   `define_air!` generates the corresponding AIR component. `ClockGapTable` is
+   its columnar witness container, not a separately authored AIR component.
+   Adding a push-by-`Access` API to `define_air!` would duplicate this
+   resolution path and is intentionally not part of the design.
 
 3. **Witness hints.** ✅ _Implemented._ `hint name = expr;` declares a
    prover-chosen committed column, free in the AIR (the body constrains it with
@@ -218,17 +223,18 @@ What `define_air_fns!` is missing for opcodes, in dependency order:
    `crates/stwo-macros/tests/air_fns.rs`.
 
 4. **Dispatch.** Opcode families with flag columns (`base_alu_reg`'s
-   add/sub/xor/or/and) are one function with a one-hot flag parameter and
-   `if`-on-flag selects — already expressible with the static control flow. The
-   decode step stays in the runner (`air::instructions`); it just calls the
-   right generated function.
+   add/sub/xor/or/and) are one function with one-hot felt parameters. Arithmetic
+   selectors and relation multiplicities gate each variant; there is no dynamic
+   branch in the AIR language. The decode step stays in the runner
+   (`air::instructions`) and calls the generated family function with the
+   selected flag tuple.
 
-The capabilities (1) and (3) are in place, and the `mini_vm` test in
-`crates/stwo-macros/tests/air_fns.rs` exercises the whole target shape on a toy:
-opcodes as functions (`step`), the `(pc, clock)` state carried by an external
-`reg_state` relation that telescopes across rows, a `boundary` function closing
-the chain, and a `hint`-backed witness column — proven and verified, with a
-broken chain rejected.
+The capabilities (1), (2), and (3) are in place. Tests in
+`crates/stwo-macros/tests/air_fns.rs` prove generated register and memory
+accesses through external relation boundaries, reject stale clocks, incorrect
+prior values, read-side writes, and non-zero x0 writes, and exercise gap filling
+with the real tracer. The `mini_vm` tests separately cover function activation,
+state-relation telescoping, and hint-backed witness columns.
 
 The **integration seam is also in place**. `define_air!` now takes an
 `external:` section listing fn-DSL tables to fold into the `Tracer`:
@@ -244,9 +250,9 @@ by the standalone hash proof. Migrating an opcode is additive: define it via
 `define_air_fns!`, add it to `external:`, route its generated component to the
 appropriate constituent proof, and remove its prior table from the schema's
 `trace:` block. Each family remains guarded by real prove-and-verify tests. The
-remaining per-opcode work is the witness fill calling the runner's `Tracer`
-(`trace_reg_access`/`trace_mem_access`) for access values and the range checks
-resolving against the preprocessed tables.
+remaining per-opcode work is to express each handler as a felt function, route
+its generated embedded table into the component roster, and delete the duplicate
+schema and runner handler only after its focused proof tests pass.
 
 ### What this retires (the `components!` question)
 

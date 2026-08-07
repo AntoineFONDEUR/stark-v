@@ -19,6 +19,7 @@ pub mod relation_eval;
 
 #[macro_use]
 pub mod trace;
+pub mod vm;
 
 /// Maximum binary Merkle tree height for memory and proof commitments.
 ///

@@ -1960,9 +1960,12 @@ the recorded command without committing a machine-specific path.
 - Implementation commit `b0caea39` was pushed to
   `origin/chore/scratchpad-cleanups`. Release clippy passed with warnings
   denied, and repository plus commit hooks passed.
-- Remaining gate: run the one-segment, two-segment, and three-segment padded
-  root proofs sequentially under this final protocol identity, then close the
-  task with release clippy, repository hooks, and pushed evidence.
+- `/usr/bin/time -l cargo test --release -p recursion --features parallel --lib tree::tests::one_commit_recursion_leaf_is_the_complete_root -- --ignored --exact --nocapture --test-threads=1`:
+  the final-identity one-segment root passed in 549.17 seconds of test time and
+  549.35 seconds wall time with 19.355 GB maximum RSS and zero swaps.
+- Remaining gate: run the two-segment and three-segment padded root proofs
+  sequentially under this final protocol identity, then close the task with
+  release clippy, repository hooks, and pushed evidence.
 
 ## Project finish line
 

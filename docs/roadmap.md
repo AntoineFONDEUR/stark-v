@@ -833,8 +833,8 @@ Required work, in order:
 1. `[done]` Migrate `lui` end to end and delete its handwritten runner
    semantics.
 2. `[done]` Migrate `auipc`, `jal`, and `jalr`.
-3. Migrate `base_alu_imm`, `base_alu_reg`, `lt_imm`, `lt_reg`, `branch_eq`, and
-   `branch_lt`.
+3. `[in progress]` Migrate `base_alu_imm`, `base_alu_reg`, `lt_imm`, `lt_reg`,
+   `branch_eq`, and `branch_lt`.
 4. Migrate `shifts_imm`, `shifts_reg`, `mul`, and `mulh`.
 5. Migrate `load_store`.
 6. Migrate `div` last.
@@ -1531,6 +1531,8 @@ the recorded command without committing a machine-specific path.
   `jalr_output` passed with warnings denied.
 - `prek run --all-files`: both the external-directory guard and Trunk checks
   passed.
+- Implementation commit `ec4db511` was pushed to
+  `origin/chore/scratchpad-cleanups`.
 - Recursive-root proofs remain deferred until the final opcode roster: this
   slice changes VM component geometry but not the leaf, binary, padded-tree, or
   constant-size root boundary.

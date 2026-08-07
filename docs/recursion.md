@@ -87,18 +87,18 @@ proof. A real recursion proof can be encoded and verified as either binary
 child. Swapped, duplicated, gapped, overlapping, and job-mismatched child pairs
 are rejected at the unique fold boundary. The earlier integrated-Poseidon
 profile produced and verified roots for runs with 1, 2, 3, 4, and 8 executed
-segments. The active split-proof profile has revalidated real one-segment and
-binary roots; its padded and larger-tree reruns remain PRE-001 work.
+segments. The active split-proof profile has revalidated real one-segment,
+binary, and padded roots. These cover the leaf, exact binary, and non-power-of-
+two padding boundaries; larger exact powers repeat the binary reduction shape.
 
 `root::verify_recursive_root` accepts a segmentation-free
 `CompleteExecutionStatement` and exactly one `RecursionProof`. It requires the
 proof statement to be the canonical complete root, compares the expected
 protocol, program, initial and final machine states, public input, public
 output, and total cycles, then runs the manifest-bound recursion verifier. The
-active split-proof profile encodes and verifies actual segment-leaf and binary
-roots. Its fixed wire type and verifier-plan digest are independent of the
-executed segment count by construction; PRE-001 still requires real padded-root
-conformance before that profile is complete.
+active split-proof profile encodes and verifies actual segment-leaf, binary, and
+padded roots. Its fixed wire type and verifier-plan digest are independent of
+the executed segment count by construction.
 
 The live universal roster has 36 components. Every recursion-local component is
 authored directly through `define_air_fns!`; Poseidon2 uses the same macro, and

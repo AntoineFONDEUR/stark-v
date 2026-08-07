@@ -353,8 +353,10 @@ set.
   - Completed slice: the real active-profile binary root encoded to the frozen
     wire size, matched the frozen verifier plan, and passed the application
     verifier in 949.04 seconds with 34.62 GB peak RSS and zero swaps.
-  - Next slice: rerun current padded-root conformance before benchmarking the
-    split.
+  - Completed slice: the real active-profile padded three-segment root encoded
+    to the same frozen wire size, matched the same verifier plan, and passed in
+    2,095.59 seconds with 35.56 GB peak RSS and zero swaps.
+  - Next slice: benchmark the split and record its supported scheduling policy.
 - `[pending] SYS-001` Implement proof-bound syscalls and output journal.
 - `[pending] FELT-001` Complete witness-side felt-function VM access.
 - `[pending] FELT-002` Migrate opcode execution and retire duplicate semantics.
@@ -698,11 +700,11 @@ Required work, in order:
    proof shapes, and shared claimed sums.
 6. `[done]` Extend `continuation` and the recursive leaf branch to replay the
    joint draw, verify both proofs, and require exact sum cancellation.
-7. `[in progress]` Bind the changed artifact to a new protocol manifest and
-   rerun root conformance tests. The active profile plus real segment and binary
-   roots pass; the padded root remains.
-8. `[pending]` Measure the split against the integrated Poseidon2 component and
-   record the supported profile rather than assuming a performance win.
+7. `[done]` Bind the changed artifact to a new protocol manifest and rerun root
+   conformance tests. Real segment-leaf, binary, and padded roots pass through
+   the same fixed wire and verifier plan.
+8. `[in progress]` Measure the split against the integrated Poseidon2 component
+   and record the supported profile rather than assuming a performance win.
 
 Done when forged outputs, missing or extra tuples, and input/output re-pairing
 fail both host continuation and recursive leaf/root construction and the result
@@ -1233,8 +1235,13 @@ the recorded command without committing a machine-specific path.
   4,943-step verifier plan, and passed the application verifier. The test took
   949.04 seconds; the command took 1,002.32 seconds including compilation, with
   34.62 GB maximum RSS and zero swaps.
-- Current-profile padded-root conformance remains required before PRE-001 step 7
-  is complete.
+- `/usr/bin/time -l cargo test --release -p recursion --features parallel --lib tree::tests::cycle_segmented_guest_produces_the_expected_root::case_1_three -- --ignored --exact --nocapture --test-threads=1`:
+  the active-profile three-segment run padded to four leaves, encoded to the
+  same fixed wire, matched the same verifier plan, and passed the application
+  verifier in 2,095.59 seconds with 35.56 GB maximum RSS and zero swaps.
+- PRE-001 step 7 is complete. The one-, two-, and padded three-segment roots
+  cover every distinct tree construction without repeating the same binary shape
+  at larger exact powers.
 
 ## Project finish line
 

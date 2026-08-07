@@ -590,7 +590,7 @@ mod tests {
         );
     }
 
-    fn bridge_sum(swap_verifier: bool) -> QM31 {
+    fn bridge_sum(swap_verifier: bool, omit_first_consumer: bool) -> QM31 {
         let (vm, recursion) = plans();
         let poseidon2 = plan_for_schema(VerifierSchema::Poseidon2, 1);
         let preprocessing = RelationChallengePreprocessed::new(&vm, &recursion)
@@ -625,6 +625,7 @@ mod tests {
                 &execution,
                 &challenge_relations,
                 swap_verifier,
+                omit_first_consumer,
             )
     }
 
@@ -660,12 +661,14 @@ mod tests {
         execution: &VerifierTranscriptExecution<RecordingTranscriptBackend>,
         relations: &RelationChallengeRelations,
         swap_verifier: bool,
+        omit_first_consumer: bool,
     ) -> QM31 {
         preprocessing
             .rows
             .iter()
             .filter(|row| row.segment_mask == 1)
-            .fold(QM31::zero(), |sum, row| {
+            .enumerate()
+            .fold(QM31::zero(), |sum, (row_index, row)| {
                 let draw =
                     challenge_draw(execution, row).expect("fixture operation has a relation draw");
                 let verifier_id = if swap_verifier {
@@ -704,6 +707,12 @@ mod tests {
                             -denominator.inverse()
                         })
                     })
+                    .enumerate()
+                    // Dropping one consumer models a truncated challenge fan-out.
+                    .filter(|(term_index, _)| {
+                        !(omit_first_consumer && row_index == 0 && *term_index == 0)
+                    })
+                    .map(|(_, term)| term)
                     .fold(sum, |sum, term| sum + term)
             })
     }
@@ -724,11 +733,16 @@ mod tests {
 
     #[rstest]
     fn transcript_draws_close_into_all_segment_challenge_consumers() {
-        assert!(bridge_sum(false).is_zero());
+        assert!(bridge_sum(false, false).is_zero());
     }
 
     #[rstest]
     fn segment_challenges_cannot_move_to_a_recursion_lane() {
-        assert!(!bridge_sum(true).is_zero());
+        assert!(!bridge_sum(true, false).is_zero());
+    }
+
+    #[rstest]
+    fn omitted_relation_challenge_consumer_leaves_a_global_deficit() {
+        assert!(!bridge_sum(false, true).is_zero());
     }
 }

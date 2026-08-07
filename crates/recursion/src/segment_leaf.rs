@@ -1763,9 +1763,10 @@ pub(crate) mod tests {
         PublicClaim,
         TraceCommitment,
         ClaimedSum,
-        SampledValue,
+        OodsSampledValue,
         QueriedValue,
         TracePath,
+        ReusedTracePath,
         FriCommitment,
         FriValue,
         FriPath,
@@ -1774,7 +1775,7 @@ pub(crate) mod tests {
         PcsPow,
         Poseidon2TraceCommitment,
         Poseidon2ClaimedSum,
-        Poseidon2SampledValue,
+        Poseidon2OodsSampledValue,
         Poseidon2QueriedValue,
         Poseidon2TracePath,
         Poseidon2FriCommitment,
@@ -1790,9 +1791,10 @@ pub(crate) mod tests {
     #[case::public_claim(ProofRegionMutation::PublicClaim)]
     #[case::trace_commitment(ProofRegionMutation::TraceCommitment)]
     #[case::claimed_sum(ProofRegionMutation::ClaimedSum)]
-    #[case::sampled_value(ProofRegionMutation::SampledValue)]
+    #[case::oods_sampled_value(ProofRegionMutation::OodsSampledValue)]
     #[case::queried_value(ProofRegionMutation::QueriedValue)]
     #[case::trace_path(ProofRegionMutation::TracePath)]
+    #[case::reused_trace_path(ProofRegionMutation::ReusedTracePath)]
     #[case::fri_commitment(ProofRegionMutation::FriCommitment)]
     #[case::fri_value(ProofRegionMutation::FriValue)]
     #[case::fri_path(ProofRegionMutation::FriPath)]
@@ -1801,7 +1803,7 @@ pub(crate) mod tests {
     #[case::pcs_pow(ProofRegionMutation::PcsPow)]
     #[case::poseidon2_trace_commitment(ProofRegionMutation::Poseidon2TraceCommitment)]
     #[case::poseidon2_claimed_sum(ProofRegionMutation::Poseidon2ClaimedSum)]
-    #[case::poseidon2_sampled_value(ProofRegionMutation::Poseidon2SampledValue)]
+    #[case::poseidon2_oods_sampled_value(ProofRegionMutation::Poseidon2OodsSampledValue)]
     #[case::poseidon2_queried_value(ProofRegionMutation::Poseidon2QueriedValue)]
     #[case::poseidon2_trace_path(ProofRegionMutation::Poseidon2TracePath)]
     #[case::poseidon2_fri_commitment(ProofRegionMutation::Poseidon2FriCommitment)]
@@ -1839,7 +1841,7 @@ pub(crate) mod tests {
             ProofRegionMutation::ClaimedSum => {
                 leaf.proof.claimed_sums[0] = flipped_qm31(leaf.proof.claimed_sums[0]);
             }
-            ProofRegionMutation::SampledValue => {
+            ProofRegionMutation::OodsSampledValue => {
                 leaf.proof.sampled_values[0] = flipped_qm31(leaf.proof.sampled_values[0]);
             }
             ProofRegionMutation::QueriedValue => {
@@ -1847,6 +1849,10 @@ pub(crate) mod tests {
             }
             ProofRegionMutation::TracePath => {
                 leaf.proof.trace_paths[0] = flipped_path(leaf.proof.trace_paths[0]);
+            }
+            ProofRegionMutation::ReusedTracePath => {
+                // One authenticated path cannot serve a distinct raw query.
+                leaf.proof.trace_paths[1] = leaf.proof.trace_paths[0];
             }
             ProofRegionMutation::FriCommitment => {
                 let layer = leaf.proof.fri_layers[0].clone();
@@ -1891,7 +1897,7 @@ pub(crate) mod tests {
                 leaf.poseidon2_proof.claimed_sums[0] =
                     flipped_qm31(leaf.poseidon2_proof.claimed_sums[0]);
             }
-            ProofRegionMutation::Poseidon2SampledValue => {
+            ProofRegionMutation::Poseidon2OodsSampledValue => {
                 leaf.poseidon2_proof.sampled_values[0] =
                     flipped_qm31(leaf.poseidon2_proof.sampled_values[0]);
             }

@@ -1068,7 +1068,10 @@ mod tests {
         .expect("fixture quotient denominators are nonzero")
     }
 
-    fn differential_circuit(answer_delta: SecureField) -> PcsDeepCircuit {
+    fn differential_circuit(
+        answer_delta: SecureField,
+        oods_seed_delta: SecureField,
+    ) -> PcsDeepCircuit {
         let profile = profile();
         let sampled_values = [secure(101), secure(107), secure(109)];
         let queried_values = [11, 13, 17, 19, 23, 29].map(BaseField::from);
@@ -1090,7 +1093,10 @@ mod tests {
                 active: true,
                 sampled_values: &sampled_values,
                 queried_values: &queried_values,
-                oods_seed: oods_seed.to_m31_array().map(M31Word::from),
+                // Keep the answers fixed so this delta isolates the OODS binding.
+                oods_seed: (oods_seed + oods_seed_delta)
+                    .to_m31_array()
+                    .map(M31Word::from),
                 deep_randomness: randomness.to_m31_array().map(M31Word::from),
                 raw_queries: &raw_queries,
                 answers: &answers,
@@ -1120,7 +1126,7 @@ mod tests {
     #[rstest]
     fn circuit_matches_stwo_deep_answers_with_periodicity() {
         assert_eq!(
-            differential_circuit(SecureField::zero()).nonzero_output_count(),
+            differential_circuit(SecureField::zero(), SecureField::zero()).nonzero_output_count(),
             0
         );
     }
@@ -1128,8 +1134,16 @@ mod tests {
     #[rstest]
     fn changed_first_fri_answer_breaks_the_deep_equality() {
         assert_eq!(
-            differential_circuit(SecureField::one()).nonzero_output_count(),
+            differential_circuit(SecureField::one(), SecureField::zero()).nonzero_output_count(),
             1
+        );
+    }
+
+    #[rstest]
+    fn changed_oods_seed_breaks_the_deep_equality() {
+        assert!(
+            differential_circuit(SecureField::zero(), SecureField::one()).nonzero_output_count()
+                > 0
         );
     }
 

@@ -1293,6 +1293,14 @@ mod tests {
     }
 
     #[rstest]
+    fn changed_routed_position_breaks_the_circuit() {
+        let mut fixture = fixture();
+        // Keep the raw query fixed so only its routed FRI position is forged.
+        fixture.positions[1][0] = M31Word::ZERO;
+        assert!(fixture.circuit().nonzero_output_count() > 0);
+    }
+
+    #[rstest]
     fn changed_last_layer_coefficient_breaks_the_circuit() {
         let mut fixture = fixture();
         fixture.coefficients[0] += SecureField::one();

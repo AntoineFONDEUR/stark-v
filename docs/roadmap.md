@@ -931,18 +931,20 @@ Dependencies: `FELT-003`.
 
 Required work:
 
-1. Add adversarial tests for non-canonical wires, transcript reordering, omitted
-   relation challenges, wrong Merkle directions, reused paths, altered OODS
-   values, incorrect FRI positions, non-zero relation sums, invalid padding,
-   boundary discontinuities, precompile substitutions, journal forgeries, and
-   root-statement substitution.
-2. Run focused release tests, previous failures, the complete release workspace
-   suite, and all repository hooks without ignored soundness tests.
-3. Measure serialized root proof size, peak memory, leaf throughput, per-level
-   node proving time, and root verification time on each supported profile.
-4. Update current-state documentation from checked-in results and keep any
-   unfinished design explicitly labeled.
-5. Commit and push the release evidence.
+1. `[done]` Add adversarial tests for non-canonical wires, transcript
+   reordering, omitted relation challenges, wrong Merkle directions, reused
+   paths, altered OODS values, incorrect FRI positions, non-zero relation sums,
+   invalid padding, boundary discontinuities, precompile substitutions, journal
+   forgeries, and root-statement substitution.
+2. `[pending]` Run focused release tests, previous failures, the complete
+   release workspace suite, and all repository hooks without ignored soundness
+   tests.
+3. `[pending]` Measure serialized root proof size, peak memory, leaf throughput,
+   per-level node proving time, and root verification time on each supported
+   profile.
+4. `[pending]` Update current-state documentation from checked-in results and
+   keep any unfinished design explicitly labeled.
+5. `[pending]` Commit and push the release evidence.
 
 Done when one expected complete-execution statement and one constant-size root
 proof verify the final supported execution, all planned capabilities above are
@@ -1974,6 +1976,23 @@ the recorded command without committing a machine-specific path.
   passed, and `prek run --all-files` passed. Current-state documentation was
   checked against the final root profile; future compiler-cost and guest
   precompile work remains explicitly labeled as future scope.
+
+### `REL-001 adversarial matrix` — 2026-08-07
+
+- The existing suite already covered non-canonical wire limbs, transcript-step
+  reordering, wrong Merkle directions, non-zero global sums, non-canonical
+  padding, boundary discontinuities, Poseidon2 output re-pairing, journal-state
+  forgery, and every application root-statement field.
+- Focused regressions now also omit one relation-challenge consumer, reuse one
+  trace path for a distinct raw query, alter the transcript-derived OODS seed,
+  and forge a routed FRI position. The OODS proof-region cases are named
+  explicitly instead of describing those values only as sampled values.
+- `cargo nextest run --release -p recursion -p continuation -p prover --test-threads 4 -E 'test(decoder_rejects_a_non_canonical_commitment_limb) | test(reordered_hash_steps_are_rejected_before_air_materialization) | test(omitted_relation_challenge_consumer_leaves_a_global_deficit) | test(test_merkle_path_constraints_reject_child_from_wrong_branch) | test(reused_trace_path) | test(changed_oods_seed_breaks_the_deep_equality) | test(changed_routed_position_breaks_the_circuit) | test(lowering_rejects_a_nonzero_global_sum) | test(decoder_rejects_nonzero_empty_span_padding) | test(case_6_state_mismatch) | test(continuation_proving_rejects_re_paired_poseidon2_outputs) | test(commit_public_final_state_mutation_is_rejected) | test(every_changed_application_field_is_rejected)'`
+  selected exactly 19 tests and passed all 19 in 59.80 seconds. The same command
+  with `list` was run first to verify the selection.
+- `cargo clippy --release -p recursion --tests --no-deps -- -D warnings` and
+  `prek run --files crates/recursion/src/relation_challenge_air.rs crates/recursion/src/segment_leaf.rs crates/recursion/src/pcs_deep_circuit.rs crates/recursion/src/fri_verifier_circuit.rs`
+  passed.
 
 ## Project finish line
 

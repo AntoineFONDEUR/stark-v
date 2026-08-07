@@ -4,11 +4,11 @@
 > implements static control flow, functions, hints, degree-budget
 > materialization, relation statements, embedded components, and proof-bound VM
 > register/aligned-memory access. Poseidon2 and every recursion-local AIR use it
-> in production. LUI, AUIPC, JAL, JALR, and the base register/immediate ALU
+> in production. Upper-immediate, jump, base ALU, comparison, and branch
 > families have one felt-function source for execution, witness filling, and
-> AIR; the other inner VM opcode AIRs still use `define_air!` with separate
-> runner handlers. Macro source and tests are authoritative for implemented
-> syntax.
+> AIR; the remaining shift, memory, and RV32M opcode AIRs still use
+> `define_air!` with separate runner handlers. Macro source and tests are
+> authoritative for implemented syntax.
 
 ## The observation
 
@@ -127,8 +127,8 @@ lookups, and component integration from one declaration.
 materialization, static `for`/`map`/`sum`, inline functions and function I/O,
 hints, external relation statements, canonical M31 splitting, byte-level lookup
 operations, wrapping word arithmetic, embedded flag columns, and embedded
-component integration. Poseidon2, LUI, AUIPC, JAL, JALR, both base ALU families,
-and every recursion-local AIR use this path.
+component integration. Poseidon2, the ten migrated VM opcode families, and every
+recursion-local AIR use this path.
 
 The remaining compiler work is opcode execution and runner migration. It is not
 a recursion-local macro migration. Every component reachable from the recursion
@@ -207,7 +207,10 @@ Opcode compiler capabilities, in dependency order:
    constrain every chain bit, and range-check an active result. AUIPC and JAL
    use the split for their written word; JALR splits its canonical target and
    binds the cleared low bit through `bitand`; the base ALU families compose the
-   arithmetic and bitwise primitives under one-hot opcode flags.
+   arithmetic and bitwise primitives under one-hot opcode flags. Comparisons use
+   the terminal borrow from `sub_u32`; signed comparisons authenticate the
+   standard sign-bit ordering transform through `bitxor`. Equality branches
+   prove equality by checking that neither directional subtraction borrows.
 
 5. **Dispatch.** Opcode families with flag columns (`base_alu_reg`'s
    add/sub/xor/or/and) are one function with one-hot felt parameters. Arithmetic
@@ -231,8 +234,12 @@ external: {
     auipc: crate::opcodes::auipc,
     base_alu_imm: crate::opcodes::base_alu_imm,
     base_alu_reg: crate::opcodes::base_alu_reg,
+    branch_eq: crate::opcodes::branch_eq,
+    branch_lt: crate::opcodes::branch_lt,
     jal: crate::opcodes::jal,
     jalr: crate::opcodes::jalr,
+    lt_imm: crate::opcodes::lt_imm,
+    lt_reg: crate::opcodes::lt_reg,
     poseidon2: crate::poseidon2,
     lui: crate::opcodes::lui,
 }
@@ -240,7 +247,7 @@ external: {
 
 Each entry generates the `Tracer` field, initialization, `total_traces`, debug,
 and column re-export, so the monolithic `Tracer` is composable. The component
-router assigns Poseidon2 to the detached hash proof and all six generated opcode
+router assigns Poseidon2 to the detached hash proof and all ten generated opcode
 tables to the VM proof. Migrating another opcode means defining it via
 `define_air_fns!`, adding it to `external:`, routing its generated component,
 and removing its schema and runner semantics after focused valid and malformed
@@ -256,9 +263,10 @@ needs prover-side stwo types the air crate does not depend on. But
 composition for poseidon2. The retirement path is therefore not "merge
 `components!` into `define_air!`" but:
 
-1. `[done]` Migrate `lui`, `auipc`, `jal`, `jalr`, `base_alu_reg`, and
-   `base_alu_imm` end to end: the air crate owns their felt functions, the
-   prover uses their generated components, and the runner retains only decoding;
+1. `[done]` Migrate `lui`, `auipc`, `jal`, `jalr`, both base ALUs, both
+   comparisons, and both branch families end to end: the air crate owns their
+   felt functions, the prover uses their generated components, and the runner
+   retains only decoding;
 2. `[pending]` Migrate the remaining families in dependency order; the LogUp
    balance is checked by the existing component tests at every step;
 3. `[pending]` When the last family is out of `define_air!`'s opcode list,

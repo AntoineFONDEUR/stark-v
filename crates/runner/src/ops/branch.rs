@@ -1,212 +1,85 @@
-//! Branch operations.
-//!
-//! This file contains:
-//! - branch_eq family: beq, bne
-//! - branch_lt family: blt, bltu, bge, bgeu
+//! Branch decode adapters for felt-generated execution.
 
-use super::utils::{compute_lt_reg_witness, imm_to_felt, m31_inverse};
+use air::opcodes::branch_eq::branch_eq_fill;
+use air::opcodes::branch_lt::branch_lt_fill;
+use stwo::core::fields::m31::BaseField;
+
+use super::utils::imm_to_felt;
 use crate::trace::Tracer;
-use crate::{Cpu, DecodedInst};
+use crate::{Cpu, DecodedInst, MachineState, Memory};
 
-// =============================================================================
-// Branch Equal (beq/bne)
-// =============================================================================
-
-/// Compute witness columns for branch_eq family
-fn compute_branch_eq_witness(rs1_val: u32, rs2_val: u32) -> BranchEqWitness {
-    let rs1_bytes = rs1_val.to_le_bytes();
-    let rs2_bytes = rs2_val.to_le_bytes();
-
-    // diff_inv_marker[i] = (rs1[i] - rs2[i])^-1 if rs1[i] != rs2[i], else 0
-    let mut diff_inv_marker = [0u32; 4];
-    for i in 0..4 {
-        if rs1_bytes[i] != rs2_bytes[i] {
-            // Compute the difference in M31 (handling potential wrap-around)
-            let diff = if rs1_bytes[i] > rs2_bytes[i] {
-                (rs1_bytes[i] - rs2_bytes[i]) as u32
-            } else {
-                // rs2_bytes[i] > rs1_bytes[i], so diff is negative
-                // In M31: P - (rs2_bytes[i] - rs1_bytes[i])
-                super::utils::M31_P - (rs2_bytes[i] - rs1_bytes[i]) as u32
-            };
-            diff_inv_marker[i] = m31_inverse(diff);
-            break; // Only need the first difference
-        }
-    }
-
-    BranchEqWitness { diff_inv_marker }
-}
-
-struct BranchEqWitness {
-    diff_inv_marker: [u32; 4],
-}
-
-pub fn beq(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
-    let rs1 = cpu.read_reg(inst.rs1, tracer);
-    let rs2 = cpu.read_reg(inst.rs2, tracer);
-    let cmp_result = if rs1.next == rs2.next { 1 } else { 0 };
-
-    let old_pc = cpu.pc;
-    if rs1.next == rs2.next {
-        cpu.pc = cpu.pc.wrapping_add(inst.imm as u32);
-    } else {
-        cpu.advance_pc();
-    }
-
-    let w = compute_branch_eq_witness(rs1.next, rs2.next);
-    let imm_felt = imm_to_felt(inst.imm);
-
-    // opcode flags: beq=1, bne=0
-    trace_op!(branch_eq: tracer, old_pc, rs1, rs2,
-        imm_felt, cmp_result,
-        w.diff_inv_marker[0], w.diff_inv_marker[1], w.diff_inv_marker[2], w.diff_inv_marker[3],
-        1, 0
-    );
-}
-
-pub fn bne(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
-    let rs1 = cpu.read_reg(inst.rs1, tracer);
-    let rs2 = cpu.read_reg(inst.rs2, tracer);
-    let cmp_result = if rs1.next != rs2.next { 1 } else { 0 };
-
-    let old_pc = cpu.pc;
-    if rs1.next != rs2.next {
-        cpu.pc = cpu.pc.wrapping_add(inst.imm as u32);
-    } else {
-        cpu.advance_pc();
-    }
-
-    let w = compute_branch_eq_witness(rs1.next, rs2.next);
-    let imm_felt = imm_to_felt(inst.imm);
-
-    // opcode flags: beq=0, bne=1
-    trace_op!(branch_eq: tracer, old_pc, rs1, rs2,
-        imm_felt, cmp_result,
-        w.diff_inv_marker[0], w.diff_inv_marker[1], w.diff_inv_marker[2], w.diff_inv_marker[3],
-        0, 1
-    );
-}
-
-// =============================================================================
-// Branch Less Than (blt/bltu/bge/bgeu)
-// =============================================================================
-
-pub fn blt(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
-    let rs1 = cpu.read_reg(inst.rs1, tracer);
-    let rs2 = cpu.read_reg(inst.rs2, tracer);
-    let cmp_lt = if (rs1.next as i32) < (rs2.next as i32) {
-        1
-    } else {
-        0
+fn execute_branch_eq(
+    cpu: &mut Cpu,
+    memory: &mut Memory,
+    inst: &DecodedInst,
+    tracer: &mut Tracer,
+    flags: [u32; 2],
+) {
+    // Decoding selects equality polarity; generated execution owns the branch.
+    let args = [
+        tracer.clock,
+        cpu.pc,
+        u32::from(inst.rs1),
+        u32::from(inst.rs2),
+        imm_to_felt(inst.imm),
+        flags[0],
+        flags[1],
+    ]
+    .map(BaseField::from_u32_unchecked);
+    let [next_pc] = {
+        let mut state = MachineState::new(cpu, memory);
+        branch_eq_fill(&mut state, tracer, args, [])
     };
-    let cmp_result = cmp_lt; // For blt, branch if less than
-
-    let old_pc = cpu.pc;
-    if cmp_result == 1 {
-        cpu.pc = cpu.pc.wrapping_add(inst.imm as u32);
-    } else {
-        cpu.advance_pc();
-    }
-
-    let branch_target = cpu.pc;
-    let w = compute_lt_reg_witness(rs1.next, rs2.next, true);
-    let imm_felt = imm_to_felt(inst.imm);
-
-    // opcode flags: blt=1, bltu=0, bge=0, bgeu=0
-    trace_op!(branch_lt: tracer, old_pc, rs1, rs2,
-        w.rs1_msl_felt, w.rs2_msl_felt,
-        imm_felt, cmp_result, cmp_lt,
-        w.diff_marker[0], w.diff_marker[1], w.diff_marker[2], w.diff_marker[3],
-        w.diff_val, branch_target,
-        1, 0, 0, 0
-    );
+    cpu.pc = next_pc.0;
 }
 
-pub fn bltu(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
-    let rs1 = cpu.read_reg(inst.rs1, tracer);
-    let rs2 = cpu.read_reg(inst.rs2, tracer);
-    let cmp_lt = if rs1.next < rs2.next { 1 } else { 0 };
-    let cmp_result = cmp_lt; // For bltu, branch if less than
-
-    let old_pc = cpu.pc;
-    if cmp_result == 1 {
-        cpu.pc = cpu.pc.wrapping_add(inst.imm as u32);
-    } else {
-        cpu.advance_pc();
-    }
-
-    let branch_target = cpu.pc;
-    let w = compute_lt_reg_witness(rs1.next, rs2.next, false);
-    let imm_felt = imm_to_felt(inst.imm);
-
-    // opcode flags: blt=0, bltu=1, bge=0, bgeu=0
-    trace_op!(branch_lt: tracer, old_pc, rs1, rs2,
-        w.rs1_msl_felt, w.rs2_msl_felt,
-        imm_felt, cmp_result, cmp_lt,
-        w.diff_marker[0], w.diff_marker[1], w.diff_marker[2], w.diff_marker[3],
-        w.diff_val, branch_target,
-        0, 1, 0, 0
-    );
+pub fn beq(cpu: &mut Cpu, memory: &mut Memory, inst: &DecodedInst, tracer: &mut Tracer) {
+    execute_branch_eq(cpu, memory, inst, tracer, [1, 0]);
 }
 
-pub fn bge(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
-    let rs1 = cpu.read_reg(inst.rs1, tracer);
-    let rs2 = cpu.read_reg(inst.rs2, tracer);
-    let cmp_lt = if (rs1.next as i32) < (rs2.next as i32) {
-        1
-    } else {
-        0
+pub fn bne(cpu: &mut Cpu, memory: &mut Memory, inst: &DecodedInst, tracer: &mut Tracer) {
+    execute_branch_eq(cpu, memory, inst, tracer, [0, 1]);
+}
+
+fn execute_branch_lt(
+    cpu: &mut Cpu,
+    memory: &mut Memory,
+    inst: &DecodedInst,
+    tracer: &mut Tracer,
+    flags: [u32; 4],
+) {
+    // Decoding selects signedness and polarity; generated execution owns the branch.
+    let args = [
+        tracer.clock,
+        cpu.pc,
+        u32::from(inst.rs1),
+        u32::from(inst.rs2),
+        imm_to_felt(inst.imm),
+        flags[0],
+        flags[1],
+        flags[2],
+        flags[3],
+    ]
+    .map(BaseField::from_u32_unchecked);
+    let [next_pc] = {
+        let mut state = MachineState::new(cpu, memory);
+        branch_lt_fill(&mut state, tracer, args, [])
     };
-    let cmp_result = if (rs1.next as i32) >= (rs2.next as i32) {
-        1
-    } else {
-        0
-    };
-
-    let old_pc = cpu.pc;
-    if cmp_result == 1 {
-        cpu.pc = cpu.pc.wrapping_add(inst.imm as u32);
-    } else {
-        cpu.advance_pc();
-    }
-
-    let branch_target = cpu.pc;
-    let w = compute_lt_reg_witness(rs1.next, rs2.next, true);
-    let imm_felt = imm_to_felt(inst.imm);
-
-    // opcode flags: blt=0, bltu=0, bge=1, bgeu=0
-    trace_op!(branch_lt: tracer, old_pc, rs1, rs2,
-        w.rs1_msl_felt, w.rs2_msl_felt,
-        imm_felt, cmp_result, cmp_lt,
-        w.diff_marker[0], w.diff_marker[1], w.diff_marker[2], w.diff_marker[3],
-        w.diff_val, branch_target,
-        0, 0, 1, 0
-    );
+    cpu.pc = next_pc.0;
 }
 
-pub fn bgeu(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
-    let rs1 = cpu.read_reg(inst.rs1, tracer);
-    let rs2 = cpu.read_reg(inst.rs2, tracer);
-    let cmp_lt = if rs1.next < rs2.next { 1 } else { 0 };
-    let cmp_result = if rs1.next >= rs2.next { 1 } else { 0 };
+pub fn blt(cpu: &mut Cpu, memory: &mut Memory, inst: &DecodedInst, tracer: &mut Tracer) {
+    execute_branch_lt(cpu, memory, inst, tracer, [1, 0, 0, 0]);
+}
 
-    let old_pc = cpu.pc;
-    if cmp_result == 1 {
-        cpu.pc = cpu.pc.wrapping_add(inst.imm as u32);
-    } else {
-        cpu.advance_pc();
-    }
+pub fn bltu(cpu: &mut Cpu, memory: &mut Memory, inst: &DecodedInst, tracer: &mut Tracer) {
+    execute_branch_lt(cpu, memory, inst, tracer, [0, 1, 0, 0]);
+}
 
-    let branch_target = cpu.pc;
-    let w = compute_lt_reg_witness(rs1.next, rs2.next, false);
-    let imm_felt = imm_to_felt(inst.imm);
+pub fn bge(cpu: &mut Cpu, memory: &mut Memory, inst: &DecodedInst, tracer: &mut Tracer) {
+    execute_branch_lt(cpu, memory, inst, tracer, [0, 0, 1, 0]);
+}
 
-    // opcode flags: blt=0, bltu=0, bge=0, bgeu=1
-    trace_op!(branch_lt: tracer, old_pc, rs1, rs2,
-        w.rs1_msl_felt, w.rs2_msl_felt,
-        imm_felt, cmp_result, cmp_lt,
-        w.diff_marker[0], w.diff_marker[1], w.diff_marker[2], w.diff_marker[3],
-        w.diff_val, branch_target,
-        0, 0, 0, 1
-    );
+pub fn bgeu(cpu: &mut Cpu, memory: &mut Memory, inst: &DecodedInst, tracer: &mut Tracer) {
+    execute_branch_lt(cpu, memory, inst, tracer, [0, 0, 0, 1]);
 }

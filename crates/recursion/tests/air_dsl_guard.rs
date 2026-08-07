@@ -197,11 +197,11 @@ const VM_INVENTORY: [ComponentOwner; 27] = [
     },
     ComponentOwner {
         name: "branch_eq",
-        source: "crates/air/src/schema.rs",
+        source: "crates/air/src/opcodes/branch_eq.rs",
     },
     ComponentOwner {
         name: "branch_lt",
-        source: "crates/air/src/schema.rs",
+        source: "crates/air/src/opcodes/branch_lt.rs",
     },
     ComponentOwner {
         name: "commit",
@@ -225,11 +225,11 @@ const VM_INVENTORY: [ComponentOwner; 27] = [
     },
     ComponentOwner {
         name: "lt_imm",
-        source: "crates/air/src/schema.rs",
+        source: "crates/air/src/opcodes/lt_imm.rs",
     },
     ComponentOwner {
         name: "lt_reg",
-        source: "crates/air/src/schema.rs",
+        source: "crates/air/src/opcodes/lt_reg.rs",
     },
     ComponentOwner {
         name: "lui",
@@ -293,7 +293,7 @@ const VM_INVENTORY: [ComponentOwner; 27] = [
     },
 ];
 
-const OWNER_POLICIES: [OwnerPolicy; 38] = [
+const OWNER_POLICIES: [OwnerPolicy; 42] = [
     OwnerPolicy {
         source: "crates/air/src/opcodes/auipc.rs",
         accepted_macro_count: 1,
@@ -307,11 +307,27 @@ const OWNER_POLICIES: [OwnerPolicy; 38] = [
         accepted_macro_count: 1,
     },
     OwnerPolicy {
+        source: "crates/air/src/opcodes/branch_eq.rs",
+        accepted_macro_count: 1,
+    },
+    OwnerPolicy {
+        source: "crates/air/src/opcodes/branch_lt.rs",
+        accepted_macro_count: 1,
+    },
+    OwnerPolicy {
         source: "crates/air/src/opcodes/jal.rs",
         accepted_macro_count: 1,
     },
     OwnerPolicy {
         source: "crates/air/src/opcodes/jalr.rs",
+        accepted_macro_count: 1,
+    },
+    OwnerPolicy {
+        source: "crates/air/src/opcodes/lt_imm.rs",
+        accepted_macro_count: 1,
+    },
+    OwnerPolicy {
+        source: "crates/air/src/opcodes/lt_reg.rs",
         accepted_macro_count: 1,
     },
     OwnerPolicy {
@@ -513,10 +529,26 @@ fn vm_component_router_uses_only_the_expected_dsl_routes() {
                     "base_alu_reg".to_owned(),
                     "air::opcodes::base_alu_reg::component".to_owned(),
                 ),
+                (
+                    "branch_eq".to_owned(),
+                    "air::opcodes::branch_eq::component".to_owned(),
+                ),
+                (
+                    "branch_lt".to_owned(),
+                    "air::opcodes::branch_lt::component".to_owned(),
+                ),
                 ("jal".to_owned(), "air::opcodes::jal::component".to_owned(),),
                 (
                     "jalr".to_owned(),
                     "air::opcodes::jalr::component".to_owned(),
+                ),
+                (
+                    "lt_imm".to_owned(),
+                    "air::opcodes::lt_imm::component".to_owned(),
+                ),
+                (
+                    "lt_reg".to_owned(),
+                    "air::opcodes::lt_reg::component".to_owned(),
                 ),
                 ("lui".to_owned(), "air::opcodes::lui::component".to_owned()),
             ],

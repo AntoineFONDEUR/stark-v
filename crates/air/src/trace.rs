@@ -73,13 +73,6 @@ mod tests {
         }
 
         #[test]
-        fn test_branch_eq_columns_size() {
-            // branch_eq: clock (1), pc (1), rs1 (10), rs2 (10),
-            // + imm_felt (1), cmp_result (1) + diff_inv_marker_0..3 (4) + 2 opcode flags = 30 total (no enabler - has flags)
-            assert_eq!(BranchEqColumns::<()>::SIZE, 30);
-        }
-
-        #[test]
         fn test_jal_columns_size() {
             // The generated layout includes the link split, register access,
             // and materialized next-PC return in addition to the inputs.

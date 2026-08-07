@@ -15,8 +15,8 @@ pub fn execute(
         Opcode::Add => alu::add(cpu, mem, inst, tracer),
         Opcode::Sub => alu::sub(cpu, mem, inst, tracer),
         Opcode::Sll => alu::sll(cpu, inst, tracer),
-        Opcode::Slt => alu::slt(cpu, inst, tracer),
-        Opcode::Sltu => alu::sltu(cpu, inst, tracer),
+        Opcode::Slt => alu::slt(cpu, mem, inst, tracer),
+        Opcode::Sltu => alu::sltu(cpu, mem, inst, tracer),
         Opcode::Xor => alu::xor(cpu, mem, inst, tracer),
         Opcode::Srl => alu::srl(cpu, inst, tracer),
         Opcode::Sra => alu::sra(cpu, inst, tracer),
@@ -25,8 +25,8 @@ pub fn execute(
 
         // I-type ALU
         Opcode::Addi => alu_imm::addi(cpu, mem, inst, tracer),
-        Opcode::Slti => alu_imm::slti(cpu, inst, tracer),
-        Opcode::Sltiu => alu_imm::sltiu(cpu, inst, tracer),
+        Opcode::Slti => alu_imm::slti(cpu, mem, inst, tracer),
+        Opcode::Sltiu => alu_imm::sltiu(cpu, mem, inst, tracer),
         Opcode::Xori => alu_imm::xori(cpu, mem, inst, tracer),
         Opcode::Ori => alu_imm::ori(cpu, mem, inst, tracer),
         Opcode::Andi => alu_imm::andi(cpu, mem, inst, tracer),
@@ -47,12 +47,12 @@ pub fn execute(
         Opcode::Sw => store::sw(cpu, mem, inst, tracer),
 
         // Branches
-        Opcode::Beq => branch::beq(cpu, inst, tracer),
-        Opcode::Bne => branch::bne(cpu, inst, tracer),
-        Opcode::Blt => branch::blt(cpu, inst, tracer),
-        Opcode::Bge => branch::bge(cpu, inst, tracer),
-        Opcode::Bltu => branch::bltu(cpu, inst, tracer),
-        Opcode::Bgeu => branch::bgeu(cpu, inst, tracer),
+        Opcode::Beq => branch::beq(cpu, mem, inst, tracer),
+        Opcode::Bne => branch::bne(cpu, mem, inst, tracer),
+        Opcode::Blt => branch::blt(cpu, mem, inst, tracer),
+        Opcode::Bge => branch::bge(cpu, mem, inst, tracer),
+        Opcode::Bltu => branch::bltu(cpu, mem, inst, tracer),
+        Opcode::Bgeu => branch::bgeu(cpu, mem, inst, tracer),
 
         // Jumps
         Opcode::Jal => jump::jal(cpu, mem, inst, tracer),
@@ -147,5 +147,105 @@ mod tests {
         execute(&mut cpu, &mut memory, &inst, &mut tracer).expect("execution must succeed");
 
         assert_eq!(cpu.reg(3), expected);
+    }
+
+    #[rstest::rstest]
+    #[case(Opcode::Slt, u32::MAX, 1, 1)]
+    #[case(Opcode::Slt, i32::MAX as u32, i32::MIN as u32, 0)]
+    #[case(Opcode::Sltu, u32::MAX, 1, 0)]
+    #[case(Opcode::Sltu, 1, u32::MAX, 1)]
+    fn generated_register_comparison_honors_signed_and_unsigned_order(
+        #[case] opcode: Opcode,
+        #[case] lhs: u32,
+        #[case] rhs: u32,
+        #[case] expected: u32,
+    ) {
+        let mut cpu = Cpu::new(0x1000, 0, 0);
+        cpu.set_reg(1, lhs);
+        cpu.set_reg(2, rhs);
+        let mut memory = Memory::new();
+        let inst = DecodedInst {
+            opcode,
+            rd: 3,
+            rs1: 1,
+            rs2: 2,
+            imm: 0,
+        };
+        let mut tracer = Tracer {
+            clock: 1,
+            ..Default::default()
+        };
+
+        execute(&mut cpu, &mut memory, &inst, &mut tracer).expect("execution must succeed");
+
+        assert_eq!(cpu.reg(3), expected);
+    }
+
+    #[rstest::rstest]
+    #[case(Opcode::Slti, i32::MIN as u32, -2048, 1)]
+    #[case(Opcode::Slti, u32::MAX, -1, 0)]
+    #[case(Opcode::Sltiu, 0, -1, 1)]
+    #[case(Opcode::Sltiu, u32::MAX, -2048, 0)]
+    fn generated_immediate_comparison_honors_sign_extension_and_order(
+        #[case] opcode: Opcode,
+        #[case] lhs: u32,
+        #[case] immediate: i32,
+        #[case] expected: u32,
+    ) {
+        let mut cpu = Cpu::new(0x1000, 0, 0);
+        cpu.set_reg(1, lhs);
+        let mut memory = Memory::new();
+        let inst = DecodedInst {
+            opcode,
+            rd: 3,
+            rs1: 1,
+            rs2: 0,
+            imm: immediate,
+        };
+        let mut tracer = Tracer {
+            clock: 1,
+            ..Default::default()
+        };
+
+        execute(&mut cpu, &mut memory, &inst, &mut tracer).expect("execution must succeed");
+
+        assert_eq!(cpu.reg(3), expected);
+    }
+
+    #[rstest::rstest]
+    #[case(Opcode::Beq, 7, 7, 8, 0x1008)]
+    #[case(Opcode::Beq, 7, 8, 8, 0x1004)]
+    #[case(Opcode::Bne, 7, 8, 8, 0x1008)]
+    #[case(Opcode::Bne, 7, 7, 8, 0x1004)]
+    #[case(Opcode::Blt, u32::MAX, 1, -8, 0x0ff8)]
+    #[case(Opcode::Bltu, u32::MAX, 1, 8, 0x1004)]
+    #[case(Opcode::Bge, 1, u32::MAX, 8, 0x1008)]
+    #[case(Opcode::Bgeu, u32::MAX, 1, 8, 0x1008)]
+    fn generated_branch_selects_the_authenticated_next_pc(
+        #[case] opcode: Opcode,
+        #[case] lhs: u32,
+        #[case] rhs: u32,
+        #[case] immediate: i32,
+        #[case] expected_pc: u32,
+    ) {
+        let mut cpu = Cpu::new(0x1000, 0, 0);
+        cpu.set_reg(1, lhs);
+        cpu.set_reg(2, rhs);
+        let mut memory = Memory::new();
+        let inst = DecodedInst {
+            opcode,
+            rd: 0,
+            rs1: 1,
+            rs2: 2,
+            imm: immediate,
+        };
+        let mut tracer = Tracer {
+            clock: 1,
+            ..Default::default()
+        };
+
+        execute(&mut cpu, &mut memory, &inst, &mut tracer).expect("execution must succeed");
+
+        assert_eq!(cpu.pc, expected_pc);
     }
 }

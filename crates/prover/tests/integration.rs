@@ -197,6 +197,78 @@ fn base_alu_imm_single_chunk_proves_and_verifies() {
     assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
 }
 
+/// One register-comparison chunk closes every generated component relation.
+#[test_log::test]
+fn lt_reg_single_chunk_proves_and_verifies() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("lt_reg_output");
+    let elf = std::fs::read(&elf_path).expect("read register-comparison ELF");
+    let run_result = run(&elf, 10_000).expect("execute one register-comparison chunk");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
+}
+
+/// One immediate-comparison chunk closes every generated component relation.
+#[test_log::test]
+fn lt_imm_single_chunk_proves_and_verifies() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("lt_imm_output");
+    let elf = std::fs::read(&elf_path).expect("read immediate-comparison ELF");
+    let run_result = run(&elf, 10_000).expect("execute one immediate-comparison chunk");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
+}
+
+/// One equality-branch chunk closes every generated component relation.
+#[test_log::test]
+fn branch_eq_single_chunk_proves_and_verifies() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("branch_eq_output");
+    let elf = std::fs::read(&elf_path).expect("read equality-branch ELF");
+    let run_result = run(&elf, 10_000).expect("execute one equality-branch chunk");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
+}
+
+/// One ordered-branch chunk closes every generated component relation.
+#[test_log::test]
+fn branch_lt_single_chunk_proves_and_verifies() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("branch_lt_output");
+    let elf = std::fs::read(&elf_path).expect("read ordered-branch ELF");
+    let run_result = run(&elf, 10_000).expect("execute one ordered-branch chunk");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
+}
+
 /// A felt-defined LUI row closes its program, state, register, and range relations.
 #[test_log::test]
 fn lui_standard_relations_prove_and_verify() {

@@ -415,17 +415,17 @@ set.
     mode; detailed evidence is recorded below.
 - `[in progress] FELT-002` Migrate opcode execution and retire duplicate
   semantics.
-  - LUI, AUIPC, JAL, JALR, and both base ALU families now derive execution,
-    witness rows, AIR, interactions, and VM component routes from direct
-    `define_air_fns!` definitions; their runner modules retain decode adapters
-    only.
+  - LUI, AUIPC, JAL, JALR, both base ALUs, both comparisons, and both branch
+    families now derive execution, witness rows, AIR, interactions, and VM
+    component routes from direct `define_air_fns!` definitions; their runner
+    modules retain decode adapters only.
   - The existing felt DSL now provides proof-bound canonical M31 splitting and
     byte-level AND/OR/XOR intrinsics plus wrapping `u32` add/subtract with a
     constrained carry/borrow chain. JALR constrains both its M31 source address
     and the low-bit clearing lookup.
-  - The active checkpoint has 1,512 VM tables, 1,620 sampled values, and 597 VM
+  - The active checkpoint has 1,556 VM tables, 1,664 sampled values, and 629 VM
     AIR instructions. Its protocol identifier is
-    `[1696431044, 1504695671, 1975523688, 1955391245, 877564173, 18316442, 885929987, 784128183]`.
+    `[1812854606, 380357156, 1799778124, 326217952, 1577751674, 998653010, 10229157, 1305708380]`.
   - Fast boundary, component, and malformed-relation tests precede one
     sequential single-chunk VM proof per migrated family; root E2Es remain
     deferred until the final VM roster.
@@ -836,14 +836,14 @@ Required work, in order:
    semantics.
 2. `[done]` Migrate `auipc`, `jal`, and `jalr`.
 3. `[done]` Migrate `base_alu_imm` and `base_alu_reg`.
-4. `[in progress]` Migrate `lt_imm`, `lt_reg`, `branch_eq`, and `branch_lt`.
-5. Migrate `shifts_imm`, `shifts_reg`, `mul`, and `mulh`.
+4. `[done]` Migrate `lt_imm`, `lt_reg`, `branch_eq`, and `branch_lt`.
+5. `[in progress]` Migrate `shifts_imm`, `shifts_reg`, `mul`, and `mulh`.
 6. Migrate `load_store`.
 7. Migrate `div` last.
 8. `[in progress]` Preserve one real guest prove/verify test plus focused
    malformed-witness coverage for every family before deleting its old schema
-   and handler. LUI, AUIPC, JAL, JALR, and both base ALU families have both
-   gates.
+   and handler. LUI, AUIPC, JAL, JALR, both base ALUs, both comparisons, and
+   both branch families have both gates.
 9. Delete the obsolete opcode `define_air!` trace block, `components!` support,
    and `runner/src/ops` only after the last family moves.
 10. Re-derive the VM AIR program and recursion manifest from the final roster
@@ -1602,6 +1602,56 @@ the recorded command without committing a machine-specific path.
   1,139.85 seconds and 35.17 GB with outer-only Rayon.
 - Implementation commit `16888749` was pushed to
   `origin/chore/scratchpad-cleanups`.
+
+### `FELT-002 comparison and branch checkpoint` — 2026-08-07
+
+- `crates/air/src/opcodes/{lt_reg,lt_imm,branch_eq,branch_lt}.rs` are the sole
+  sources for comparison and branch state transitions, witness rows,
+  constraints, relations, and component evaluators. Their runner functions now
+  decode only the one-hot opcode tuple and immediate representation before
+  calling the generated fill. The four obsolete `define_air!` blocks, manual
+  first-difference witnesses, equality inverse markers, and their stale tests
+  are gone.
+- The migration composes existing DSL primitives and adds no macro surface.
+  `sub_u32(lhs, rhs)` authenticates unsigned less-than through its terminal
+  borrow. Signed comparisons use the standard sign-bit order transform by
+  proving `msb XOR 0x80` through the existing bitwise relation. Equality is
+  equivalent to neither directional subtraction borrowing.
+- `/usr/bin/time -l cargo nextest run --release -p runner -j 16` with exact
+  filters for the new comparison and branch boundary cases: all 16 signed,
+  unsigned, sign-extension, polarity, and negative-displacement cases passed
+  concurrently in 0.017 seconds. Release compilation dominated the 44.91-second
+  command and used 1.49 GB maximum RSS with zero swaps.
+- `/usr/bin/time -l cargo nextest run --release -p prover -j 14` with exact
+  filters for the ten opcode component fixtures and four malformed-witness
+  checks: all 14 passed concurrently in 0.816 seconds. Corrupted subtraction
+  results violated component constraints; corrupted signed-order transforms left
+  non-zero relation sums. Release linking dominated the 73.81-second command and
+  used 1.47 GB maximum RSS with zero swaps.
+- `/usr/bin/time -l cargo nextest run --release -p prover -j 1` with exact
+  filters for the four single-chunk tests: the register comparison, immediate
+  comparison, equality branch, and ordered branch guests proved and verified
+  sequentially in 27.10 seconds, with 2.05 GB maximum RSS and zero swaps.
+- `cargo test --release -p air --lib -- --test-threads=12`: all 46 AIR tests
+  passed in 0.04 seconds after removing the stale manual branch-column test.
+- `/usr/bin/time -l cargo test --release -p recursion profile::tests:: -- --nocapture --test-threads=7`:
+  all seven generated-geometry, digest, registry, and fixed-root-wire checks
+  passed in 0.95 seconds after release linking. The active checkpoint has 1,556
+  VM tables, 1,664 sampled values, 629 AIR instructions, protocol identifier
+  `[1812854606, 380357156, 1799778124, 326217952, 1577751674, 998653010, 10229157, 1305708380]`,
+  and VM AIR digest
+  `[1150624488, 1921625284, 1150277924, 591183324, 1430805914, 109481434, 173677670, 1962108186]`.
+- `cargo test --release -p recursion --test air_dsl_guard -- --nocapture --test-threads=1`:
+  all five roster, owner, direct-DSL, and generated-component route guards
+  passed after moving the four exact owners and routes out of the manual schema.
+- Guest-bin release clippy passed with warnings denied for `lt_reg_output`,
+  `lt_imm_output`, `branch_eq_output`, and `branch_lt_output`.
+- `cargo clippy --release -p air -p runner -p prover -p recursion --all-targets --no-deps -- -D warnings`
+  passed for every affected host target.
+- `prek run --all-files`: the external-directory guard and Trunk checks passed.
+- Recursive-root proofs remain deferred until the final opcode roster: this
+  slice changes the VM component geometry and protocol identity, but no root
+  construction boundary.
 
 ## Project finish line
 

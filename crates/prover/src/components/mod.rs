@@ -8,15 +8,15 @@ stwo_macros::components! {
         auipc: air::opcodes::auipc::component,
         base_alu_imm: air::opcodes::base_alu_imm::component,
         base_alu_reg: air::opcodes::base_alu_reg::component,
-        branch_eq,
-        branch_lt,
+        branch_eq: air::opcodes::branch_eq::component,
+        branch_lt: air::opcodes::branch_lt::component,
         commit,
         div,
         jal: air::opcodes::jal::component,
         jalr: air::opcodes::jalr::component,
         load_store,
-        lt_imm,
-        lt_reg,
+        lt_imm: air::opcodes::lt_imm::component,
+        lt_reg: air::opcodes::lt_reg::component,
         lui: air::opcodes::lui::component,
         mul,
         mulh,
@@ -215,6 +215,58 @@ mod tests {
     fn mutated_generated_xori_result_leaves_a_relation_deficit() {
         let mut tracer = crate::e2e::run_test_bin("xori");
         tracer.base_alu_imm.xor_0[0] ^= 1;
+        let traces = super::gen_trace(tracer);
+        let (_, claimed_sum) =
+            super::gen_interaction_trace(&traces, &crate::relations::Relations::dummy());
+
+        assert!(!claimed_sum.sum().is_zero());
+    }
+
+    #[test]
+    fn mutated_generated_slt_difference_fails_component_constraints() {
+        let mut tracer = crate::e2e::run_test_bin("slt");
+        tracer.lt_reg.difference_0[0] ^= 1;
+        let traces = super::gen_trace(tracer);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::Components::assert_constraints_on_polys(
+                &traces,
+                &crate::relations::Relations::dummy(),
+            );
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mutated_generated_slti_sign_flip_leaves_a_relation_deficit() {
+        let mut tracer = crate::e2e::run_test_bin("slti");
+        tracer.lt_imm.rs1_flipped[0] ^= 1;
+        let traces = super::gen_trace(tracer);
+        let (_, claimed_sum) =
+            super::gen_interaction_trace(&traces, &crate::relations::Relations::dummy());
+
+        assert!(!claimed_sum.sum().is_zero());
+    }
+
+    #[test]
+    fn mutated_generated_beq_difference_fails_component_constraints() {
+        let mut tracer = crate::e2e::run_test_bin("beq");
+        tracer.branch_eq.forward_difference_0[0] ^= 1;
+        let traces = super::gen_trace(tracer);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::Components::assert_constraints_on_polys(
+                &traces,
+                &crate::relations::Relations::dummy(),
+            );
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mutated_generated_blt_sign_flip_leaves_a_relation_deficit() {
+        let mut tracer = crate::e2e::run_test_bin("blt");
+        tracer.branch_lt.rs1_flipped[0] ^= 1;
         let traces = super::gen_trace(tracer);
         let (_, claimed_sum) =
             super::gen_interaction_trace(&traces, &crate::relations::Relations::dummy());

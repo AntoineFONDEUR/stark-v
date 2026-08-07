@@ -6,9 +6,10 @@
 //! - lt_imm family: slti, sltiu
 
 use air::opcodes::base_alu_imm::base_alu_imm_fill;
+use air::opcodes::lt_imm::lt_imm_fill;
 use stwo::core::fields::m31::BaseField;
 
-use super::utils::{compute_lt_imm_witness, compute_shift_witness};
+use super::utils::compute_shift_witness;
 use crate::trace::Tracer;
 use crate::{Cpu, DecodedInst, MachineState, Memory};
 
@@ -153,42 +154,38 @@ pub fn srai(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
 // Less Than Imm (slti/sltiu)
 // =============================================================================
 
-pub fn slti(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
-    let old_pc = cpu.pc;
-    let rs1 = cpu.read_reg(inst.rs1, tracer);
-    let cmp_result = if (rs1.next as i32) < inst.imm { 1 } else { 0 };
-    let rd = cpu.write_reg(inst.rd, cmp_result, tracer);
-    cpu.advance_pc();
-
+fn execute_lt_imm(
+    cpu: &mut Cpu,
+    memory: &mut Memory,
+    inst: &DecodedInst,
+    tracer: &mut Tracer,
+    flags: [u32; 2],
+) {
+    // Decoding selects signedness; generated execution owns comparison semantics.
     let (imm_0, imm_1, imm_msb) = decode_imm_limbs(inst.imm);
-    let w = compute_lt_imm_witness(rs1.next, inst.imm, true);
-
-    // opcode flags: slti=1, sltiu=0
-    trace_op!(lt_imm: tracer, old_pc, rd, rs1,
-        cmp_result, w.rs1_msl_felt,
-        imm_0, imm_1, imm_msb,
-        1, 0,  // opcode flags
-        w.diff_marker[0], w.diff_marker[1], w.diff_marker[2], w.diff_marker[3],
-        w.diff_val
-    );
+    let args = [
+        tracer.clock,
+        cpu.pc,
+        u32::from(inst.rd),
+        u32::from(inst.rs1),
+        imm_0,
+        imm_1,
+        imm_msb,
+        flags[0],
+        flags[1],
+    ]
+    .map(BaseField::from_u32_unchecked);
+    let [next_pc] = {
+        let mut state = MachineState::new(cpu, memory);
+        lt_imm_fill(&mut state, tracer, args, [])
+    };
+    cpu.pc = next_pc.0;
 }
 
-pub fn sltiu(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
-    let old_pc = cpu.pc;
-    let rs1 = cpu.read_reg(inst.rs1, tracer);
-    let cmp_result = if rs1.next < (inst.imm as u32) { 1 } else { 0 };
-    let rd = cpu.write_reg(inst.rd, cmp_result, tracer);
-    cpu.advance_pc();
+pub fn slti(cpu: &mut Cpu, memory: &mut Memory, inst: &DecodedInst, tracer: &mut Tracer) {
+    execute_lt_imm(cpu, memory, inst, tracer, [1, 0]);
+}
 
-    let (imm_0, imm_1, imm_msb) = decode_imm_limbs(inst.imm);
-    let w = compute_lt_imm_witness(rs1.next, inst.imm, false);
-
-    // opcode flags: slti=0, sltiu=1
-    trace_op!(lt_imm: tracer, old_pc, rd, rs1,
-        cmp_result, w.rs1_msl_felt,
-        imm_0, imm_1, imm_msb,
-        0, 1,  // opcode flags
-        w.diff_marker[0], w.diff_marker[1], w.diff_marker[2], w.diff_marker[3],
-        w.diff_val
-    );
+pub fn sltiu(cpu: &mut Cpu, memory: &mut Memory, inst: &DecodedInst, tracer: &mut Tracer) {
+    execute_lt_imm(cpu, memory, inst, tracer, [0, 1]);
 }

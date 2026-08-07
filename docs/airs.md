@@ -8,18 +8,18 @@
 
 The active definition is split across these source files:
 
-- `crates/air/src/schema.rs` declares VM relations, preprocessed lookups, the
-  remaining trace tables, and external felt-generated tables through
+- `crates/air/src/schema.rs` declares VM relations, preprocessed lookups, COMMIT
+  and support tables, and every external felt-generated table through
   `define_air!`.
-- `crates/air/src/opcodes/` declares the migrated upper-immediate, jump, base
-  ALU, comparison, and branch families through `define_air_fns!`; each file owns
-  execution, witness generation, constraints, and relations.
+- `crates/air/src/opcodes/` declares every ordinary RV32IM opcode family through
+  `define_air_fns!`; each file owns execution, witness generation, constraints,
+  and relations.
 - `crates/air/src/poseidon2.rs` declares Poseidon2 through `define_air_fns!`.
 - `crates/prover/src/components/mod.rs` fixes the VM constituent roster and
   routes generated opcode components into the VM proof and Poseidon2 into its
   detached proof.
-- `crates/runner/src/ops/` holds decode adapters for migrated functions and
-  executes the remaining shift, memory, and RV32M handlers.
+- `crates/runner/src/ops/` holds decode adapters that call generated felt
+  functions; it contains no second opcode-semantics implementation.
 - `crates/prover/src/public_data.rs` defines verifier-owned boundary terms.
 
 When prose and generated source disagree, the generated source is authoritative.

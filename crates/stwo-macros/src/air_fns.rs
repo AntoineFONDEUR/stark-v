@@ -34,6 +34,10 @@
 //! `split_m31(value)` commits the canonical four-byte representation of a felt
 //! and binds it through the standard range relations. `bitand`, `bitor`, and
 //! `bitxor` commit one byte result and bind it through the bitwise relation.
+//! `binary_u32(lhs, rhs, active, add, sub, and, or, xor)` commits one shared
+//! word result and binds the selected arithmetic or bitwise operation in the
+//! same frame. Its selectors are boolean and sum to the explicit activity
+//! value.
 //! `add_u32` and `sub_u32` commit wrapping word results plus their terminal
 //! carry or borrow and constrain the byte chain in the same frame.
 //! `divrem_u32` commits quotient, remainder, and exceptional-case witnesses;
@@ -885,6 +889,13 @@ enum FillStep {
         output: [Ident; 4],
         carries: [Ident; 4],
     },
+    /// Evaluate one selected binary word operation into a shared result.
+    SelectedBinaryWord {
+        lhs: [Ident; 4],
+        rhs: [Ident; 4],
+        selectors: [Ident; 5],
+        output: [Ident; 4],
+    },
     /// Evaluate RV32 signed or unsigned quotient and remainder witnesses.
     DivRemWord {
         lhs: [Ident; 4],
@@ -956,6 +967,8 @@ struct Lowerer<'a> {
     constraints: Vec<Expr>,
     /// Ungated constraints from `constrain` (added without the enabler gate).
     raw_constraints: Vec<Expr>,
+    /// Selector cells whose booleanity is owned by an intrinsic.
+    intrinsic_boolean_cells: std::collections::HashSet<String>,
     fill: Vec<FillStep>,
     /// Activations made: (callee, flattened arg cells, flattened ret cells).
     calls: Vec<(Ident, Vec<Ident>, Vec<Ident>)>,
@@ -1356,6 +1369,202 @@ impl Lowerer<'_> {
                         limbs: limbs.clone(),
                     });
                     let elements = limbs
+                        .into_iter()
+                        .map(|cell| Value::Scalar { cell, degree: 1 })
+                        .collect();
+                    return Ok(vec![Value::Array(elements)]);
+                }
+                "binary_u32" => {
+                    if names.len() != 1 || call.args.len() != 8 {
+                        return Err(syn::Error::new_spanned(
+                            call,
+                            "binary_u32 takes two four-limb words, an activity value, then add, sub, and, or, and xor selectors",
+                        ));
+                    }
+                    for (relation, arity) in [("range_check_8_8", 2usize), ("bitwise", 4usize)] {
+                        if self.relation_arities.get(relation) != Some(&arity) {
+                            return Err(syn::Error::new_spanned(
+                                call,
+                                format!("binary_u32 requires `relation {relation}({arity});`"),
+                            ));
+                        }
+                    }
+                    let lhs = expect_word(&call.args[0], scope)?;
+                    let rhs = expect_word(&call.args[1], scope)?;
+                    let active_name = expect_ident(&call.args[2])?;
+                    let Some(active_value) = scope.get(&active_name.to_string()) else {
+                        return Err(syn::Error::new_spanned(
+                            &call.args[2],
+                            "unknown binary_u32 activity value",
+                        ));
+                    };
+                    let (active, active_degree) = active_value.scalar()?;
+                    if active_degree > 1 {
+                        return Err(syn::Error::new_spanned(
+                            &call.args[2],
+                            "binary_u32 activity must be a degree-one scalar",
+                        ));
+                    }
+                    if *active != "enabler" {
+                        let enabler = format_ident!("enabler");
+                        self.raw_constraints
+                            .push(syn::parse_quote!(#active - #enabler));
+                    }
+                    if self.intrinsic_boolean_cells.insert(active.to_string()) {
+                        self.raw_constraints
+                            .push(syn::parse_quote!(#active * (1 - #active)));
+                    }
+                    let mut selected_flags = std::collections::HashSet::new();
+                    let selectors = call
+                        .args
+                        .iter()
+                        .skip(3)
+                        .enumerate()
+                        .map(|(position, selector)| {
+                            if matches!(const_eval(selector), Ok(0)) {
+                                return Ok(self.register_derived(
+                                    &format_ident!("{}_selector_{}", names[0], position),
+                                    syn::parse_quote!(0),
+                                    0,
+                                ));
+                            }
+                            let ident = expect_ident(selector)?;
+                            let name = ident.to_string();
+                            if !selected_flags.insert(name.clone()) {
+                                return Err(syn::Error::new_spanned(
+                                    selector,
+                                    "binary_u32 cannot reuse a selector",
+                                ));
+                            }
+                            let Some(value) = scope.get(&name) else {
+                                return Err(syn::Error::new_spanned(
+                                    selector,
+                                    "unknown binary_u32 selector",
+                                ));
+                            };
+                            let (cell, degree) = value.scalar()?;
+                            if degree > 1 {
+                                return Err(syn::Error::new_spanned(
+                                    selector,
+                                    "binary_u32 selectors must be degree-one scalars or zero",
+                                ));
+                            }
+                            if self.intrinsic_boolean_cells.insert(cell.to_string()) {
+                                self.raw_constraints
+                                    .push(syn::parse_quote!(#cell * (1 - #cell)));
+                            }
+                            Ok(cell.clone())
+                        })
+                        .collect::<syn::Result<Vec<_>>>()?;
+                    let selectors: [Ident; 5] =
+                        selectors.try_into().expect("binary_u32 has five selectors");
+                    let [
+                        add_selector,
+                        sub_selector,
+                        and_selector,
+                        or_selector,
+                        xor_selector,
+                    ] = &selectors;
+                    self.raw_constraints.push(syn::parse_quote!(
+                        #add_selector
+                            + #sub_selector
+                            + #and_selector
+                            + #or_selector
+                            + #xor_selector
+                            - #active
+                    ));
+                    let output = std::array::from_fn(|position| {
+                        let base = format_ident!("{}_{}", names[0], position);
+                        let cell = self.register_column(&base);
+                        self.extra_columns.push(cell.clone());
+                        cell
+                    });
+                    self.fill.push(FillStep::SelectedBinaryWord {
+                        lhs: lhs.clone(),
+                        rhs: rhs.clone(),
+                        selectors: selectors.clone(),
+                        output: output.clone(),
+                    });
+
+                    let inverse_256 =
+                        crate::trace_tables::m31_pow(256, crate::trace_tables::M31_PRIME - 2)
+                            as u32;
+                    let mut add_carry: Option<Ident> = None;
+                    let mut sub_borrow: Option<Ident> = None;
+                    for position in 0..4 {
+                        let lhs_limb = &lhs[position];
+                        let rhs_limb = &rhs[position];
+                        let output_limb = &output[position];
+                        let add_in: Expr = add_carry.as_ref().map_or_else(
+                            || syn::parse_quote!(0),
+                            |prior| syn::parse_quote!(#prior),
+                        );
+                        let carry = self.register_derived(
+                            &format_ident!("{}_add_carry_{}", names[0], position),
+                            syn::parse_quote!(
+                                (#lhs_limb + #rhs_limb + #add_in - #output_limb) * #inverse_256
+                            ),
+                            1,
+                        );
+                        self.raw_constraints.push(syn::parse_quote!(
+                            #add_selector * #carry * (1 - #carry)
+                        ));
+                        add_carry = Some(carry);
+
+                        let sub_in: Expr = sub_borrow.as_ref().map_or_else(
+                            || syn::parse_quote!(0),
+                            |prior| syn::parse_quote!(#prior),
+                        );
+                        let borrow = self.register_derived(
+                            &format_ident!("{}_sub_borrow_{}", names[0], position),
+                            syn::parse_quote!(
+                                (#output_limb + #rhs_limb - #lhs_limb + #sub_in) * #inverse_256
+                            ),
+                            1,
+                        );
+                        self.raw_constraints.push(syn::parse_quote!(
+                            #sub_selector * #borrow * (1 - #borrow)
+                        ));
+                        sub_borrow = Some(borrow);
+                    }
+
+                    let range_relation = format_ident!("range_check_8_8");
+                    self.relation_entries.push((
+                        range_relation.clone(),
+                        vec![output[0].clone(), output[1].clone()],
+                        false,
+                        None,
+                    ));
+                    self.relation_entries.push((
+                        range_relation,
+                        vec![output[2].clone(), output[3].clone()],
+                        false,
+                        None,
+                    ));
+                    let bitwise_active = self.register_derived(
+                        &format_ident!("{}_bitwise_active", names[0]),
+                        syn::parse_quote!(#and_selector + #or_selector + #xor_selector),
+                        1,
+                    );
+                    let bitwise_id = self.register_derived(
+                        &format_ident!("{}_bitwise_id", names[0]),
+                        syn::parse_quote!(#or_selector + 2 * #xor_selector),
+                        1,
+                    );
+                    for position in 0..4 {
+                        self.relation_entries.push((
+                            format_ident!("bitwise"),
+                            vec![
+                                lhs[position].clone(),
+                                rhs[position].clone(),
+                                output[position].clone(),
+                                bitwise_id.clone(),
+                            ],
+                            false,
+                            Some(bitwise_active.clone()),
+                        ));
+                    }
+                    let elements = output
                         .into_iter()
                         .map(|cell| Value::Scalar { cell, degree: 1 })
                         .collect();
@@ -2489,6 +2698,8 @@ struct LoweredFn {
     constraints: Vec<Expr>,
     /// Ungated `constrain` constraints (no enabler gate).
     raw_constraints: Vec<Expr>,
+    /// Cells already constrained boolean by a lowering intrinsic.
+    intrinsic_boolean_cells: std::collections::HashSet<String>,
     /// Activations made: (callee, arg cells, ret cells).
     calls: Vec<(Ident, Vec<Ident>, Vec<Ident>)>,
     /// External relation contributions: (relation, arg cells, emit, mult cell).
@@ -2523,6 +2734,7 @@ fn lower_fn(
         derived: Vec::new(),
         constraints: Vec::new(),
         raw_constraints: Vec::new(),
+        intrinsic_boolean_cells: std::collections::HashSet::new(),
         fill: Vec::new(),
         calls: Vec::new(),
         relation_entries: Vec::new(),
@@ -2627,6 +2839,7 @@ fn lower_fn(
         derived: lowerer.derived,
         constraints: lowerer.constraints,
         raw_constraints: lowerer.raw_constraints,
+        intrinsic_boolean_cells: lowerer.intrinsic_boolean_cells,
         calls: lowerer.calls,
         relation_entries: lowerer.relation_entries,
         fill: lowerer.fill,
@@ -2696,6 +2909,7 @@ fn air_expr(
     expr: &Expr,
     columns: &std::collections::HashSet<String>,
     cells: &HashMap<String, usize>,
+    enabler: &TokenStream2,
 ) -> syn::Result<TokenStream2> {
     if let Ok(value) = const_eval(expr) {
         let value = value as u32;
@@ -2706,7 +2920,9 @@ fn air_expr(
     match expr {
         Expr::Path(path) => {
             let ident = path.path.require_ident()?;
-            if columns.contains(&ident.to_string()) {
+            if ident == "enabler" {
+                Ok(enabler.clone())
+            } else if columns.contains(&ident.to_string()) {
                 Ok(quote!(self.#ident.clone()))
             } else {
                 let index = cells.get(&ident.to_string()).ok_or_else(|| {
@@ -2728,17 +2944,17 @@ fn air_expr(
             Err(syn::Error::new_spanned(call, "unsupported call"))
         }
         Expr::Binary(binary) => {
-            let left = air_expr(&binary.left, columns, cells)?;
-            let right = air_expr(&binary.right, columns, cells)?;
+            let left = air_expr(&binary.left, columns, cells, enabler)?;
+            let right = air_expr(&binary.right, columns, cells, enabler)?;
             let op = &binary.op;
             Ok(quote!((#left #op #right)))
         }
         Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Neg(_)) => {
-            let inner = air_expr(&unary.expr, columns, cells)?;
+            let inner = air_expr(&unary.expr, columns, cells, enabler)?;
             Ok(quote!((-#inner)))
         }
-        Expr::Paren(paren) => air_expr(&paren.expr, columns, cells),
-        Expr::Group(group) => air_expr(&group.expr, columns, cells),
+        Expr::Paren(paren) => air_expr(&paren.expr, columns, cells, enabler),
+        Expr::Group(group) => air_expr(&group.expr, columns, cells, enabler),
         other => Err(syn::Error::new_spanned(other, "unsupported expression")),
     }
 }
@@ -2767,7 +2983,7 @@ fn generate_evaluation_impl(function: &LoweredFn) -> syn::Result<TokenStream2> {
     let mut cell_indices: HashMap<String, usize> = HashMap::new();
     let mut cell_pushes: Vec<TokenStream2> = Vec::new();
     for (cell, expr) in &function.derived {
-        let value = air_expr(expr, &columns, &cell_indices)?;
+        let value = air_expr(expr, &columns, &cell_indices, &enabler)?;
         cell_indices.insert(cell.to_string(), cell_pushes.len());
         cell_pushes.push(quote! { cells.push(#value); });
     }
@@ -2803,15 +3019,21 @@ fn generate_evaluation_impl(function: &LoweredFn) -> syn::Result<TokenStream2> {
     let one = quote! {
         T::from(stwo::core::fields::m31::BaseField::from_u32_unchecked(1u32))
     };
-    let mut constraint_exprs = vec![quote! {
-        #enabler * (#one - #enabler)
-    }];
+    let mut constraint_exprs = Vec::new();
+    if !function.intrinsic_boolean_cells.contains("enabler") {
+        constraint_exprs.push(quote! {
+            #enabler * (#one - #enabler)
+        });
+    }
     // Per-flag booleanity (structural, ungated) for flag tables — together
     // with the enabler() = flag-sum booleanity this makes the flags one-hot,
     // matching the schema's column-generated constraints.
     for field in &function.table.fields {
         let name = field.to_string();
-        if name.starts_with("opcode_") && name.ends_with("_flag") {
+        if name.starts_with("opcode_")
+            && name.ends_with("_flag")
+            && !function.intrinsic_boolean_cells.contains(&name)
+        {
             constraint_exprs.push(quote! {
                 self.#field.clone() * (#one - self.#field.clone())
             });
@@ -2821,14 +3043,14 @@ fn generate_evaluation_impl(function: &LoweredFn) -> syn::Result<TokenStream2> {
         // Enabler-gated: padding rows are all-zero, which constant terms in
         // the cell chains would otherwise violate. Cell budgets are
         // max_degree - 1, so the gate stays within the bound.
-        let expr = air_expr(constraint, &columns, &cell_indices)?;
+        let expr = air_expr(constraint, &columns, &cell_indices, &enabler)?;
         constraint_exprs.push(quote! {
             #enabler * (#expr)
         });
     }
     for constraint in &function.raw_constraints {
         // Ungated `constrain`: vanishes on padding by its own structure.
-        let expr = air_expr(constraint, &columns, &cell_indices)?;
+        let expr = air_expr(constraint, &columns, &cell_indices, &enabler)?;
         constraint_exprs.push(expr);
     }
     let constraint_pushes: Vec<TokenStream2> = constraint_exprs
@@ -2860,12 +3082,12 @@ fn generate_evaluation_impl(function: &LoweredFn) -> syn::Result<TokenStream2> {
     // -enabler, one tuple per activation made with +enabler.
     let own_values = function.table.fields[..function.n_args]
         .iter()
-        .map(|cell| air_expr(&syn::parse_quote!(#cell), &columns, &cell_indices))
+        .map(|cell| air_expr(&syn::parse_quote!(#cell), &columns, &cell_indices, &enabler))
         .chain(
             function
                 .ret_cells
                 .iter()
-                .map(|cell| air_expr(&syn::parse_quote!(#cell), &columns, &cell_indices)),
+                .map(|cell| air_expr(&syn::parse_quote!(#cell), &columns, &cell_indices, &enabler)),
         )
         .collect::<syn::Result<Vec<_>>>()?;
     let mut entry_exprs = vec![quote! {
@@ -2878,7 +3100,7 @@ fn generate_evaluation_impl(function: &LoweredFn) -> syn::Result<TokenStream2> {
         let values = args
             .iter()
             .chain(rets.iter())
-            .map(|cell| air_expr(&syn::parse_quote!(#cell), &columns, &cell_indices))
+            .map(|cell| air_expr(&syn::parse_quote!(#cell), &columns, &cell_indices, &enabler))
             .collect::<syn::Result<Vec<_>>>()?;
         entry_exprs.push(quote! {
             (
@@ -2893,10 +3115,10 @@ fn generate_evaluation_impl(function: &LoweredFn) -> syn::Result<TokenStream2> {
     for (_, cells, emit, mult_cell) in &function.relation_entries {
         let values = cells
             .iter()
-            .map(|cell| air_expr(&syn::parse_quote!(#cell), &columns, &cell_indices))
+            .map(|cell| air_expr(&syn::parse_quote!(#cell), &columns, &cell_indices, &enabler))
             .collect::<syn::Result<Vec<_>>>()?;
         let mult = match mult_cell {
-            Some(cell) => air_expr(&syn::parse_quote!(#cell), &columns, &cell_indices)?,
+            Some(cell) => air_expr(&syn::parse_quote!(#cell), &columns, &cell_indices, &enabler)?,
             None => enabler.clone(),
         };
         let numerator = if *emit {
@@ -4499,6 +4721,33 @@ fn generate_intrinsic_fill_step(step: &FillStep) -> syn::Result<TokenStream2> {
                 #(#steps)*
             })
         }
+        FillStep::SelectedBinaryWord {
+            lhs,
+            rhs,
+            selectors,
+            output,
+        } => {
+            let [add, sub, and, or, xor] = selectors;
+            Ok(quote! {
+                let __binary_lhs = u32::from_le_bytes([#(
+                    u8::try_from(#lhs.0).expect("word limb must fit in u8")
+                ),*]);
+                let __binary_rhs = u32::from_le_bytes([#(
+                    u8::try_from(#rhs.0).expect("word limb must fit in u8")
+                ),*]);
+                let __binary_result = match [#add.0, #sub.0, #and.0, #or.0, #xor.0] {
+                    [1, 0, 0, 0, 0] => __binary_lhs.wrapping_add(__binary_rhs),
+                    [0, 1, 0, 0, 0] => __binary_lhs.wrapping_sub(__binary_rhs),
+                    [0, 0, 1, 0, 0] => __binary_lhs & __binary_rhs,
+                    [0, 0, 0, 1, 0] => __binary_lhs | __binary_rhs,
+                    [0, 0, 0, 0, 1] => __binary_lhs ^ __binary_rhs,
+                    _ => panic!("binary_u32 requires one selected operation"),
+                };
+                let [#(#output),*] = __binary_result.to_le_bytes().map(|limb| {
+                    #base_field::from_u32_unchecked(u32::from(limb))
+                });
+            })
+        }
         FillStep::DivRemWord {
             lhs,
             rhs,
@@ -4612,6 +4861,7 @@ fn generate_embedded_fill(
             FillStep::SplitM31 { .. }
             | FillStep::Bitwise { .. }
             | FillStep::WordArithmetic { .. }
+            | FillStep::SelectedBinaryWord { .. }
             | FillStep::DivRemWord { .. } => {
                 steps.push(generate_intrinsic_fill_step(step)?);
             }
@@ -4709,6 +4959,7 @@ fn generate_call_fn(
             FillStep::SplitM31 { .. }
             | FillStep::Bitwise { .. }
             | FillStep::WordArithmetic { .. }
+            | FillStep::SelectedBinaryWord { .. }
             | FillStep::DivRemWord { .. } => {
                 steps.push(generate_intrinsic_fill_step(step)?);
             }

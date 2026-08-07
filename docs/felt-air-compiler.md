@@ -1,13 +1,11 @@
-# A felt language that compiles to AIR (design)
+# A felt language that compiles to AIR
 
-> **Status: partially implemented compiler roadmap.** `define_air_fns!`
-> implements static control flow, functions, hints, degree-budget
-> materialization, relation statements, embedded components, and proof-bound VM
-> register/aligned-memory access. Poseidon2 and every recursion-local AIR use it
-> in production. Upper-immediate, jump, base ALU, comparison, and branch
-> families have one felt-function source for execution, witness filling, and
-> AIR; the remaining shift, memory, and RV32M opcode AIRs still use
-> `define_air!` with separate runner handlers. Macro source and tests are
+> **Status: current compiler architecture.** `define_air_fns!` implements static
+> control flow, functions, hints, degree-budget materialization, relation
+> statements, embedded components, proof-bound VM access, and word intrinsics.
+> Every ordinary RV32IM opcode family and Poseidon2 use it for execution,
+> witness filling, and AIR generation. `define_air!` owns the common schema,
+> lookup tables, COMMIT, and support tables. Macro source and tests are
 > authoritative for implemented syntax.
 
 ## The observation
@@ -119,32 +117,31 @@ line.
 
 ## Relation to the current DSL
 
-`define_air!` provides the table-schema path used by most of the inner VM
-roster. It generates the column layout, witness evaluation, constraints,
-lookups, and component integration from one declaration.
+`define_air!` provides the table-schema path for common relations, preprocessed
+lookups, COMMIT, and VM support tables. It generates column layouts, witness
+evaluation, constraints, lookups, and component integration from one
+declaration.
 
 `define_air_fns!` provides the felt-function path: degree-budget
 materialization, static `for`/`map`/`sum`, inline functions and function I/O,
 hints, external relation statements, canonical M31 splitting, byte-level lookup
-operations, wrapping word arithmetic, embedded flag columns, and embedded
-component integration. Poseidon2, the ten migrated VM opcode families, and every
-recursion-local AIR use this path.
+operations, wrapping and selected word arithmetic, embedded flag columns, and
+embedded component integration. Poseidon2 and every ordinary RV32IM opcode
+family use this path.
 
-The remaining compiler work is opcode execution and runner migration. It is not
-a recursion-local macro migration. Every component reachable from the recursion
-roster is already authored directly through `define_air!` or `define_air_fns!`;
+Opcode and runner migration is complete. Every component reachable from either
+proof roster is authored directly through `define_air!` or `define_air_fns!`;
 the structural guard rejects a handwritten `FrameworkEval`, standalone
-`define_component_tables!`, or wrapper macro in an owner source.
+`define_component_tables!`, or wrapper macro in an owner source. Remaining
+compiler work concerns reusable language features and measured cost, not a
+second component-authoring path.
 
-## Migrating the opcode AIRs and runner
+## Opcode AIR and runner path
 
-Target state: one function per opcode family, whose body **is** simultaneously
-the executable semantics (the runner calls the generated fill and gets the right
-result), the witness fill (the call pushes the table row), and the AIR (the same
-body compiled to constraints). `define_air!`'s
-`committed/derived/constraints/lookups` schema, the `components!` composition
-macro, and the hand-written opcode handlers in `runner/src/ops/` all collapse
-into these function definitions.
+Each ordinary opcode family has one function whose body **is** simultaneously
+the executable semantics, witness fill, and AIR. The runner decodes an
+instruction, supplies the selected family flags, and calls the generated fill;
+it does not duplicate opcode arithmetic or memory semantics.
 
 Opcode compiler capabilities, in dependency order:
 
@@ -208,17 +205,21 @@ Opcode compiler capabilities, in dependency order:
    `bitxor` commit one byte output and consume the corresponding preprocessed
    `bitwise` row, optionally under an opcode multiplicity. `add_u32` and
    `sub_u32` commit four wrapping result limbs plus the carry/borrow chain,
-   constrain every chain bit, and range-check an active result. `divrem_u32`
-   commits RV32 signed or unsigned quotient, remainder, zero, overflow, and
-   inverse witnesses; it adds no implicit soundness rule, so the felt body binds
-   those columns through the wide product identity, absolute-remainder bound,
+   constrain every chain bit, and range-check an active result.
+   `binary_u32(lhs, rhs, active, add, sub, and, or, xor)` instead commits one
+   range-bound result word, constrains each selector boolean and their sum to
+   `active`, derives the arithmetic carry/borrow chains, and uses one
+   multiplicity-gated bitwise relation per limb with the selected operation ID.
+   The base ALU families use this shared-output form. `divrem_u32` commits RV32
+   signed or unsigned quotient, remainder, zero, overflow, and inverse
+   witnesses; it adds no implicit soundness rule, so the felt body binds those
+   columns through the wide product identity, absolute-remainder bound,
    special-case constraints, and explicit range relations. AUIPC and JAL use the
    split for their written word; JALR splits its canonical target and binds the
-   cleared low bit through `bitand`; the base ALU families compose the
-   arithmetic and bitwise primitives under one-hot opcode flags. Comparisons use
-   the terminal borrow from `sub_u32`; signed comparisons authenticate the
-   standard sign-bit ordering transform through `bitxor`. Equality branches
-   prove equality by checking that neither directional subtraction borrows.
+   cleared low bit through `bitand`. Comparisons use the terminal borrow from
+   `sub_u32`; signed comparisons authenticate the standard sign-bit ordering
+   transform through `bitxor`. Equality branches prove equality by checking that
+   neither directional subtraction borrows.
 
 5. **Dispatch.** Opcode families with flag columns (`base_alu_reg`'s
    add/sub/xor/or/and) are one function with one-hot felt parameters. Arithmetic
@@ -234,55 +235,22 @@ prior values, read-side writes, and non-zero x0 writes, and exercise gap filling
 with the real tracer. The `mini_vm` tests separately cover function activation,
 state-relation telescoping, and hint-backed witness columns.
 
-The **integration seam is also in place**. `define_air!` now takes an
-`external:` section listing fn-DSL tables to fold into the `Tracer`:
+The integration seam is also complete. `define_air!`'s `external:` section lists
+every fn-DSL table folded into the `Tracer`; the list in
+`crates/air/src/schema.rs` is authoritative. Each entry generates its tracer
+field, initialization, row count, debug support, and column re-export. The
+component router assigns Poseidon2 to the detached hash proof and every opcode
+table to the VM proof.
 
-```text
-external: {
-    auipc: crate::opcodes::auipc,
-    base_alu_imm: crate::opcodes::base_alu_imm,
-    base_alu_reg: crate::opcodes::base_alu_reg,
-    branch_eq: crate::opcodes::branch_eq,
-    branch_lt: crate::opcodes::branch_lt,
-    jal: crate::opcodes::jal,
-    jalr: crate::opcodes::jalr,
-    lt_imm: crate::opcodes::lt_imm,
-    lt_reg: crate::opcodes::lt_reg,
-    poseidon2: crate::poseidon2,
-    lui: crate::opcodes::lui,
-}
-```
+### The `components!` boundary
 
-Each entry generates the `Tracer` field, initialization, `total_traces`, debug,
-and column re-export, so the monolithic `Tracer` is composable. The component
-router assigns Poseidon2 to the detached hash proof and all ten generated opcode
-tables to the VM proof. Migrating another opcode means defining it via
-`define_air_fns!`, adding it to `external:`, routing its generated component,
-and removing its schema and runner semantics after focused valid and malformed
-tests pass.
-
-### What this retires (the `components!` question)
-
-`components!` is not redundant with `define_air!` — it generates the composition
-layer (per-opcode `air`/`witness` modules, `Claim`, `Components`, trace
-orchestration) that `define_air!` deliberately does not, because the composition
-needs prover-side stwo types the air crate does not depend on. But
-`define_air_fns!` with `embedded_component: true` already generates exactly that
-composition for poseidon2. The retirement path is therefore not "merge
-`components!` into `define_air!`" but:
-
-1. `[done]` Migrate `lui`, `auipc`, `jal`, `jalr`, both base ALUs, both
-   comparisons, and both branch families end to end: the air crate owns their
-   felt functions, the prover uses their generated components, and the runner
-   retains only decoding;
-2. `[pending]` Migrate the remaining families in dependency order; the LogUp
-   balance is checked by the existing component tests at every step;
-3. `[pending]` When the last family is out of `define_air!`'s opcode list,
-   delete `components!` (~1000 lines), the `define_air!` opcode syntax, and
-   `runner/src/ops/`.
-
-Until then `components!` stays; any interim investment in it (or in new
-`define_air!` surface) should be weighed against this plan.
+`components!` is not an alternate AIR-authoring surface. It assembles generated
+components into proof rosters and derives `Claim`, `Components`, and trace
+orchestration using prover-side STWO types that the AIR crate does not depend
+on. Opcode-specific `define_air!` tables and handwritten runner semantics are
+gone. `runner/src/ops/` remains as the decode-to-generated-fill adapter layer;
+deleting it would require moving instruction dispatch, not removing duplicate
+AIR semantics.
 
 ## Open questions
 

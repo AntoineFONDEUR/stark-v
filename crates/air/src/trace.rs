@@ -1,6 +1,6 @@
 //! Trace tables and the runtime tracer.
 //!
-//! Manual schema tables and felt-DSL tables are assembled into one `Tracer`
+//! Schema-DSL tables and felt-function tables are assembled into one `Tracer`
 //! by [`crate::schema::trace`] and re-exported here. The clock catch-up
 //! machinery lives in [`crate::clock`] and is re-exported because generated
 //! code resolves it through `crate::trace`.
@@ -48,13 +48,13 @@ mod tests {
         let mut tracer = Tracer::default();
         tracer
             .base_alu_reg
-            .push_row(&vec![0; BaseAluRegColumns::<()>::SIZE]);
+            .push_row(&[0; BaseAluRegColumns::<()>::SIZE]);
         tracer
             .base_alu_reg
-            .push_row(&vec![0; BaseAluRegColumns::<()>::SIZE]);
+            .push_row(&[0; BaseAluRegColumns::<()>::SIZE]);
         tracer
             .base_alu_imm
-            .push_row(&vec![0; BaseAluImmColumns::<()>::SIZE]);
+            .push_row(&[0; BaseAluImmColumns::<()>::SIZE]);
 
         assert_eq!(tracer.total_traces(), 3);
     }
@@ -83,7 +83,7 @@ mod tests {
         }
     }
 
-    // Manual schema constraints are testable directly on their generated columns.
+    // Schema-defined constraints are testable directly on their generated columns.
     mod derived_column_tests {
         use super::prover_columns::*;
         use stwo::core::fields::m31::BaseField;

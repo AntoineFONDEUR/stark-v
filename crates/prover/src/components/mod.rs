@@ -344,7 +344,7 @@ mod tests {
     #[test]
     fn mutated_generated_add_result_fails_component_constraints() {
         let mut tracer = crate::e2e::run_test_bin("add");
-        tracer.base_alu_reg.add_result_0[0] ^= 1;
+        tracer.base_alu_reg.rd_value_0[0] ^= 1;
         let traces = super::gen_trace(tracer);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             super::Components::assert_constraints_on_polys(
@@ -357,9 +357,99 @@ mod tests {
     }
 
     #[test]
+    fn generated_add_rejects_two_active_opcode_flags() {
+        let mut tracer = crate::e2e::run_test_bin("add");
+        tracer.base_alu_reg.opcode_sub_flag[0] = 1;
+        let traces = super::gen_trace(tracer);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::Components::assert_constraints_on_polys(
+                &traces,
+                &crate::relations::Relations::dummy(),
+            );
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn generated_add_rejects_non_boolean_opcode_flags() {
+        let mut tracer = crate::e2e::run_test_bin("add");
+        tracer.base_alu_reg.opcode_add_flag[0] = 2;
+        tracer.base_alu_reg.opcode_sub_flag[0] = 2_147_483_646;
+        let traces = super::gen_trace(tracer);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::Components::assert_constraints_on_polys(
+                &traces,
+                &crate::relations::Relations::dummy(),
+            );
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn generated_add_accepts_an_all_zero_padding_selector_locally() {
+        let mut tracer = crate::e2e::run_test_bin("add");
+        tracer.base_alu_reg.opcode_add_flag[0] = 0;
+        let traces = super::gen_trace(tracer);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::Components::assert_constraints_on_polys(
+                &traces,
+                &crate::relations::Relations::dummy(),
+            );
+        }));
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn padding_a_required_add_row_leaves_a_relation_deficit() {
+        let mut tracer = crate::e2e::run_test_bin("add");
+        tracer.base_alu_reg.opcode_add_flag[0] = 0;
+        let traces = super::gen_trace(tracer);
+        let (_, claimed_sum) =
+            super::gen_interaction_trace(&traces, &crate::relations::Relations::dummy());
+
+        assert!(!claimed_sum.sum().is_zero());
+    }
+
+    #[test]
+    fn base_alu_shared_output_geometry_is_pinned() {
+        use air::opcodes::base_alu_imm::prover_columns::BaseAluImmColumns;
+        use air::opcodes::base_alu_reg::prover_columns::BaseAluRegColumns;
+
+        let imm = BaseAluImmColumns::from_iter(std::iter::repeat_n(
+            BaseField::zero(),
+            BaseAluImmColumns::<()>::SIZE,
+        ));
+        let reg = BaseAluRegColumns::from_iter(std::iter::repeat_n(
+            BaseField::zero(),
+            BaseAluRegColumns::<()>::SIZE,
+        ));
+        let (imm_constraints, imm_relations) = imm.evaluation();
+        let (reg_constraints, reg_relations) = reg.evaluation();
+
+        assert_eq!(
+            [
+                (
+                    BaseAluImmColumns::<()>::SIZE,
+                    imm_constraints.len(),
+                    imm_relations.len(),
+                ),
+                (
+                    BaseAluRegColumns::<()>::SIZE,
+                    reg_constraints.len(),
+                    reg_relations.len(),
+                ),
+            ],
+            [(35, 25, 17), (43, 29, 19)]
+        );
+    }
+
+    #[test]
     fn mutated_generated_xori_result_leaves_a_relation_deficit() {
         let mut tracer = crate::e2e::run_test_bin("xori");
-        tracer.base_alu_imm.xor_0[0] ^= 1;
+        tracer.base_alu_imm.rd_value_0[0] ^= 1;
         let traces = super::gen_trace(tracer);
         let (_, claimed_sum) =
             super::gen_interaction_trace(&traces, &crate::relations::Relations::dummy());

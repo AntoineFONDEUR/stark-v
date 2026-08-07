@@ -885,32 +885,32 @@ tables, 1,524 to 1,620 sampled values, and 544 to 597 AIR instructions.
 
 Required work, in order:
 
-1. `[pending]` Pin the existing activity convention with focused tests: two
-   active flags and non-boolean flags fail locally, an all-zero row is valid
-   padding, and replacing a required execution row with padding leaves a global
-   relation deficit. These tests protect the optimizer from weakening activity.
-2. `[pending]` Measure committed columns, constraints, and relation entries per
+1. `[done]` Pin the existing activity convention with focused tests: two active
+   flags and non-boolean flags fail locally, an all-zero row is valid padding,
+   and replacing a required execution row with padding leaves a global relation
+   deficit. These tests protect the optimizer from weakening activity.
+2. `[done]` Measure committed columns, constraints, and relation entries per
    opcode family at the migration checkpoint. Separate activity constraints from
    candidate-materialization cost so an apparent optimization cannot hide a
    weakened AIR.
-3. `[pending]` Reuse the existing `consume(multiplicity) relation(args...)` form
+3. `[done]` Reuse the existing `consume(multiplicity) relation(args...)` form
    for the shared bitwise relation with its operation ID. Do not add a second
    ID-parameterized lookup API.
-4. `[pending]` Add a generic shared-output binding/fusion facility inside
+4. `[done]` Add a generic shared-output binding/fusion facility inside
    `define_air_fns!` only where the profile proves that the current DSL cannot
    express the efficient encoding. The result column must be range-bound before
    it is shared, active constraints must select exactly one operation, and
    inactive relations must contribute zero. Explicit direct-DSL opcode edits are
    allowed; compiler magic tied to an opcode or identifier spelling is not.
-5. `[pending]` Apply the facility to every family for which it is sound and
+5. `[done]` Apply the facility to every family for which it is sound and
    beneficial. Record before/after VM table, sampled-value, and AIR-instruction
    counts per family; revert any lowering whose measured geometry does not
    improve unless it is required for soundness.
-6. `[pending]` Run the unchanged opcode boundary/component suites plus focused
+6. `[done]` Run the unchanged opcode boundary/component suites plus focused
    activity, malformed-output, and relation-deficit tests, followed by exactly
    one release-mode single-chunk proof for each changed family.
-7. `[pending]` Measure the same base-ALU guest before and after with wall time
-   and peak RSS. Treat constraint count as a proxy, not a performance result.
+7. `[done]` Measure the same base-ALU guest before and after with wall time and
+   peak RSS. Treat constraint count as a proxy, not a performance result.
 8. `[pending]` Re-derive the fixed VM profile and protocol identity, then run
    the one-segment leaf, two-segment binary, and three-segment padded root
    proofs sequentially under that final identity. Do not rerun larger equivalent
@@ -1916,6 +1916,50 @@ the recorded command without committing a machine-specific path.
 - The two-leaf root was intentionally interrupted after 463.09 seconds when the
   selector/lowering task was accepted: completing it and the padded root would
   only certify a protocol identity that `FELT-003` necessarily replaces.
+
+### `FELT-003 shared-output checkpoint` — 2026-08-07
+
+- The accepted handoff finding was the measured candidate-materialization
+  overhead in the base ALU pair. Its proposed lookup API was unnecessary because
+  `consume(multiplicity) relation(args...)` already supports an operation ID,
+  and its selector-soundness concern did not apply: generated flag tables
+  already constrain every flag boolean and their synthesized sum boolean.
+- `define_air_fns!` now provides
+  `binary_u32(lhs, rhs, active, add, sub, and, or, xor)`. It commits one
+  range-bound result word, constrains generic selectors boolean and their sum to
+  the explicit activity value, derives add carries and subtract borrows, and
+  consumes four multiplicity-gated `bitwise` rows with operation IDs. The
+  intrinsic does not discover flags from identifier spelling, and no standalone
+  macro or component was added.
+- Direct geometry changed from `(columns, constraints, relations)`
+  `(55, 28, 25)` to `(35, 25, 17)` for `base_alu_imm` and from `(71, 40, 29)` to
+  `(43, 29, 19)` for `base_alu_reg`. The other opcode families do not
+  materialize sibling add/sub/and/or/xor result columns; the shift families use
+  gated direction-specific relations over derived expressions, so this
+  binary-output facility does not apply to them.
+- The generated VM profile is now 1,821 tables, 1,929 sampled values, and 764
+  AIR instructions, down by 84 tables, 84 samples, and 23 instructions from the
+  migration checkpoint. The protocol identifier is
+  `[1122088815, 199896233, 548794552, 565669788, 1855511304, 1221397337, 1681829803, 847892263]`;
+  the VM AIR digest is
+  `[285508844, 1366475814, 450022979, 1851816564, 2145683182, 745116757, 742469573, 115631508]`.
+- Nine release runner boundary cases and 23 focused component, lookup, activity,
+  padding, malformed-output, and geometry cases passed. All 85 release compiler
+  tests passed, including ten direct shared-output cases for every selected
+  operation, selector soundness, padding, and the degree bound. All seven
+  frozen-profile and digest tests passed.
+- The same sequential single-chunk proof pair measured
+  `base_alu_imm 6.854 -> 6.902 s`, `base_alu_reg 6.829 -> 6.765 s`, combined
+  wall time `13.83 -> 13.85 s`, and peak RSS `2.053 -> 2.075 GB`. This is no
+  measurable leaf-proof improvement. The lowering is retained for its material
+  recursive-verifier geometry reduction, not for a claimed isolated-proof
+  speedup.
+- Current-state compiler and AIR documents no longer describe completed opcode
+  and runner migrations as pending. Feature-goal documents remain goal documents
+  and were not deleted.
+- Remaining gate: run the one-segment, two-segment, and three-segment padded
+  root proofs sequentially under this final protocol identity, then close the
+  task with release clippy, repository hooks, and pushed evidence.
 
 ## Project finish line
 

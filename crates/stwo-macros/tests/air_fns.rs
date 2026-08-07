@@ -345,6 +345,155 @@ mod derived_bitwise_degree {
     }
 }
 
+mod selected_binary_word {
+    stwo_macros::define_air_fns! {
+        max_degree: 3,
+        logup_batch: 2,
+
+        relation range_check_8_8(2);
+        relation bitwise(4);
+
+        fn selected(
+            lhs: [felt; 4],
+            rhs: [felt; 4],
+            add_selector,
+            sub_selector,
+            and_selector,
+            or_selector,
+            xor_selector,
+        ) {
+            let output = binary_u32(
+                lhs,
+                rhs,
+                enabler,
+                add_selector,
+                sub_selector,
+                and_selector,
+                or_selector,
+                xor_selector,
+            );
+            return output;
+        }
+    }
+}
+
+#[rstest::rstest]
+#[case(0xffff_ffff, 2, [1, 0, 0, 0, 0], 1)]
+#[case(0, 1, [0, 1, 0, 0, 0], 0xffff_ffff)]
+#[case(0xf0f0_00ff, 0x0ff0_ff00, [0, 0, 1, 0, 0], 0x00f0_0000)]
+#[case(0xf0f0_00ff, 0x0ff0_ff00, [0, 0, 0, 1, 0], 0xfff0_ffff)]
+#[case(0xf0f0_00ff, 0x0ff0_ff00, [0, 0, 0, 0, 1], 0xff00_ffff)]
+fn selected_binary_word_fill_matches_the_selected_operation(
+    #[case] lhs: u32,
+    #[case] rhs: u32,
+    #[case] selectors: [u32; 5],
+    #[case] expected: u32,
+) {
+    let mut tables = selected_binary_word::Tables::default();
+    let lhs = lhs.to_le_bytes();
+    let rhs = rhs.to_le_bytes();
+    let inputs = std::array::from_fn(|position| {
+        let value = match position {
+            0..4 => u32::from(lhs[position]),
+            4..8 => u32::from(rhs[position - 4]),
+            _ => selectors[position - 8],
+        };
+        felt(value)
+    });
+    let output = selected_binary_word::call_selected(&mut tables, inputs);
+
+    assert_eq!(
+        u32::from_le_bytes(output.map(|limb| limb.0 as u8)),
+        expected
+    );
+}
+
+#[test]
+fn selected_binary_word_constraints_fit_the_declared_degree() {
+    use stwo_constraint_framework::FrameworkEval;
+    use stwo_constraint_framework::expr::ExprEvaluator;
+
+    let evaluated = selected_binary_word::selected::air::Eval {
+        log_size: 4,
+        relations: selected_binary_word::AirFnRelations::dummy(),
+    }
+    .evaluate(ExprEvaluator::new());
+
+    assert!(
+        evaluated
+            .constraint_degree_bounds()
+            .into_iter()
+            .all(|degree| degree <= 3)
+    );
+}
+
+#[test]
+fn selected_binary_word_rejects_missing_active_selector() {
+    use selected_binary_word::prover_columns::SelectedColumns;
+
+    let mut columns =
+        SelectedColumns::from_iter(std::iter::repeat_n(felt(0), SelectedColumns::<()>::SIZE));
+    columns.enabler = felt(1);
+    let (constraints, _) = columns.evaluation();
+
+    assert!(
+        constraints
+            .into_iter()
+            .any(|constraint| constraint != felt(0))
+    );
+}
+
+#[test]
+fn selected_binary_word_rejects_non_boolean_selectors_with_unit_sum() {
+    use selected_binary_word::prover_columns::SelectedColumns;
+
+    let mut columns =
+        SelectedColumns::from_iter(std::iter::repeat_n(felt(0), SelectedColumns::<()>::SIZE));
+    columns.enabler = felt(1);
+    columns.add_selector = felt(2);
+    columns.sub_selector = felt(2_147_483_646);
+    let (constraints, _) = columns.evaluation();
+
+    assert!(
+        constraints
+            .into_iter()
+            .any(|constraint| constraint != felt(0))
+    );
+}
+
+#[test]
+fn selected_binary_word_rejects_two_active_selectors() {
+    use selected_binary_word::prover_columns::SelectedColumns;
+
+    let mut columns =
+        SelectedColumns::from_iter(std::iter::repeat_n(felt(0), SelectedColumns::<()>::SIZE));
+    columns.enabler = felt(2);
+    columns.add_selector = felt(1);
+    columns.sub_selector = felt(1);
+    let (constraints, _) = columns.evaluation();
+
+    assert!(
+        constraints
+            .into_iter()
+            .any(|constraint| constraint != felt(0))
+    );
+}
+
+#[test]
+fn selected_binary_word_accepts_zero_padding() {
+    use selected_binary_word::prover_columns::SelectedColumns;
+
+    let columns =
+        SelectedColumns::from_iter(std::iter::repeat_n(felt(0), SelectedColumns::<()>::SIZE));
+    let (constraints, _) = columns.evaluation();
+
+    assert!(
+        constraints
+            .into_iter()
+            .all(|constraint| constraint == felt(0))
+    );
+}
+
 #[test]
 fn test_derived_bitwise_inputs_fit_the_degree_bound() {
     use stwo_constraint_framework::FrameworkEval;

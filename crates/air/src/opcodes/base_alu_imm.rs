@@ -45,33 +45,15 @@ stwo_macros::define_air_fns! {
         consume range_check_8_11(imm_0, 256 * imm_1);
         read_reg rs1(clock, rs1_addr);
 
-        let (add_result, add_carry) = add_u32(
+        let rd_value = binary_u32(
             rs1_next,
             immediate,
+            enabler,
             opcode_add_flag,
-        );
-        let xor_0 = bitxor(rs1_next[0], immediate[0], opcode_xor_flag);
-        let xor_1 = bitxor(rs1_next[1], immediate[1], opcode_xor_flag);
-        let xor_2 = bitxor(rs1_next[2], immediate[2], opcode_xor_flag);
-        let xor_3 = bitxor(rs1_next[3], immediate[3], opcode_xor_flag);
-        let xor_result = [xor_0, xor_1, xor_2, xor_3];
-        let or_0 = bitor(rs1_next[0], immediate[0], opcode_or_flag);
-        let or_1 = bitor(rs1_next[1], immediate[1], opcode_or_flag);
-        let or_2 = bitor(rs1_next[2], immediate[2], opcode_or_flag);
-        let or_3 = bitor(rs1_next[3], immediate[3], opcode_or_flag);
-        let or_result = [or_0, or_1, or_2, or_3];
-        let and_0 = bitand(rs1_next[0], immediate[0], opcode_and_flag);
-        let and_1 = bitand(rs1_next[1], immediate[1], opcode_and_flag);
-        let and_2 = bitand(rs1_next[2], immediate[2], opcode_and_flag);
-        let and_3 = bitand(rs1_next[3], immediate[3], opcode_and_flag);
-        let and_result = [and_0, and_1, and_2, and_3];
-        let rd_value = map(
-            i,
-            0..4,
-            opcode_add_flag * add_result[i]
-                + opcode_xor_flag * xor_result[i]
-                + opcode_or_flag * or_result[i]
-                + opcode_and_flag * and_result[i],
+            0,
+            opcode_and_flag,
+            opcode_or_flag,
+            opcode_xor_flag,
         );
 
         consume registers_state(pc, clock);

@@ -1403,18 +1403,20 @@ mod tests {
 
     #[test]
     fn manifest_protocol_id_matches_conformance_vector() {
+        // Pins the split-proof manifest encoding, which binds the detached
+        // Poseidon2 AIR program digest alongside the VM and recursion programs.
         assert_eq!(
             manifest().protocol_id(),
             ProtocolId::from(
                 Digest8::try_from([
-                    478_045_862,
-                    405_973_984,
-                    209_742_061,
-                    1_668_992_471,
-                    1_869_861_411,
-                    1_958_982_823,
-                    1_848_617_412,
-                    1_055_531_657,
+                    97_545_848,
+                    2_116_229_618,
+                    273_455_254,
+                    1_127_786_386,
+                    1_272_746_199,
+                    2_012_062_609,
+                    1_612_654_026,
+                    1_118_805_243,
                 ])
                 .expect("the protocol conformance digest words are canonical")
             )

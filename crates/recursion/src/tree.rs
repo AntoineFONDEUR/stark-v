@@ -112,14 +112,24 @@ pub fn prove_recursive_segments(
     })?;
     let public_data = run_results.iter().map(PublicData::new).collect::<Vec<_>>();
     let job = execution_job(profile, &public_data, total_cycles, plan.segment_count)?;
-    let leaves = prove_segment_leaves(
-        profile,
-        vm_preprocessing,
-        recursion_preprocessing,
-        run_results,
-        &public_data,
-        job,
-    )?;
+    // The span carries the executed cycle total so subscribers can derive leaf
+    // throughput from the stage's wall time alone.
+    let leaves = {
+        let _stage = tracing::info_span!(
+            "prove_segment_leaves",
+            segments = plan.segment_count,
+            cycles = total_cycles,
+        )
+        .entered();
+        prove_segment_leaves(
+            profile,
+            vm_preprocessing,
+            recursion_preprocessing,
+            run_results,
+            &public_data,
+            job,
+        )?
+    };
     prove_recursion_tree(profile, recursion_preprocessing, leaves)
 }
 
@@ -197,6 +207,8 @@ pub fn prove_recursion_tree(
             Ok(SpanStatement::empty_leaf(job, slot)?)
         })
         .collect::<Result<Vec<_>, TreeProverError>>()?;
+    let _padding_stage =
+        tracing::info_span!("prove_padding_leaves", count = padding_statements.len(),).entered();
     #[cfg(feature = "parallel")]
     let padding = if padding_statements.len() <= 1 {
         padding_statements
@@ -241,8 +253,10 @@ pub fn prove_recursion_tree(
         })
         .collect::<Result<Vec<_>, TreeProverError>>()?;
     nodes.extend(padding);
+    drop(_padding_stage);
 
     while nodes.len() > 2 {
+        let _level_stage = tracing::info_span!("prove_tree_level", nodes = nodes.len()).entered();
         #[cfg(feature = "parallel")]
         let parents = {
             let parallel = preprocessing.parallel_template(profile)?;
@@ -276,7 +290,10 @@ pub fn prove_recursion_tree(
     let mut roots = nodes.into_iter();
     let left = roots.next().expect("the final level has a left child");
     let right = roots.next().expect("the final level has a right child");
-    let proof = prove_binary_node(profile, preprocessing, &left, &right)?;
+    let proof = {
+        let _root_stage = tracing::info_span!("prove_root_node").entered();
+        prove_binary_node(profile, preprocessing, &left, &right)?
+    };
     let root_statement = RootStatement::new(proof.statement)?;
     Ok(RecursiveTreeProof {
         root_statement,

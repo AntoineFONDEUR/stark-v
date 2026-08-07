@@ -196,6 +196,7 @@ pub fn verify_recursive_root(
     expected: &CompleteExecutionStatement,
     proof: RecursionProof,
 ) -> Result<(), RootVerificationError> {
+    let _stage = tracing::info_span!("verify_recursive_root").entered();
     let root = RootStatement::new(proof.statement).map_err(RootVerificationError::InvalidRoot)?;
     validate_expected_execution(expected, root.complete_execution())?;
     verify_recursion_proof(

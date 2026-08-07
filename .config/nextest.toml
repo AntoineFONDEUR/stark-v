@@ -1,0 +1,10 @@
+# Heavyweight recursion proof tests each grow to tens of GiB resident during
+# their STARK proving phase; overlapping them exhausts a 64 GiB host's
+# compressor and has kernel-panicked it. The group serializes those tests
+# while light tests keep filling the remaining worker slots.
+[test-groups.heavy-proofs]
+max-threads = 1
+
+[[profile.default.overrides]]
+filter = 'test(recursive_proof::tests::) | test(tree::tests::) | test(root::tests::) | test(segment_leaf::tests::)'
+test-group = 'heavy-proofs'

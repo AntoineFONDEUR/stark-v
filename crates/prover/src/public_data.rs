@@ -53,6 +53,14 @@ pub struct PublicData {
     pub initial_regs: [u32; 32],
     /// Register values at end (x0..x31).
     pub final_regs: [u32; 32],
+    /// Proof-bound journal digest at segment entry.
+    pub initial_public_io_state: Poseidon2Digest,
+    /// Proof-bound journal digest at segment exit.
+    pub final_public_io_state: Poseidon2Digest,
+    /// Number of journal transitions in this segment.
+    pub journal_count: u32,
+    /// Execution clock of the segment's last journal transition, or zero.
+    pub journal_last_clock: u32,
     /// Last access clock per register (0 if never accessed).
     pub reg_last_clock: [u32; 32],
     /// Program tree root (if program table is non-empty).
@@ -144,6 +152,10 @@ impl PublicData {
             clock,
             initial_regs: run_result.initial_regs,
             final_regs: run_result.final_regs,
+            initial_public_io_state: run_result.initial_public_io_state,
+            final_public_io_state: run_result.final_public_io_state,
+            journal_count: run_result.journal_count,
+            journal_last_clock: run_result.journal_last_clock,
             reg_last_clock: tracer.reg_clock,
             program_root,
             initial_rw_root,
@@ -157,6 +169,9 @@ impl PublicData {
         channel.mix_u32s(&[self.initial_pc, self.final_pc, self.clock]);
         channel.mix_u32s(&self.initial_regs);
         channel.mix_u32s(&self.final_regs);
+        channel.mix_u32s(&self.initial_public_io_state);
+        channel.mix_u32s(&self.final_public_io_state);
+        channel.mix_u32s(&[self.journal_count, self.journal_last_clock]);
         channel.mix_u32s(&self.reg_last_clock);
 
         let root_flags = [
@@ -203,6 +218,27 @@ impl PublicData {
             .registers_state
             .combine(&[M31::from(self.final_pc), final_clock]);
         values_to_inverse.push(-final_state);
+
+        // Journal chain: emit the public entry and consume the public exit.
+        let mut initial_journal = [M31::zero(); 10];
+        for (target, value) in initial_journal[2..]
+            .iter_mut()
+            .zip(self.initial_public_io_state)
+        {
+            *target = M31::from(value);
+        }
+        values_to_inverse.push(relations.journal.combine(&initial_journal));
+        let mut final_journal = [M31::zero(); 10];
+        final_journal[0] = M31::from(self.journal_count);
+        final_journal[1] = M31::from(self.journal_last_clock);
+        for (target, value) in final_journal[2..]
+            .iter_mut()
+            .zip(self.final_public_io_state)
+        {
+            *target = M31::from(value);
+        }
+        let final_journal: QM31 = relations.journal.combine(&final_journal);
+        values_to_inverse.push(-final_journal);
 
         // Merkle roots: emit each tree root once.
         for root in [self.program_root, self.initial_rw_root, self.final_rw_root]
@@ -332,6 +368,10 @@ mod tests {
             clock: 0,
             initial_regs: [0; 32],
             final_regs: [0; 32],
+            initial_public_io_state: [0; 8],
+            final_public_io_state: [0; 8],
+            journal_count: 0,
+            journal_last_clock: 0,
             reg_last_clock: [0; 32],
             program_root: None,
             initial_rw_root: None,
@@ -361,6 +401,10 @@ mod tests {
             final_pc: 0,
             initial_regs: [0; 32],
             final_regs: [0; 32],
+            initial_public_io_state: [0; 8],
+            final_public_io_state: [0; 8],
+            journal_count: 0,
+            journal_last_clock: 0,
             output: Some(vec![1, 2, 3, 4]),
             input: vec![],
             input_start: 0,

@@ -36,6 +36,7 @@ const MIN_LOG_SIZE: u32 = 4;
 const MAX_LOG_SIZE: u32 = 30;
 const QM31_LIMBS: u32 = 4;
 const CHALLENGE_WORDS: u32 = 8;
+const PUBLIC_RELATION_CHALLENGE_COUNT: usize = 4;
 
 const ROW_MASK_COLUMN: usize = 0;
 const CLAIM_WORD_MASK_COLUMN: usize = 1;
@@ -239,7 +240,7 @@ fn validate_source(
             challenge,
             word_index,
         } => {
-            if !matches!(challenge, 0 | 1 | 3) {
+            if !matches!(challenge, 0 | 1 | 3 | 6) {
                 return Err(VmPublicLogupInputError::UnexpectedChallenge { challenge });
             }
             if word_index >= CHALLENGE_WORDS {
@@ -306,7 +307,9 @@ fn expected_input_count(
     claim_kinds
         .len()
         .checked_add(byte_inputs)
-        .and_then(|count| count.checked_add(3 * CHALLENGE_WORDS as usize))
+        .and_then(|count| {
+            count.checked_add(PUBLIC_RELATION_CHALLENGE_COUNT * CHALLENGE_WORDS as usize)
+        })
         .and_then(|count| count.checked_add(claimed_sum_inputs))
         .and_then(|count| count.checked_add(QM31_LIMBS as usize))
         .and_then(|count| count.checked_add(1))
@@ -651,6 +654,7 @@ mod tests {
             VmPublicLogupChallengeWords::from_relations(&relations)
         } else {
             VmPublicLogupChallengeWords::new(
+                [M31Word::ZERO; CHALLENGE_WORDS as usize],
                 [M31Word::ZERO; CHALLENGE_WORDS as usize],
                 [M31Word::ZERO; CHALLENGE_WORDS as usize],
                 [M31Word::ZERO; CHALLENGE_WORDS as usize],

@@ -14,6 +14,7 @@ stwo_macros::define_air! {
             in8, in9, in10, in11, in12, in13, in14, in15,
             out0, out1, out2, out3, out4, out5, out6, out7,
             out8, out9, out10, out11, out12, out13, out14, out15;
+        journal: step, clock, state0, state1, state2, state3, state4, state5, state6, state7;
     }
     preprocessed: {
         bitwise: a, b, result, op_id;
@@ -1370,13 +1371,21 @@ stwo_macros::define_air! {
         // ==========================================================================
         commit: {
             committed: {
-                clock, pc, selector, argument,
+                clock, pc, selector, argument, journal_step, journal_prev_clock,
+                journal_prev_0, journal_prev_1, journal_prev_2, journal_prev_3,
+                journal_prev_4, journal_prev_5, journal_prev_6, journal_prev_7,
+                journal_next_0, journal_next_1, journal_next_2, journal_next_3,
+                journal_next_4, journal_next_5, journal_next_6, journal_next_7,
+                journal_next_8, journal_next_9, journal_next_10, journal_next_11,
+                journal_next_12, journal_next_13, journal_next_14, journal_next_15,
             },
             derived: {
                 pc_next: pc + 4,
                 clock_next: clock + 1,
                 selector_clock_diff: clock - selector_clock_prev,
                 argument_clock_diff: clock - argument_clock_prev,
+                journal_step_next: journal_step + 1,
+                journal_clock_diff_minus_one: clock - journal_prev_clock - 1,
             },
             constraints: {
                 // The shared ECALL instruction is a COMMIT only when a7 selects it.
@@ -1422,6 +1431,34 @@ stwo_macros::define_air! {
                     argument_next_0, argument_next_1, argument_next_2, argument_next_3,
                 ),
                 -enabler * range_check_20(argument_clock_diff),
+                // Journal ordinals follow execution order, so valid COMMIT
+                // rows cannot choose an independent ordering.
+                -enabler * range_check_20(journal_step),
+                -enabler * range_check_20(journal_prev_clock),
+                -enabler * range_check_20(clock),
+                -enabler * range_check_20(journal_clock_diff_minus_one),
+                // The committed word is absorbed as four bytes after the
+                // previous digest under a journal-specific domain word.
+                -enabler * poseidon2_io(
+                    journal_prev_0, journal_prev_1, journal_prev_2, journal_prev_3,
+                    journal_prev_4, journal_prev_5, journal_prev_6, journal_prev_7,
+                    argument_next_0, argument_next_1, argument_next_2, argument_next_3,
+                    constant(crate::instructions::COMMIT_HASH_DOMAIN), 0, 0, 0,
+                    journal_next_0, journal_next_1, journal_next_2, journal_next_3,
+                    journal_next_4, journal_next_5, journal_next_6, journal_next_7,
+                    journal_next_8, journal_next_9, journal_next_10, journal_next_11,
+                    journal_next_12, journal_next_13, journal_next_14, journal_next_15,
+                ),
+                -enabler * journal(
+                    journal_step, journal_prev_clock,
+                    journal_prev_0, journal_prev_1, journal_prev_2, journal_prev_3,
+                    journal_prev_4, journal_prev_5, journal_prev_6, journal_prev_7,
+                ),
+                enabler * journal(
+                    journal_step_next, clock,
+                    journal_next_0, journal_next_1, journal_next_2, journal_next_3,
+                    journal_next_4, journal_next_5, journal_next_6, journal_next_7,
+                ),
             },
         },
 

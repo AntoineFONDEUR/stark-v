@@ -15,6 +15,8 @@ mod syscalls;
 
 use thiserror::Error;
 
+use air::poseidon2::Poseidon2Digest;
+
 /// Get or decode an instruction at the given PC, caching the result.
 pub(crate) fn get_or_decode(cache: &mut InstCache, mem: &Memory, pc: u32) -> Option<DecodedInst> {
     if let Some(&inst) = cache.get(&pc) {
@@ -116,6 +118,14 @@ pub struct RunResult {
     pub initial_regs: [u32; 32],
     /// Register values at end of execution.
     pub final_regs: [u32; 32],
+    /// Journal digest at this segment's entry boundary.
+    pub initial_public_io_state: Poseidon2Digest,
+    /// Journal digest at this segment's exit boundary.
+    pub final_public_io_state: Poseidon2Digest,
+    /// Number of COMMIT calls authenticated by this segment.
+    pub journal_count: u32,
+    /// Execution clock of this segment's last COMMIT, or zero when absent.
+    pub journal_last_clock: u32,
     /// Output bytes from guest (postcard-serialized data).
     pub output: Option<Vec<u8>>,
     /// Raw input bytes provided to the guest.
@@ -179,7 +189,8 @@ pub fn run_with_input(
 ///
 /// Each segment gets its own tracer with the clock restarting at 0, so each
 /// can be proven independently; consecutive segments chain on
-/// `(final_pc, final_regs, final_rw_root) == (initial_pc, initial_regs, initial_rw_root)`.
+/// `(final_pc, final_regs, final_rw_root, final_public_io_state)` equals the
+/// next segment's corresponding initial state.
 /// Input is anchored in the first segment and outputs in the last (see
 /// [`SegmentRole`]).
 ///
@@ -240,6 +251,7 @@ fn run_segments_impl<F: Fn(&Tracer) -> bool>(
     let mut completed_cycles: u64 = 0;
     let mut seg_initial_pc = cpu.pc;
     let mut seg_initial_regs = cpu.regs();
+    let mut seg_initial_public_io_state = cpu.public_io_state();
 
     // Set once the guest first stores into the output region: from then on
     // the run is in its output tail and the current segment is the last one.
@@ -286,6 +298,8 @@ fn run_segments_impl<F: Fn(&Tracer) -> bool>(
                 cpu.pc,
                 seg_initial_regs,
                 cpu.regs(),
+                seg_initial_public_io_state,
+                cpu.public_io_state(),
                 input,
                 &mem,
                 io_addrs,
@@ -301,6 +315,7 @@ fn run_segments_impl<F: Fn(&Tracer) -> bool>(
             segments.push(result);
             seg_initial_pc = cpu.pc;
             seg_initial_regs = cpu.regs();
+            seg_initial_public_io_state = cpu.public_io_state();
         }
         output_phase |= output_write;
 
@@ -355,6 +370,8 @@ fn run_segments_impl<F: Fn(&Tracer) -> bool>(
         final_pc,
         seg_initial_regs,
         cpu.regs(),
+        seg_initial_public_io_state,
+        cpu.public_io_state(),
         input,
         &mem,
         io_addrs,
@@ -539,10 +556,15 @@ fn make_run_result(
     final_pc: u32,
     initial_regs: [u32; 32],
     final_regs: [u32; 32],
+    initial_public_io_state: Poseidon2Digest,
+    final_public_io_state: Poseidon2Digest,
     input: &[u8],
     mem: &Memory,
     io_addrs: IoAddrs,
 ) -> RunResult {
+    let journal_count =
+        u32::try_from(tracer.commit.len()).expect("COMMIT trace length exceeds u32");
+    let journal_last_clock = tracer.commit.clock.last().copied().unwrap_or(0);
     let output_len = mem.read_u32(io_addrs.output_len);
     let output = io::read_output(
         mem,
@@ -558,6 +580,10 @@ fn make_run_result(
         final_pc,
         initial_regs,
         final_regs,
+        initial_public_io_state,
+        final_public_io_state,
+        journal_count,
+        journal_last_clock,
         output,
         input: input.to_vec(),
         input_start: io_addrs.input_start,

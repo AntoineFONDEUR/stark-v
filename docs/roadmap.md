@@ -77,7 +77,7 @@ binary shape at larger counts.
 | `docs/recursion.md`         | Current design                | Recursive statements, verifier architecture, and soundness invariants       |
 | `docs/felt-air-compiler.md` | Partially implemented design  | Compiler facilities and opcode/runner target                                |
 | `docs/precompiles.md`       | Current implementation design | Cross-proof hash binding and measured scheduling policy                     |
-| `docs/syscalls.md`          | Planned feature               | Syscall and output-journal target                                           |
+| `docs/syscalls.md`          | Active feature design         | Implemented journal semantics and remaining root/SDK gates                  |
 | `CONTRIBUTING.md`           | Current process               | Development and submission workflow                                         |
 | `SECURITY.md`               | Current policy                | Security scope and private reporting                                        |
 
@@ -290,7 +290,7 @@ set.
     and repository hooks passed.
 - `[done] REC-010` Demonstrate constant root-proof size.
   - Every successfully produced canonical root encodes as the profile-owned
-    3,479,096-byte `RootProofBytes` type and uses the same 4,943-step verifier
+    3,479,096-byte `RootProofBytes` type and uses the same 4,945-step verifier
     plan with one checked digest.
   - The earlier integrated-Poseidon profile produced real segment-leaf, binary,
     padded-binary, 4-segment, and 8-segment roots through the same fixed wire
@@ -375,12 +375,24 @@ set.
   - Completed slice: the minimal COMMIT AIR is defined directly through the
     existing DSL, authenticates both the syscall selector and argument reads,
     and closes its program, state, register, and range relations in one focused
-    VM proof. No journal value is exposed.
-  - The measured VM profile is now 1,347 tables, 1,455 sampled values, and 512
+    VM proof.
+  - Completed slice: each COMMIT now proves an eight-word Poseidon2 digest
+    transition and participates in one journal chain keyed by ordinal and
+    strictly increasing execution clock. VM public data binds the segment
+    entry/exit digests, COMMIT count, and last COMMIT clock; continuation and
+    recursion leaf statements carry the digest endpoints.
+  - Adversarial one-chunk tests reject changed words, public-state changes,
+    dropped rows, inserted endpoint counts, last-clock changes, and backward
+    clock links. Four-cycle segment tests preserve adjacent digest boundaries.
+  - The measured VM profile is now 1,385 tables, 1,493 sampled values, and 515
     AIR instructions. The protocol identifier is
-    `[87219592, 815551637, 878998301, 1724434594, 1454088342, 641814846, 1892908453, 1264513145]`,
+    `[845272597, 933819972, 383440221, 543106310, 36774074, 98392354, 1154621472, 1552689827]`,
     while the universal root wire remains 3,479,096 bytes.
-  - Next slice: add the Poseidon2 transition and ordered journal relation.
+  - Completed slice: a real COMMIT-bearing VM chunk assembled into the universal
+    leaf, encoded as the 3,479,096-byte root, matched the 4,945-step verifier
+    plan, and passed native application verification.
+  - Next slice: expose the guest SDK and validate its segmented application
+    path.
 - `[pending] FELT-001` Complete witness-side felt-function VM access.
 - `[pending] FELT-002` Migrate opcode execution and retire duplicate semantics.
 - `[pending] REL-001` Harden and measure the completed system.
@@ -748,11 +760,10 @@ Required work, in order:
    `define_air_fns!`.
 3. `[done]` Prove standard relation multiplicities and interaction closure for
    the new table before adding journal logic.
-4. `[in progress]` Bind the register value, Poseidon2 transition, ordered
-   journal relation, and public initial/final endpoints.
-5. `[pending]` Add the endpoints to VM public data and the Fiat-Shamir
-   transcript.
-6. `[pending]` Chain endpoints in `continuation` and map them into recursive
+4. `[done]` Bind the register value, Poseidon2 transition, ordered journal
+   relation, and public initial/final endpoints.
+5. `[done]` Add the endpoints to VM public data and the Fiat-Shamir transcript.
+6. `[in progress]` Chain endpoints in `continuation` and map them into recursive
    leaf and root statements under a new protocol identity.
 7. `[pending]` Expose the guest SDK only after VM, continuation, and
    recursive-root tests reject changed words, broken states, dropped, inserted,
@@ -1258,9 +1269,9 @@ the recorded command without committing a machine-specific path.
 - Commit `ba793a61` pushed to `origin/chore/scratchpad-cleanups`.
 - `/usr/bin/time -l cargo test --release -p recursion --features parallel --lib tree::tests::capacity_segmented_guest_produces_a_two_leaf_root -- --ignored --exact --nocapture --test-threads=1`:
   the active-profile binary root encoded to the 3,479,096-byte wire, matched the
-  4,943-step verifier plan, and passed the application verifier. The test took
-  949.04 seconds; the command took 1,002.32 seconds including compilation, with
-  34.62 GB maximum RSS and zero swaps.
+  pre-journal 4,943-step verifier plan, and passed the application verifier. The
+  test took 949.04 seconds; the command took 1,002.32 seconds including
+  compilation, with 34.62 GB maximum RSS and zero swaps.
 - `/usr/bin/time -l cargo test --release -p recursion --features parallel --lib tree::tests::cycle_segmented_guest_produces_the_expected_root::case_1_three -- --ignored --exact --nocapture --test-threads=1`:
   the active-profile three-segment run padded to four leaves, encoded to the
   same fixed wire, matched the same verifier plan, and passed the application
@@ -1300,8 +1311,8 @@ the recorded command without committing a machine-specific path.
 - `cargo clippy --release -p air -p runner --all-targets --no-deps -- -D warnings`,
   focused repository hooks, and the commit hooks passed.
 - Commit `8289ca1d` pushed to `origin/chore/scratchpad-cleanups`.
-- SYS-001 step 1 completed with every syscall ID rejected and no journal value
-  present in `RunResult` or public data.
+- The SYS-001 step-1 checkpoint rejected every syscall ID and intentionally
+  contained no journal value in `RunResult` or public data.
 - The direct `define_air!` COMMIT table authenticates canonical `ecall`, the
   `a7 == 1` selector read, the `a0` argument read, the execution-state
   transition, and both register clock gaps. The existing DSL access-field
@@ -1313,9 +1324,9 @@ the recorded command without committing a machine-specific path.
 - `/usr/bin/time -lp cargo test --release -p prover --test integration commit_standard_relations_prove_and_verify -- --exact --nocapture`:
   the one-chunk VM proof verified in 6.72 seconds with 1.95 GB maximum RSS and
   zero swaps.
-- The exact DSL-owner and VM-roster guards passed. Focused profile tests pinned
-  1,347 VM tables, 1,455 sampled values, 512 AIR instructions, the new protocol
-  identifier, and the unchanged 3,479,096-byte universal root wire.
+- At commit `01c6eb4c`, the exact DSL-owner and VM-roster guards passed and the
+  then-current profile pinned 1,347 VM tables, 1,455 sampled values, 512 AIR
+  instructions, and the unchanged 3,479,096-byte universal root wire.
 - `/usr/bin/time -lp cargo test --release -p stwo-macros -p air -p runner -- --test-threads=8`:
   all macro DSL, AIR, and runner release tests passed in 76.52 seconds with 1.40
   GB maximum RSS and zero swaps.
@@ -1323,8 +1334,38 @@ the recorded command without committing a machine-specific path.
   the affected crates passed with warnings denied.
 - Commit `01c6eb4c` contains the proof-bound COMMIT register boundary and frozen
   profile update.
-- SYS-001 steps 2 and 3 are complete. Step 4 is active; no journal state or
-  public digest exists yet.
+- Commit `01c6eb4c` completed SYS-001 steps 2 and 3; the active checkpoint above
+  records the later journal implementation.
+- Focused release tests passed for the journal AIR, runner rows, four-cycle
+  segment boundaries, host continuation, VM public-claim semantics, public LogUp
+  ownership, relation challenges, universal relation registry, fixed profile,
+  tree job context, and all five direct-DSL guards.
+- Adversarial release tests rejected changed committed words, changed public
+  journal endpoints, counts, and clocks, dropped COMMIT rows, and backward clock
+  links. Root application-field tests reject changed initial and final machine
+  states, including their public journal digests.
+- `/usr/bin/time -l cargo test --release -p recursion --features parallel tree::tests::one_commit_recursion_leaf_is_the_complete_root --lib -- --exact --nocapture --test-threads=1`
+  (run before marking the test as opt-in): one real COMMIT-bearing VM chunk
+  assembled into a universal segment leaf, encoded to the 3,479,096-byte root
+  wire, matched the 4,945-step verifier plan, and passed native application
+  verification. The test took 554.16 seconds; the command took 554.34 seconds
+  with 18.89 GB maximum RSS and zero swaps.
+- The root test is now an explicit conformance gate. Its current selector is
+  `cargo test --release -p recursion --features parallel --lib -- --ignored --exact --list | rg 'tree::tests::one_commit_recursion_leaf_is_the_complete_root'`;
+  the release test list resolves exactly that case.
+- `cargo test --release -p recursion --features parallel root::tests:: --lib -- --nocapture --test-threads=1`
+  passed all 9 application-binding and root-conformance tests. The normal tree
+  filter passed all 8 fast cases and reported all 5 cryptographic roots as
+  explicit opt-in gates.
+- `cargo clippy --release -p stwo-macros -p air -p runner -p prover -p continuation -p recursion --all-targets --no-deps -- -D warnings`
+  passed in 11.62 seconds with 0.76 GB maximum RSS and zero swaps. All 5
+  direct-DSL guards and the changed-file repository hooks passed.
+- The first root attempt exposed the stale pre-journal verifier-plan fixture
+  before native verification. Its focused conformance test now pins the
+  4,945-step plan and recursion AIR digest
+  `[1270421312, 1168180329, 1487888523, 1859018076, 1573466635, 85579857, 111495589, 650827603]`.
+- SYS-001 step 6 is complete. The guest SDK and its segmented application test
+  remain step 7.
 
 ## Project finish line
 

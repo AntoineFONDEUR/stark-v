@@ -28,7 +28,7 @@ The decoder and AIR support RV32I integer arithmetic, shifts, comparisons,
 loads, stores, branches, jumps, upper immediates, and the RV32M multiplication,
 division, and remainder instructions. `crates/air/src/instructions.rs` is the
 canonical opcode list. Canonical `ecall` dispatches internal syscalls; COMMIT ID
-1 has a proof-bound execution row, while journal semantics remain planned.
+1 has a proof-bound execution row and advances the ordered Poseidon2 journal.
 
 The active execution-table families are:
 
@@ -40,7 +40,7 @@ The active execution-table families are:
 - loads and stores;
 - low and high multiplication;
 - division and remainder;
-- proof-bound COMMIT selector and argument reads;
+- proof-bound COMMIT selector, argument, Poseidon2, and journal transitions;
 - program, memory, Merkle, and clock-update support tables in the VM
   constituent, plus the detached Poseidon2 support table.
 
@@ -54,6 +54,7 @@ ordering:
 - `program_access` binds executed instructions to committed program words;
 - `merkle` binds committed leaves and roots;
 - `poseidon2` and `poseidon2_io` bind permutation calls;
+- `journal` chains COMMIT digests in authenticated execution-clock order;
 - preprocessed range and bitwise relations constrain bounded values.
 
 The verifier mixes public data before relation challenges are drawn. Component

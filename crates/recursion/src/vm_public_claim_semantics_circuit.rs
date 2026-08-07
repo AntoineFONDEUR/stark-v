@@ -3,7 +3,7 @@
 //! The circuit consumes every canonical claim word and a separately scoped
 //! copy of the transcript-bound statement. It proves exact machine boundary
 //! equality, canonical vector prefixes and lengths, mandatory Merkle roots,
-//! zero journal state, and the M31 bounds needed by VM public LogUp tuples.
+//! journal endpoints, and the M31 bounds needed by VM public LogUp tuples.
 //! Its structure depends only on the verifier-owned claim capacity.
 
 use core::fmt;
@@ -273,6 +273,7 @@ fn constrain_roots_and_machine_state(
         claim_layout::INITIAL_PC_START,
         claim_layout::INITIAL_REGISTERS_START,
         claim_layout::INITIAL_RW_ROOT_START,
+        claim_layout::INITIAL_PUBLIC_IO_STATE_START,
         statement,
         statement_layout::ENTRY_STATE_START,
     );
@@ -283,6 +284,7 @@ fn constrain_roots_and_machine_state(
         claim_layout::FINAL_PC_START,
         claim_layout::FINAL_REGISTERS_START,
         claim_layout::FINAL_RW_ROOT_START,
+        claim_layout::FINAL_PUBLIC_IO_STATE_START,
         statement,
         statement_layout::EXIT_STATE_START,
     );
@@ -315,6 +317,7 @@ fn constrain_machine_boundary(
     pc_start: usize,
     registers_start: usize,
     root_start: usize,
+    public_io_state_start: usize,
     statement: &BoundWords,
     state_start: usize,
 ) {
@@ -345,15 +348,15 @@ fn constrain_machine_boundary(
         state_start + statement_layout::MACHINE_STATE_RW_DIGEST_START_OFFSET,
         8,
     );
-    for offset in 0..8 {
-        constrain_zero(
-            builder,
-            gate,
-            statement.value(
-                state_start + statement_layout::MACHINE_STATE_IO_DIGEST_START_OFFSET + offset,
-            ),
-        );
-    }
+    copy_range(
+        builder,
+        gate,
+        claim,
+        public_io_state_start,
+        statement,
+        state_start + statement_layout::MACHINE_STATE_IO_DIGEST_START_OFFSET,
+        8,
+    );
     debug_assert_eq!(
         statement_layout::MACHINE_STATE_IO_DIGEST_START_OFFSET + 8,
         MACHINE_STATE_CANONICAL_WORDS
@@ -631,6 +634,8 @@ fn constrain_relation_field_bounds(
         claim_layout::INITIAL_PC_START,
         claim_layout::FINAL_PC_START,
         claim_layout::CLOCK_START,
+        claim_layout::JOURNAL_COUNT_START,
+        claim_layout::JOURNAL_LAST_CLOCK_START,
         claim_layout::INPUT_START_START,
         claim_layout::INPUT_WORD_COUNT_START,
         claim_layout::OUTPUT_LENGTH_ADDRESS_START,
@@ -907,7 +912,14 @@ pub(crate) mod tests {
     pub(crate) fn valid_words() -> (Vec<M31Word>, StatementWords) {
         let shape = shape();
         let claim = public_data();
-        let zero_io = IoDigest::from(Digest8::new([M31Word::ZERO; 8]));
+        let initial_io = IoDigest::from(
+            Digest8::try_from(claim.initial_public_io_state)
+                .expect("fixture initial journal digest is canonical"),
+        );
+        let final_io = IoDigest::from(
+            Digest8::try_from(claim.final_public_io_state)
+                .expect("fixture final journal digest is canonical"),
+        );
         let entry = MachineState::new(
             claim.initial_pc,
             claim.initial_regs,
@@ -915,7 +927,7 @@ pub(crate) mod tests {
                 Digest8::try_from(claim.initial_rw_root.expect("fixture root is present"))
                     .expect("fixture root is canonical"),
             ),
-            zero_io,
+            initial_io,
         )
         .expect("fixture entry state is canonical");
         let exit = MachineState::new(
@@ -925,7 +937,7 @@ pub(crate) mod tests {
                 Digest8::try_from(claim.final_rw_root.expect("fixture root is present"))
                     .expect("fixture root is canonical"),
             ),
-            zero_io,
+            final_io,
         )
         .expect("fixture exit state is canonical");
         let input = public_input_digest(&claim.io_entries, shape)
@@ -1070,6 +1082,22 @@ pub(crate) mod tests {
     }
 
     #[rstest]
+    fn journal_count_alias_at_m31_modulus_fails() {
+        let (mut claim, statement) = valid_words();
+        claim[claim_layout::JOURNAL_COUNT_START] = M31Word::from(u16::MAX);
+        claim[claim_layout::JOURNAL_COUNT_START + 1] = M31Word::from(0x7fff_u16);
+        assert_ne!(circuit(&claim, &statement).nonzero_output_count(), 0);
+    }
+
+    #[rstest]
+    fn journal_last_clock_alias_at_m31_modulus_fails() {
+        let (mut claim, statement) = valid_words();
+        claim[claim_layout::JOURNAL_LAST_CLOCK_START] = M31Word::from(u16::MAX);
+        claim[claim_layout::JOURNAL_LAST_CLOCK_START + 1] = M31Word::from(0x7fff_u16);
+        assert_ne!(circuit(&claim, &statement).nonzero_output_count(), 0);
+    }
+
+    #[rstest]
     fn register_access_after_segment_end_fails() {
         let (mut claim, statement) = valid_words();
         claim[claim_layout::REGISTER_LAST_CLOCKS_START + 2] = M31Word::from(9);
@@ -1101,10 +1129,12 @@ pub(crate) mod tests {
     }
 
     #[rstest]
-    fn nonzero_statement_journal_state_fails() {
+    fn mismatched_statement_journal_state_fails() {
         let (claim, mut statement) = valid_words();
-        statement[statement_layout::ENTRY_STATE_START
-            + statement_layout::MACHINE_STATE_IO_DIGEST_START_OFFSET] = M31Word::from(1);
+        let index = statement_layout::ENTRY_STATE_START
+            + statement_layout::MACHINE_STATE_IO_DIGEST_START_OFFSET;
+        statement[index] = M31Word::try_from(statement[index].as_u32() + 1)
+            .expect("tampered journal word remains canonical");
         assert_ne!(circuit(&claim, &statement).nonzero_output_count(), 0);
     }
 

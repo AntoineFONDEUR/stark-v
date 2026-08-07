@@ -39,7 +39,7 @@ use super::vm_public_io_hash_air::VmPublicIoHashRelations;
 use crate::relations::RecursionRelations;
 
 /// Total relation challenges drawn for one recursion verification.
-pub const UNIVERSAL_RELATION_COUNT: usize = 47;
+pub const UNIVERSAL_RELATION_COUNT: usize = 48;
 
 /// Every relation bundle drawn by the universal AIR, in canonical draw order.
 #[derive(Clone)]
@@ -306,10 +306,11 @@ mod tests {
     /// along unused. The narrow `poseidon2` relation joins them: every
     /// universal hash row is an atomic `poseidon2_io` row, so the narrow and
     /// wide emission lanes stay at zero multiplicity in the recursion AIR.
-    const DRAWN_BUT_UNUSED: [&str; 10] = [
+    const DRAWN_BUT_UNUSED: [&str; 11] = [
         "registers_state",
         "memory_access",
         "program_access",
+        "journal",
         "merkle",
         "poseidon2",
         "bitwise",
@@ -320,11 +321,13 @@ mod tests {
     ];
 
     #[test]
-    fn registry_has_forty_seven_unique_relations() {
+    fn registry_has_forty_eight_unique_relations() {
         let descriptors = universal_relation_descriptors();
         let names: HashSet<_> = descriptors.iter().map(|entry| entry.name).collect();
-        assert_eq!(descriptors.len(), UNIVERSAL_RELATION_COUNT);
-        assert_eq!(names.len(), UNIVERSAL_RELATION_COUNT);
+        assert_eq!(
+            (descriptors.len(), names.len()),
+            (UNIVERSAL_RELATION_COUNT, UNIVERSAL_RELATION_COUNT)
+        );
     }
 
     #[test]

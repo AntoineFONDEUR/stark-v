@@ -379,6 +379,7 @@ pub(crate) fn prepare_segment_leaf(
                 relation_challenges[0],
                 relation_challenges[1],
                 relation_challenges[3],
+                relation_challenges[6],
             ),
             claimed_sums: &proof_claimed_sums,
             shared_relation_sum: SecureField::from(leaf.shared_relation_sum()),
@@ -738,6 +739,7 @@ pub(crate) fn prepare_binary_node(
             segment_selector: false,
             claim_words: &zero_claim,
             relation_challenges: VmPublicLogupChallengeWords::new(
+                [M31Word::ZERO; 8],
                 [M31Word::ZERO; 8],
                 [M31Word::ZERO; 8],
                 [M31Word::ZERO; 8],
@@ -1114,6 +1116,7 @@ pub(crate) fn prepare_empty_leaf(
             segment_selector: false,
             claim_words: &zero_claim,
             relation_challenges: VmPublicLogupChallengeWords::new(
+                [M31Word::ZERO; 8],
                 [M31Word::ZERO; 8],
                 [M31Word::ZERO; 8],
                 [M31Word::ZERO; 8],

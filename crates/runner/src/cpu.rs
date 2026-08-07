@@ -1,3 +1,7 @@
+//! Mutable architectural state for one RV32IM execution.
+
+use air::poseidon2::Poseidon2Digest;
+
 use crate::trace::{Access, Tracer};
 
 /// CPU state: 32 general-purpose registers and program counter.
@@ -6,6 +10,8 @@ pub struct Cpu {
     regs: [u32; 32],
     /// Program counter.
     pub pc: u32,
+    /// Proof-bound journal digest carried across segment boundaries.
+    public_io_state: Poseidon2Digest,
 }
 
 impl Cpu {
@@ -14,7 +20,11 @@ impl Cpu {
         let mut regs = [0u32; 32];
         regs[2] = sp; // x2 = sp
         regs[3] = gp; // x3 = gp
-        Self { regs, pc: entry_pc }
+        Self {
+            regs,
+            pc: entry_pc,
+            public_io_state: Poseidon2Digest::default(),
+        }
     }
 
     /// Read register value. x0 always returns 0.
@@ -41,6 +51,18 @@ impl Cpu {
     #[inline]
     pub fn regs(&self) -> [u32; 32] {
         self.regs
+    }
+
+    /// Return the current proof-bound journal digest.
+    #[inline]
+    pub fn public_io_state(&self) -> Poseidon2Digest {
+        self.public_io_state
+    }
+
+    /// Replace the journal digest after an authenticated permutation.
+    #[inline]
+    pub(crate) fn set_public_io_state(&mut self, state: Poseidon2Digest) {
+        self.public_io_state = state;
     }
 
     // =========================================================================
@@ -92,6 +114,11 @@ mod tests {
         let mut cpu = Cpu::new(0, 0, 0);
         cpu.set_reg(0, 0xDEADBEEF);
         assert_eq!(cpu.reg(0), 0); // Still 0
+    }
+
+    #[test]
+    fn test_public_io_state_starts_zero() {
+        assert_eq!(Cpu::new(0, 0, 0).public_io_state(), [0; 8]);
     }
 
     #[test]

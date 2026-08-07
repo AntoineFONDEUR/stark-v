@@ -1,6 +1,6 @@
 //! Fixed VM public-LogUp arithmetic for recursion segment leaves.
 //!
-//! The circuit reconstructs the three VM relation challenges from constrained
+//! The circuit reconstructs the four VM relation challenges from constrained
 //! transcript words, evaluates every fixed public boundary term, adds every
 //! interaction claimed sum, and constrains the global result to zero. Optional
 //! roots and padded IO slots select denominator one while inactive, so their
@@ -28,18 +28,21 @@ const CHALLENGE_WORD_COUNT: usize = 8;
 const REGISTERS_STATE_CHALLENGE: u32 = 0;
 const MEMORY_ACCESS_CHALLENGE: u32 = 1;
 const MERKLE_CHALLENGE: u32 = 3;
+const JOURNAL_CHALLENGE: u32 = 6;
 const REGISTERS_STATE_ARITY: usize = 2;
 const MEMORY_ACCESS_ARITY: usize = 7;
 const MERKLE_ARITY: usize = 18;
+const JOURNAL_ARITY: usize = 10;
 const REGISTER_COUNT: usize = 32;
-const FIXED_PUBLIC_TERM_COUNT: u32 = 69;
+const FIXED_PUBLIC_TERM_COUNT: u32 = 71;
 
-/// Transcript words for the three VM relations used by public boundary terms.
+/// Transcript words for the four VM relations used by public boundary terms.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VmPublicLogupChallengeWords {
     registers_state: [M31Word; CHALLENGE_WORD_COUNT],
     memory_access: [M31Word; CHALLENGE_WORD_COUNT],
     merkle: [M31Word; CHALLENGE_WORD_COUNT],
+    journal: [M31Word; CHALLENGE_WORD_COUNT],
 }
 
 impl VmPublicLogupChallengeWords {
@@ -47,11 +50,13 @@ impl VmPublicLogupChallengeWords {
         registers_state: [M31Word; CHALLENGE_WORD_COUNT],
         memory_access: [M31Word; CHALLENGE_WORD_COUNT],
         merkle: [M31Word; CHALLENGE_WORD_COUNT],
+        journal: [M31Word; CHALLENGE_WORD_COUNT],
     ) -> Self {
         Self {
             registers_state,
             memory_access,
             merkle,
+            journal,
         }
     }
 
@@ -64,6 +69,7 @@ impl VmPublicLogupChallengeWords {
             ),
             relation_words(relations.memory_access.0.z, relations.memory_access.0.alpha),
             relation_words(relations.merkle.0.z, relations.merkle.0.alpha),
+            relation_words(relations.journal.0.z, relations.journal.0.alpha),
         )
     }
 
@@ -72,6 +78,7 @@ impl VmPublicLogupChallengeWords {
             REGISTERS_STATE_CHALLENGE => self.registers_state,
             MEMORY_ACCESS_CHALLENGE => self.memory_access,
             MERKLE_CHALLENGE => self.merkle,
+            JOURNAL_CHALLENGE => self.journal,
             _ => unreachable!("public LogUp requests only fixed VM relation challenges"),
         }
     }
@@ -80,7 +87,7 @@ impl VmPublicLogupChallengeWords {
         let mut words = [M31Word::ZERO; CHALLENGE_WORD_COUNT];
         // z = 7 and alpha = 0 keep every inactive reference denominator safe.
         words[0] = M31Word::from(7);
-        Self::new(words, words, words)
+        Self::new(words, words, words, words)
     }
 }
 
@@ -433,6 +440,12 @@ pub fn build_vm_public_logup_circuit(
         witness.relation_challenges.words(MERKLE_CHALLENGE),
         MERKLE_ARITY,
     );
+    let journal = BoundChallenge::new(
+        &mut builder,
+        JOURNAL_CHALLENGE,
+        witness.relation_challenges.words(JOURNAL_CHALLENGE),
+        JOURNAL_ARITY,
+    );
 
     let mut total = Rec::zero();
     let mut term_index = 0_u32;
@@ -441,6 +454,32 @@ pub fn build_vm_public_logup_circuit(
         segment.clone(),
         registers.combine(&[claim.u32(claim_layout::INITIAL_PC_START), constant(1)]),
         TermSign::Positive,
+        &mut term_index,
+    )?;
+
+    let mut initial_journal = vec![constant(0), constant(0)];
+    initial_journal.extend(
+        (0..8).map(|offset| claim.word(claim_layout::INITIAL_PUBLIC_IO_STATE_START + offset)),
+    );
+    add_public_term(
+        &mut total,
+        segment.clone(),
+        journal.combine(&initial_journal),
+        TermSign::Positive,
+        &mut term_index,
+    )?;
+    let mut final_journal = vec![
+        claim.u32(claim_layout::JOURNAL_COUNT_START),
+        claim.u32(claim_layout::JOURNAL_LAST_CLOCK_START),
+    ];
+    final_journal.extend(
+        (0..8).map(|offset| claim.word(claim_layout::FINAL_PUBLIC_IO_STATE_START + offset)),
+    );
+    add_public_term(
+        &mut total,
+        segment.clone(),
+        journal.combine(&final_journal),
+        TermSign::Negative,
         &mut term_index,
     )?;
     add_public_term(
@@ -801,6 +840,7 @@ mod tests {
             challenges.memory_access,
             challenges.registers_state,
             challenges.merkle,
+            challenges.journal,
         );
         let shape = tests::shape();
         let claim = canonical_vm_public_claim_words(&tests::public_data(), shape)
@@ -833,8 +873,12 @@ mod tests {
         let mut memory = [M31Word::ZERO; CHALLENGE_WORD_COUNT];
         // With alpha zero, every inactive RW tuple has denominator 1 - z = 0.
         memory[0] = M31Word::from(1);
-        let challenges =
-            VmPublicLogupChallengeWords::new(safe.registers_state, memory, safe.merkle);
+        let challenges = VmPublicLogupChallengeWords::new(
+            safe.registers_state,
+            memory,
+            safe.merkle,
+            safe.journal,
+        );
         assert!(
             build_vm_public_logup_circuit(
                 shape,
@@ -859,8 +903,12 @@ mod tests {
         let safe = VmPublicLogupChallengeWords::inactive_reference();
         let mut memory = [M31Word::ZERO; CHALLENGE_WORD_COUNT];
         memory[0] = M31Word::from(1);
-        let challenges =
-            VmPublicLogupChallengeWords::new(safe.registers_state, memory, safe.merkle);
+        let challenges = VmPublicLogupChallengeWords::new(
+            safe.registers_state,
+            memory,
+            safe.merkle,
+            safe.journal,
+        );
         assert!(matches!(
             build_vm_public_logup_circuit(
                 shape,
@@ -873,7 +921,7 @@ mod tests {
                     shared_relation_sum: SecureField::zero(),
                 },
             ),
-            Err(VmPublicLogupCircuitError::ZeroDenominator { term: 69 })
+            Err(VmPublicLogupCircuitError::ZeroDenominator { term: 71 })
         ));
     }
 }

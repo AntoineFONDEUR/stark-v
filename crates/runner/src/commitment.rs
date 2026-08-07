@@ -505,7 +505,8 @@ pub(crate) fn finalize_commitments_with_role(
     tracer.program = ProgramTable::new();
     tracer.memory = MemoryTable::new();
     tracer.merkle = MerkleTable::new();
-    tracer.poseidon2 = Poseidon2Table::new();
+    // Execution-time journal permutations share this constituent table with
+    // commitment hashing, so finalization appends rather than resets it.
 
     // Create program leaves
     let program_rows = decode_program(memory, layout)?;
@@ -574,6 +575,7 @@ mod tests {
         let mut cpu = crate::Cpu::new(loaded.entry, loaded.sp, loaded.gp);
         let initial_pc = cpu.pc;
         let initial_regs = cpu.regs();
+        let initial_public_io_state = cpu.public_io_state();
         let mut mem = loaded.memory;
         let mut cache: InstCache = InstCache::default();
 
@@ -599,6 +601,11 @@ mod tests {
                     final_pc: cpu.pc,
                     initial_regs,
                     final_regs: cpu.regs(),
+                    initial_public_io_state,
+                    final_public_io_state: cpu.public_io_state(),
+                    journal_count: u32::try_from(tracer.commit.len())
+                        .expect("COMMIT trace length exceeds u32"),
+                    journal_last_clock: tracer.commit.clock.last().copied().unwrap_or(0),
                     output,
                     input: Vec::new(),
                     input_start: loaded.input_start_addr,
@@ -646,6 +653,11 @@ mod tests {
                     final_pc: cpu.pc,
                     initial_regs,
                     final_regs: cpu.regs(),
+                    initial_public_io_state,
+                    final_public_io_state: cpu.public_io_state(),
+                    journal_count: u32::try_from(tracer.commit.len())
+                        .expect("COMMIT trace length exceeds u32"),
+                    journal_last_clock: tracer.commit.clock.last().copied().unwrap_or(0),
                     output,
                     input: Vec::new(),
                     input_start: loaded.input_start_addr,
@@ -683,6 +695,11 @@ mod tests {
                     final_pc: prev_pc,
                     initial_regs,
                     final_regs: cpu.regs(),
+                    initial_public_io_state,
+                    final_public_io_state: cpu.public_io_state(),
+                    journal_count: u32::try_from(tracer.commit.len())
+                        .expect("COMMIT trace length exceeds u32"),
+                    journal_last_clock: tracer.commit.clock.last().copied().unwrap_or(0),
                     output,
                     input: Vec::new(),
                     input_start: loaded.input_start_addr,

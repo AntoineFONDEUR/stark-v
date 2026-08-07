@@ -445,26 +445,30 @@ fn machine_state(
     public_data: &PublicData,
     initial: bool,
 ) -> Result<MachineState, TreeProverError> {
-    let (pc, registers, root, field) = if initial {
+    let (pc, registers, root, public_io_state, root_field, io_field) = if initial {
         (
             public_data.initial_pc,
             public_data.initial_regs,
             public_data.initial_rw_root,
+            public_data.initial_public_io_state,
             "initial read-write root",
+            "initial public I/O state",
         )
     } else {
         (
             public_data.final_pc,
             public_data.final_regs,
             public_data.final_rw_root,
+            public_data.final_public_io_state,
             "final read-write root",
+            "final public I/O state",
         )
     };
     Ok(MachineState::new(
         pc,
         registers,
-        MemoryDigest::from(required_root(segment, field, root)?),
-        IoDigest::from(Digest8::ZERO),
+        MemoryDigest::from(required_root(segment, root_field, root)?),
+        IoDigest::from(required_digest(segment, io_field, public_io_state)?),
     )?)
 }
 
@@ -474,6 +478,14 @@ fn required_root(
     root: Option<[u32; 8]>,
 ) -> Result<Digest8, TreeProverError> {
     let words = root.ok_or(TreeProverError::MissingPublicRoot { segment, field })?;
+    required_digest(segment, field, words)
+}
+
+fn required_digest(
+    segment: usize,
+    field: &'static str,
+    words: [u32; 8],
+) -> Result<Digest8, TreeProverError> {
     Digest8::try_from(words).map_err(|error| TreeProverError::NonCanonicalPublicRoot {
         segment,
         field,
@@ -667,9 +679,37 @@ mod tests {
     }
 
     #[test]
-    fn one_executed_recursion_leaf_is_the_complete_root() {
+    fn commit_guest_job_context_uses_the_public_journal_endpoints() {
+        let elf = guest_elf("commit_once");
+        let run_result = runner::run(&elf, 10_000).expect("run the one-COMMIT guest");
+        let cycles = run_result.cycles;
+        let public_data = PublicData::new(&run_result);
+        let expected_initial = IoDigest::from(
+            Digest8::try_from(public_data.initial_public_io_state)
+                .expect("initial journal state is canonical"),
+        );
+        let expected_final = IoDigest::from(
+            Digest8::try_from(public_data.final_public_io_state)
+                .expect("final journal state is canonical"),
+        );
+        let profile = crate::profile::frozen_protocol_profile().expect("frozen profile is valid");
+        let job = execution_job(&profile, &[public_data], cycles, 1)
+            .expect("the COMMIT execution forms one complete job");
+
+        assert_eq!(
+            (
+                job.complete().initial_state().public_io_state(),
+                job.complete().final_state().public_io_state(),
+            ),
+            (expected_initial, expected_final)
+        );
+    }
+
+    #[test]
+    #[ignore = "full recursive root proving is an explicit release conformance test"]
+    fn one_commit_recursion_leaf_is_the_complete_root() {
         let _assembly_guard = crate::segment_leaf::tests::universal_assembly_guard();
-        let elf = guest_elf("constant");
+        let elf = guest_elf("commit_once");
         let run_result =
             runner::run(&elf, 10_000_000).expect("run the unsplit checked-in test guest");
         let profile = crate::profile::frozen_protocol_profile().expect("frozen profile is valid");
@@ -685,12 +725,10 @@ mod tests {
             vec![run_result],
         )
         .expect("the one-segment guest produces a complete recursion tree");
-        assert!(verified_tree_has_segment_count(
-            &profile,
-            &preprocessing,
-            tree,
-            1,
-        ));
+        assert_eq!(
+            verify_tree_segment_count(&profile, &preprocessing, tree, 1),
+            Ok(())
+        );
     }
 
     #[test]
@@ -714,12 +752,10 @@ mod tests {
             10_000_000,
         )
         .expect("the capacity-bounded guest produces a complete recursion tree");
-        assert!(verified_tree_has_segment_count(
-            &profile,
-            &preprocessing,
-            tree,
-            2,
-        ));
+        assert_eq!(
+            verify_tree_segment_count(&profile, &preprocessing, tree, 2),
+            Ok(())
+        );
     }
 
     #[rstest]
@@ -747,23 +783,22 @@ mod tests {
         let tree =
             prove_recursive_segments(&profile, &vm_preprocessing, &preprocessing, run_results)
                 .expect("the measured segments produce a complete recursion tree");
-        assert!(
-            actual_segment_count == expected_segment_count
-                && verified_tree_has_segment_count(
-                    &profile,
-                    &preprocessing,
-                    tree,
-                    expected_segment_count,
-                )
+        assert_eq!(
+            (
+                actual_segment_count,
+                verify_tree_segment_count(&profile, &preprocessing, tree, expected_segment_count,),
+            ),
+            (expected_segment_count, Ok(()))
         );
     }
 
-    fn verified_tree_has_segment_count(
+    /// Preserves the exact failure stage of an expensive root conformance gate.
+    fn verify_tree_segment_count(
         profile: &FrozenProtocolProfile,
         preprocessing: &RecursionPreprocessing,
         tree: RecursiveTreeProof,
         expected_segment_count: u32,
-    ) -> bool {
+    ) -> Result<(), String> {
         let (root_statement, proof) = tree.into_parts();
         let statement = root_statement.statement();
         let span = statement.body().executed_span();
@@ -775,15 +810,20 @@ mod tests {
                     && span.first_cycle() == 0
                     && span.cycle_count() == statement.job().total_cycles()
             });
-        let conformance = crate::root::recursive_root_conformance(profile, &proof);
-        expected_span
-            && conformance.is_ok_and(crate::root::tests::matches_frozen_root_conformance)
-            && crate::root::verify_recursive_root(
-                profile,
-                preprocessing,
-                root_statement.complete_execution(),
-                proof,
-            )
-            .is_ok()
+        if !expected_span {
+            return Err("root statement has the wrong executed span".to_owned());
+        }
+        let conformance = crate::root::recursive_root_conformance(profile, &proof)
+            .map_err(|error| format!("root encoding failed: {error}"))?;
+        if !crate::root::tests::matches_frozen_root_conformance(conformance) {
+            return Err(format!("root conformance mismatch: {conformance:?}"));
+        }
+        crate::root::verify_recursive_root(
+            profile,
+            preprocessing,
+            root_statement.complete_execution(),
+            proof,
+        )
+        .map_err(|error| format!("root verification failed: {error}"))
     }
 }

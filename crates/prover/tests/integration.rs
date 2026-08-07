@@ -161,6 +161,124 @@ fn commit_standard_relations_prove_and_verify() {
     assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
 }
 
+/// A COMMIT chain cannot place a later execution clock before an earlier one.
+#[test_log::test]
+fn commit_reordered_clock_link_is_rejected_before_proving() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::prove_rv32im;
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("commit_twice");
+    let elf = std::fs::read(&elf_path).expect("read commit_twice ELF");
+    let mut run_result = run(&elf, 10_000).expect("execute two COMMIT calls");
+    run_result.tracer.commit.journal_prev_clock[1] = run_result.tracer.commit.clock[1];
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        prove_rv32im(run_result, config, &preprocessing)
+    }));
+
+    assert!(result.is_err());
+}
+
+/// The VM verifier binds the journal exit digest mixed into its transcript.
+#[test_log::test]
+fn commit_public_final_state_mutation_is_rejected() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("commit_once");
+    let elf = std::fs::read(&elf_path).expect("read commit_once ELF");
+    let run_result = run(&elf, 10_000).expect("execute one COMMIT call");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let mut proof = prove_rv32im(run_result, config, &preprocessing);
+    proof.vm.public_data.final_public_io_state[0] += 1;
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_err());
+}
+
+/// The VM verifier binds the exact number of journal transitions.
+#[test_log::test]
+fn commit_public_count_mutation_is_rejected() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("commit_once");
+    let elf = std::fs::read(&elf_path).expect("read commit_once ELF");
+    let run_result = run(&elf, 10_000).expect("execute one COMMIT call");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let mut proof = prove_rv32im(run_result, config, &preprocessing);
+    proof.vm.public_data.journal_count += 1;
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_err());
+}
+
+/// The VM verifier binds the execution clock that closes the journal chain.
+#[test_log::test]
+fn commit_public_last_clock_mutation_is_rejected() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("commit_once");
+    let elf = std::fs::read(&elf_path).expect("read commit_once ELF");
+    let run_result = run(&elf, 10_000).expect("execute one COMMIT call");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let mut proof = prove_rv32im(run_result, config, &preprocessing);
+    proof.vm.public_data.journal_last_clock += 1;
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_err());
+}
+
+/// A committed word cannot diverge from the authenticated a0 register read.
+#[test_log::test]
+fn commit_word_mutation_is_rejected() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::prove_rv32im;
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("commit_once");
+    let elf = std::fs::read(&elf_path).expect("read commit_once ELF");
+    let mut run_result = run(&elf, 10_000).expect("execute one COMMIT call");
+    run_result.tracer.commit.argument_next[0] ^= 1;
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        prove_rv32im(run_result, config, &preprocessing)
+    }));
+
+    assert!(result.is_err());
+}
+
+/// Removing an executed COMMIT row leaves its execution relations unbalanced.
+#[test_log::test]
+fn commit_dropped_row_is_rejected() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("commit_once");
+    let elf = std::fs::read(&elf_path).expect("read commit_once ELF");
+    let mut run_result = run(&elf, 10_000).expect("execute one COMMIT call");
+    run_result.tracer.commit = Tracer::default().commit;
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_err());
+}
+
 /// The supplied preprocessing commitment is part of the verifier-owned statement.
 #[test_log::test]
 fn test_verify_rejects_mismatched_preprocessing_commitment() {

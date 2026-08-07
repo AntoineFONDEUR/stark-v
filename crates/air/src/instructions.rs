@@ -8,6 +8,9 @@ pub type InstCache = FxHashMap<u32, DecodedInst>;
 /// Internal ABI selector for the proof-bound COMMIT syscall.
 pub const COMMIT_SYSCALL_ID: u32 = 1;
 
+/// Poseidon2 domain word separating journal commits from other permutations.
+pub const COMMIT_HASH_DOMAIN: u32 = 0x434f_4d4d;
+
 /// All RV32IM opcodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Opcode {

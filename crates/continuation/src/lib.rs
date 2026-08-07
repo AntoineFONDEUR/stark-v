@@ -26,6 +26,7 @@ pub enum BoundaryField {
     ProgramCounter,
     Registers,
     ReadWriteMemoryRoot,
+    PublicIoState,
     ProgramRoot,
 }
 
@@ -35,6 +36,7 @@ impl fmt::Display for BoundaryField {
             Self::ProgramCounter => "final_pc != initial_pc",
             Self::Registers => "final_regs != initial_regs",
             Self::ReadWriteMemoryRoot => "final_rw_root != initial_rw_root",
+            Self::PublicIoState => "final_public_io_state != initial_public_io_state",
             Self::ProgramRoot => "program_root differs",
         };
         formatter.write_str(name)
@@ -112,6 +114,9 @@ pub fn validate_segment_chain(public_data: &[PublicData]) -> Result<(), Continua
         if previous.final_rw_root != next.initial_rw_root {
             return Err(mismatch(BoundaryField::ReadWriteMemoryRoot));
         }
+        if previous.final_public_io_state != next.initial_public_io_state {
+            return Err(mismatch(BoundaryField::PublicIoState));
+        }
         if previous.program_root != next.program_root {
             return Err(mismatch(BoundaryField::ProgramRoot));
         }
@@ -159,6 +164,10 @@ mod tests {
             clock: 0,
             initial_regs: [0; 32],
             final_regs: [0; 32],
+            initial_public_io_state: [0; 8],
+            final_public_io_state: [0; 8],
+            journal_count: 0,
+            journal_last_clock: 0,
             reg_last_clock: [0; 32],
             program_root: None,
             initial_rw_root: None,
@@ -224,6 +233,19 @@ mod tests {
             validate_segment_chain(&[previous, public_data(2, 3)]),
             Err(ContinuationError::BoundaryMismatch {
                 field: BoundaryField::ReadWriteMemoryRoot,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn public_io_state_mismatch_is_rejected() {
+        let mut previous = public_data(1, 2);
+        previous.final_public_io_state = digest(1);
+        assert!(matches!(
+            validate_segment_chain(&[previous, public_data(2, 3)]),
+            Err(ContinuationError::BoundaryMismatch {
+                field: BoundaryField::PublicIoState,
                 ..
             })
         ));

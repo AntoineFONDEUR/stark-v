@@ -170,7 +170,10 @@ pub(crate) fn segment_statement(
             "initial read-write root",
             public_data.initial_rw_root,
         )?),
-        IoDigest::from(Digest8::ZERO),
+        IoDigest::from(required_root(
+            "initial public I/O state",
+            Some(public_data.initial_public_io_state),
+        )?),
     )?;
     let exit = MachineState::new(
         public_data.final_pc,
@@ -179,7 +182,10 @@ pub(crate) fn segment_statement(
             "final read-write root",
             public_data.final_rw_root,
         )?),
-        IoDigest::from(Digest8::ZERO),
+        IoDigest::from(required_root(
+            "final public I/O state",
+            Some(public_data.final_public_io_state),
+        )?),
     )?;
     let input = public_input_digest(&public_data.io_entries, profile.public_claim_shape())?;
     let output = public_output_digest(&public_data.io_entries, profile.public_claim_shape())?;
@@ -1053,6 +1059,26 @@ fn validate_runner_metadata(
             field: "final registers",
         });
     }
+    if metadata.public_data.initial_public_io_state != authenticated.initial_public_io_state {
+        return Err(SegmentLeafError::RunnerMetadataMismatch {
+            field: "initial public I/O state",
+        });
+    }
+    if metadata.public_data.final_public_io_state != authenticated.final_public_io_state {
+        return Err(SegmentLeafError::RunnerMetadataMismatch {
+            field: "final public I/O state",
+        });
+    }
+    if metadata.public_data.journal_count != authenticated.journal_count {
+        return Err(SegmentLeafError::RunnerMetadataMismatch {
+            field: "journal count",
+        });
+    }
+    if metadata.public_data.journal_last_clock != authenticated.journal_last_clock {
+        return Err(SegmentLeafError::RunnerMetadataMismatch {
+            field: "journal last clock",
+        });
+    }
     if metadata.public_data.reg_last_clock != authenticated.reg_last_clock {
         return Err(SegmentLeafError::RunnerMetadataMismatch {
             field: "register clocks",
@@ -1406,7 +1432,7 @@ pub(crate) mod tests {
 
     fn build_real_fixture() -> Box<RealFixture> {
         ensure_guest_built();
-        let elf = std::fs::read(guest_bin_dir().join("mulhu_alias"))
+        let elf = std::fs::read(guest_bin_dir().join("commit_once"))
             .expect("read the checked-in test guest");
         let mut segments = runner::run_segments_by_capacity(&elf, &[], 1 << 11, 10_000_000)
             .expect("run a capacity-bounded real segment");
@@ -1511,17 +1537,19 @@ pub(crate) mod tests {
     }
 
     fn machine_state(public_data: &PublicData, initial: bool) -> MachineState {
-        let (pc, registers, root) = if initial {
+        let (pc, registers, root, public_io_state) = if initial {
             (
                 public_data.initial_pc,
                 public_data.initial_regs,
                 public_data.initial_rw_root,
+                public_data.initial_public_io_state,
             )
         } else {
             (
                 public_data.final_pc,
                 public_data.final_regs,
                 public_data.final_rw_root,
+                public_data.final_public_io_state,
             )
         };
         MachineState::new(
@@ -1531,7 +1559,7 @@ pub(crate) mod tests {
                 Digest8::try_from(root.expect("read-write root is present"))
                     .expect("read-write root is canonical"),
             ),
-            IoDigest::from(Digest8::ZERO),
+            IoDigest::from(Digest8::try_from(public_io_state).expect("journal state is canonical")),
         )
         .expect("runner boundary is a canonical machine state")
     }
@@ -2117,6 +2145,19 @@ pub(crate) mod tests {
         assert_eq!(
             adapt_vm_segment_leaf(&fixture.profile, &fixture.proof, &metadata, fixture.job),
             Err(SegmentLeafError::RunnerMetadataMismatch { field: "public IO" })
+        );
+    }
+
+    #[test]
+    fn runner_journal_last_clock_disagreement_is_rejected() {
+        let fixture = real_fixture();
+        let mut metadata = fixture.metadata.clone();
+        metadata.public_data.journal_last_clock += 1;
+        assert_eq!(
+            adapt_vm_segment_leaf(&fixture.profile, &fixture.proof, &metadata, fixture.job),
+            Err(SegmentLeafError::RunnerMetadataMismatch {
+                field: "journal last clock"
+            })
         );
     }
 

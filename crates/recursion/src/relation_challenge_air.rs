@@ -216,7 +216,7 @@ fn append_plan_rows(
             segment_mask,
             binary_mask,
             public_logup_mask: u32::from(
-                plan.schema() == VerifierSchema::Vm && matches!(challenge, 0 | 1 | 3),
+                plan.schema() == VerifierSchema::Vm && matches!(challenge, 0 | 1 | 3 | 6),
             ),
             verifier_id,
             sequence,

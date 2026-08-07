@@ -459,6 +459,7 @@ fn public_logup_challenge_words(
         relation_challenge_draw(execution, 0),
         relation_challenge_draw(execution, 1),
         relation_challenge_draw(execution, 3),
+        relation_challenge_draw(execution, 6),
     )
 }
 

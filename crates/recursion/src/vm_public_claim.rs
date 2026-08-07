@@ -17,7 +17,7 @@ const VM_PUBLIC_CLAIM_HASH_DOMAIN: u16 = 0x5643;
 const PUBLIC_INPUT_HASH_DOMAIN: u16 = 0x5649;
 const PUBLIC_OUTPUT_HASH_DOMAIN: u16 = 0x564f;
 
-const FIXED_CLAIM_WORDS: usize = 259;
+const FIXED_CLAIM_WORDS: usize = 283;
 const INPUT_SLOT_WORDS: usize = 3;
 const OUTPUT_SLOT_WORDS: usize = 7;
 
@@ -38,6 +38,10 @@ enum ClaimTag {
     InputWords = 12,
     OutputWords = 13,
     Shape = 14,
+    InitialPublicIoState = 15,
+    FinalPublicIoState = 16,
+    JournalCount = 17,
+    JournalLastClock = 18,
     PublicInput = 20,
     PublicOutput = 21,
 }
@@ -140,16 +144,24 @@ pub mod canonical_layout {
     pub const FINAL_RW_ROOT_TAG: usize = 230;
     pub const FINAL_RW_ROOT_PRESENT: usize = 231;
     pub const FINAL_RW_ROOT_START: usize = 232;
-    pub const IO_HEADER_TAG: usize = 240;
-    pub const INPUT_START_START: usize = 241;
-    pub const INPUT_LENGTH_START: usize = 243;
-    pub const OUTPUT_LENGTH_ADDRESS_START: usize = 245;
-    pub const OUTPUT_DATA_ADDRESS_START: usize = 247;
-    pub const OUTPUT_LENGTH_START: usize = 249;
-    pub const HEADER_OUTPUT_WORD_COUNT_START: usize = 251;
-    pub const INPUT_WORDS_TAG: usize = 253;
-    pub const INPUT_WORD_COUNT_START: usize = 254;
-    pub const INPUT_SLOTS_START: usize = 256;
+    pub const INITIAL_PUBLIC_IO_STATE_TAG: usize = 240;
+    pub const INITIAL_PUBLIC_IO_STATE_START: usize = 241;
+    pub const FINAL_PUBLIC_IO_STATE_TAG: usize = 249;
+    pub const FINAL_PUBLIC_IO_STATE_START: usize = 250;
+    pub const JOURNAL_COUNT_TAG: usize = 258;
+    pub const JOURNAL_COUNT_START: usize = 259;
+    pub const JOURNAL_LAST_CLOCK_TAG: usize = 261;
+    pub const JOURNAL_LAST_CLOCK_START: usize = 262;
+    pub const IO_HEADER_TAG: usize = 264;
+    pub const INPUT_START_START: usize = 265;
+    pub const INPUT_LENGTH_START: usize = 267;
+    pub const OUTPUT_LENGTH_ADDRESS_START: usize = 269;
+    pub const OUTPUT_DATA_ADDRESS_START: usize = 271;
+    pub const OUTPUT_LENGTH_START: usize = 273;
+    pub const HEADER_OUTPUT_WORD_COUNT_START: usize = 275;
+    pub const INPUT_WORDS_TAG: usize = 277;
+    pub const INPUT_WORD_COUNT_START: usize = 278;
+    pub const INPUT_SLOTS_START: usize = 280;
 
     pub const fn input_slot_present(index: usize) -> usize {
         INPUT_SLOTS_START + index * INPUT_SLOT_WORDS
@@ -206,6 +218,10 @@ pub fn canonical_vm_public_claim_word_kinds(
     push_optional_root_kind(&mut kinds, ClaimTag::ProgramRoot);
     push_optional_root_kind(&mut kinds, ClaimTag::InitialRwRoot);
     push_optional_root_kind(&mut kinds, ClaimTag::FinalRwRoot);
+    push_tagged_digest_kind(&mut kinds, ClaimTag::InitialPublicIoState);
+    push_tagged_digest_kind(&mut kinds, ClaimTag::FinalPublicIoState);
+    push_tagged_u32_kind(&mut kinds, ClaimTag::JournalCount);
+    push_tagged_u32_kind(&mut kinds, ClaimTag::JournalLastClock);
     push_constant(&mut kinds, ClaimTag::IoHeader.word());
     push_u32_kinds(&mut kinds, 6);
     push_constant(&mut kinds, ClaimTag::InputWords.word());
@@ -250,6 +266,11 @@ fn push_tagged_u32s_kind(kinds: &mut Vec<VmPublicClaimWordKind>, tag: ClaimTag, 
 fn push_optional_root_kind(kinds: &mut Vec<VmPublicClaimWordKind>, tag: ClaimTag) {
     push_constant(kinds, tag.word());
     kinds.push(VmPublicClaimWordKind::Boolean);
+    kinds.extend([VmPublicClaimWordKind::Field; 8]);
+}
+
+fn push_tagged_digest_kind(kinds: &mut Vec<VmPublicClaimWordKind>, tag: ClaimTag) {
+    push_constant(kinds, tag.word());
     kinds.extend([VmPublicClaimWordKind::Field; 8]);
 }
 
@@ -307,6 +328,28 @@ pub fn canonical_vm_public_claim_words(
         "final read-write root",
         public_data.final_rw_root,
     )?;
+    append_tagged_digest(
+        &mut words,
+        ClaimTag::InitialPublicIoState,
+        "initial public I/O state",
+        public_data.initial_public_io_state,
+    )?;
+    append_tagged_digest(
+        &mut words,
+        ClaimTag::FinalPublicIoState,
+        "final public I/O state",
+        public_data.final_public_io_state,
+    )?;
+    append_tagged_u32(
+        &mut words,
+        ClaimTag::JournalCount,
+        public_data.journal_count,
+    );
+    append_tagged_u32(
+        &mut words,
+        ClaimTag::JournalLastClock,
+        public_data.journal_last_clock,
+    );
     append_io_header(&mut words, &public_data.io_entries)?;
     append_input_words(&mut words, &public_data.io_entries, shape)?;
     append_output_words(&mut words, &public_data.io_entries, shape)?;
@@ -538,6 +581,25 @@ fn append_optional_root(
     Ok(())
 }
 
+fn append_tagged_digest(
+    words: &mut Vec<M31Word>,
+    tag: ClaimTag,
+    field: &'static str,
+    digest: [u32; 8],
+) -> Result<(), VmPublicClaimError> {
+    words.push(tag.word());
+    for (index, value) in digest.into_iter().enumerate() {
+        words.push(M31Word::try_from(value).map_err(|_| {
+            VmPublicClaimError::NonCanonicalDigest {
+                field,
+                index,
+                value,
+            }
+        })?);
+    }
+    Ok(())
+}
+
 fn append_io_header(words: &mut Vec<M31Word>, io: &IoEntries) -> Result<(), VmPublicClaimError> {
     words.push(ClaimTag::IoHeader.word());
     append_u32(words, io.input_start);
@@ -629,6 +691,11 @@ pub enum VmPublicClaimError {
         index: usize,
         value: u32,
     },
+    NonCanonicalDigest {
+        field: &'static str,
+        index: usize,
+        value: u32,
+    },
     ShapeCapacityOutOfRange {
         field: &'static str,
         capacity: u32,
@@ -658,6 +725,14 @@ impl fmt::Display for VmPublicClaimError {
                 )
             }
             Self::NonCanonicalRoot {
+                field,
+                index,
+                value,
+            } => write!(
+                formatter,
+                "VM public claim {field} limb {index} is 0x{value:08x}, not canonical M31"
+            ),
+            Self::NonCanonicalDigest {
                 field,
                 index,
                 value,
@@ -717,6 +792,10 @@ pub(crate) mod tests {
             clock: 8,
             initial_regs,
             final_regs,
+            initial_public_io_state: [31, 32, 33, 34, 35, 36, 37, 38],
+            final_public_io_state: [41, 42, 43, 44, 45, 46, 47, 48],
+            journal_count: 2,
+            journal_last_clock: 7,
             reg_last_clock,
             program_root: Some([1, 2, 3, 4, 5, 6, 7, 8]),
             initial_rw_root: Some([11, 12, 13, 14, 15, 16, 17, 18]),
@@ -750,14 +829,14 @@ pub(crate) mod tests {
             vm_public_claim_digest(&public_data(), shape()),
             Ok(VmPublicClaimDigest::from(Digest8::new(
                 [
-                    430_820_593_u32,
-                    1_891_182_383,
-                    113_085_284,
-                    1_635_530_231,
-                    1_350_730_882,
-                    432_104_742,
-                    980_554_028,
-                    240_635_051,
+                    1_547_878_039_u32,
+                    799_563_042,
+                    100_347_698,
+                    807_450_319,
+                    223_843_991,
+                    811_334_784,
+                    1_515_615_935,
+                    2_129_409_038,
                 ]
                 .map(|value| { M31Word::try_from(value).expect("conformance word is canonical") }),
             )))
@@ -769,6 +848,50 @@ pub(crate) mod tests {
         let first = public_data();
         let mut second = public_data();
         second.reg_last_clock[2] += 1;
+        assert_ne!(
+            vm_public_claim_digest(&first, shape()),
+            vm_public_claim_digest(&second, shape())
+        );
+    }
+
+    #[test]
+    fn vm_public_claim_digest_binds_initial_journal_state() {
+        let first = public_data();
+        let mut second = public_data();
+        second.initial_public_io_state[0] += 1;
+        assert_ne!(
+            vm_public_claim_digest(&first, shape()),
+            vm_public_claim_digest(&second, shape())
+        );
+    }
+
+    #[test]
+    fn vm_public_claim_digest_binds_final_journal_state() {
+        let first = public_data();
+        let mut second = public_data();
+        second.final_public_io_state[0] += 1;
+        assert_ne!(
+            vm_public_claim_digest(&first, shape()),
+            vm_public_claim_digest(&second, shape())
+        );
+    }
+
+    #[test]
+    fn vm_public_claim_digest_binds_journal_count() {
+        let first = public_data();
+        let mut second = public_data();
+        second.journal_count += 1;
+        assert_ne!(
+            vm_public_claim_digest(&first, shape()),
+            vm_public_claim_digest(&second, shape())
+        );
+    }
+
+    #[test]
+    fn vm_public_claim_digest_binds_journal_last_clock() {
+        let first = public_data();
+        let mut second = public_data();
+        second.journal_last_clock += 1;
         assert_ne!(
             vm_public_claim_digest(&first, shape()),
             vm_public_claim_digest(&second, shape())
@@ -847,6 +970,20 @@ pub(crate) mod tests {
             vm_public_claim_digest(&value, shape()),
             Err(VmPublicClaimError::NonCanonicalRoot {
                 field: "program root",
+                index: 7,
+                value: M31_MODULUS,
+            })
+        );
+    }
+
+    #[test]
+    fn non_canonical_journal_digest_limb_is_rejected() {
+        let mut value = public_data();
+        value.final_public_io_state[7] = M31_MODULUS;
+        assert_eq!(
+            vm_public_claim_digest(&value, shape()),
+            Err(VmPublicClaimError::NonCanonicalDigest {
+                field: "final public I/O state",
                 index: 7,
                 value: M31_MODULUS,
             })

@@ -24,7 +24,7 @@ recursion proofs. Its level-ordered tree driver proves finalized VM segments,
 adds canonical padding, and returns only one root statement and root proof. The
 application root verifier binds that proof to a caller-supplied complete
 execution. Every successfully produced canonical root proof encodes through the
-frozen 3,479,096-byte proof wire and uses the same profile-owned 4,943-step
+frozen 3,479,096-byte proof wire and uses the same profile-owned 4,945-step
 verifier plan.
 
 The implemented foundation includes:

@@ -86,11 +86,11 @@ pub const VM_DYNAMIC_COMPONENT_LOG_SIZE: u32 = 6;
 /// these tables require more rows than its instruction tables.
 pub const VM_COMMITMENT_COMPONENT_LOG_SIZE: u32 = 11;
 /// VM table count compiled from the checked-in component roster.
-pub const VM_TABLE_COUNT: usize = 1416;
+pub const VM_TABLE_COUNT: usize = 1512;
 /// VM OODS samples compiled from the checked-in component roster.
-pub const VM_SAMPLED_VALUE_COUNT: usize = 1524;
+pub const VM_SAMPLED_VALUE_COUNT: usize = 1620;
 /// VM AIR constraints compiled from the checked-in component roster.
-pub const VM_AIR_INSTRUCTION_COUNT: usize = 544;
+pub const VM_AIR_INSTRUCTION_COUNT: usize = 597;
 /// VM preprocessing columns in canonical commitment order.
 pub const VM_PREPROCESSED_COLUMN_COUNT: usize = 14;
 /// Flat authenticated VM values across every raw query.
@@ -130,7 +130,7 @@ pub const RECURSION_TRACE_PATH_COUNT: usize = COMMITMENT_TREE_COUNT * FRI_QUERY_
 
 /// Canonical protocol identifier limbs for cross-language conformance.
 pub const PROTOCOL_ID_WORDS: [u32; 8] = [
-    260724498, 1056429239, 162301300, 1188550917, 1596141750, 682600581, 863947950, 344096256,
+    1696431044, 1504695671, 1975523688, 1955391245, 877564173, 18316442, 885929987, 784128183,
 ];
 /// Digest of all ordered VM preprocessing identifiers and log sizes.
 pub const VM_PREPROCESSING_WORDS: [u32; 8] = [
@@ -862,7 +862,7 @@ mod tests {
         ];
         assert_eq!(
             actual,
-            [1416, 4, 1524, 20, 544, 14, 2221, 4, 2365, 22, 1319, 587, 36]
+            [1512, 4, 1620, 20, 597, 14, 2221, 4, 2365, 22, 1319, 587, 36]
         );
     }
 
@@ -897,8 +897,8 @@ mod tests {
             digest(VM_PREPROCESSING_WORDS),
             digest(RECURSION_PREPROCESSING_WORDS),
             digest([
-                1382158882, 639948062, 696853649, 1967380268, 1649896554, 286238969, 116982786,
-                411321569,
+                1178552387, 2032963711, 526923786, 1772398340, 1481691220, 779525080, 1670936839,
+                1173528054,
             ]),
             digest([
                 1270421312, 1168180329, 1487888523, 1859018076, 1573466635, 85579857, 111495589,

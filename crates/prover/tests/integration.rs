@@ -161,6 +161,42 @@ fn commit_standard_relations_prove_and_verify() {
     assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
 }
 
+/// One register-ALU chunk closes every generated component relation in a proof.
+#[test_log::test]
+fn base_alu_reg_single_chunk_proves_and_verifies() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("base_alu_reg_output");
+    let elf = std::fs::read(&elf_path).expect("read register-ALU ELF");
+    let run_result = run(&elf, 10_000).expect("execute one register-ALU chunk");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
+}
+
+/// One immediate-ALU chunk closes every generated component relation in a proof.
+#[test_log::test]
+fn base_alu_imm_single_chunk_proves_and_verifies() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("base_alu_imm_output");
+    let elf = std::fs::read(&elf_path).expect("read immediate-ALU ELF");
+    let run_result = run(&elf, 10_000).expect("execute one immediate-ALU chunk");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
+}
+
 /// A felt-defined LUI row closes its program, state, register, and range relations.
 #[test_log::test]
 fn lui_standard_relations_prove_and_verify() {

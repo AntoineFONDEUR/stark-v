@@ -4,10 +4,11 @@
 > implements static control flow, functions, hints, degree-budget
 > materialization, relation statements, embedded components, and proof-bound VM
 > register/aligned-memory access. Poseidon2 and every recursion-local AIR use it
-> in production. LUI, AUIPC, JAL, and JALR have one felt-function source for
-> execution, witness filling, and AIR; the other inner VM opcode AIRs still use
-> `define_air!` with separate runner handlers. Macro source and tests are
-> authoritative for implemented syntax.
+> in production. LUI, AUIPC, JAL, JALR, and the base register/immediate ALU
+> families have one felt-function source for execution, witness filling, and
+> AIR; the other inner VM opcode AIRs still use `define_air!` with separate
+> runner handlers. Macro source and tests are authoritative for implemented
+> syntax.
 
 ## The observation
 
@@ -125,8 +126,9 @@ lookups, and component integration from one declaration.
 `define_air_fns!` provides the felt-function path: degree-budget
 materialization, static `for`/`map`/`sum`, inline functions and function I/O,
 hints, external relation statements, canonical M31 splitting, byte-level lookup
-operations, embedded flag columns, and embedded component integration.
-Poseidon2, LUI, AUIPC, JAL, JALR, and every recursion-local AIR use this path.
+operations, wrapping word arithmetic, embedded flag columns, and embedded
+component integration. Poseidon2, LUI, AUIPC, JAL, JALR, both base ALU families,
+and every recursion-local AIR use this path.
 
 The remaining compiler work is opcode execution and runner migration. It is not
 a recursion-local macro migration. Every component reachable from the recursion
@@ -200,8 +202,12 @@ Opcode compiler capabilities, in dependency order:
    canonical four-byte representation, constrains its recomposition, and
    consumes `range_check_8_8` plus `range_check_m31`. `bitand`, `bitor`, and
    `bitxor` commit one byte output and consume the corresponding preprocessed
-   `bitwise` row. AUIPC and JAL use the split for their written word; JALR
-   splits its canonical target and binds the cleared low bit through `bitand`.
+   `bitwise` row, optionally under an opcode multiplicity. `add_u32` and
+   `sub_u32` commit four wrapping result limbs plus the carry/borrow chain,
+   constrain every chain bit, and range-check an active result. AUIPC and JAL
+   use the split for their written word; JALR splits its canonical target and
+   binds the cleared low bit through `bitand`; the base ALU families compose the
+   arithmetic and bitwise primitives under one-hot opcode flags.
 
 5. **Dispatch.** Opcode families with flag columns (`base_alu_reg`'s
    add/sub/xor/or/and) are one function with one-hot felt parameters. Arithmetic
@@ -210,7 +216,7 @@ Opcode compiler capabilities, in dependency order:
    (`air::instructions`) and calls the generated family function with the
    selected flag tuple.
 
-The capabilities (1) through (4) are in place. Tests in
+The capabilities (1) through (5) are in place. Tests in
 `crates/stwo-macros/tests/air_fns.rs` prove generated register and memory
 accesses through external relation boundaries, reject stale clocks, incorrect
 prior values, read-side writes, and non-zero x0 writes, and exercise gap filling
@@ -223,6 +229,8 @@ The **integration seam is also in place**. `define_air!` now takes an
 ```text
 external: {
     auipc: crate::opcodes::auipc,
+    base_alu_imm: crate::opcodes::base_alu_imm,
+    base_alu_reg: crate::opcodes::base_alu_reg,
     jal: crate::opcodes::jal,
     jalr: crate::opcodes::jalr,
     poseidon2: crate::poseidon2,
@@ -232,8 +240,8 @@ external: {
 
 Each entry generates the `Tracer` field, initialization, `total_traces`, debug,
 and column re-export, so the monolithic `Tracer` is composable. The component
-router assigns Poseidon2 to the detached hash proof and all four generated
-opcode tables to the VM proof. Migrating another opcode means defining it via
+router assigns Poseidon2 to the detached hash proof and all six generated opcode
+tables to the VM proof. Migrating another opcode means defining it via
 `define_air_fns!`, adding it to `external:`, routing its generated component,
 and removing its schema and runner semantics after focused valid and malformed
 tests pass.
@@ -248,11 +256,11 @@ needs prover-side stwo types the air crate does not depend on. But
 composition for poseidon2. The retirement path is therefore not "merge
 `components!` into `define_air!`" but:
 
-1. `[done]` Migrate `lui`, `auipc`, `jal`, and `jalr` end to end: the air crate
-   owns their felt functions, the prover uses their generated components, and
-   the runner retains only decoding;
-2. `[pending]` Migrate the remaining families in dependency order (the LogUp
-   balance is checked by the existing e2e constraint tests at every step);
+1. `[done]` Migrate `lui`, `auipc`, `jal`, `jalr`, `base_alu_reg`, and
+   `base_alu_imm` end to end: the air crate owns their felt functions, the
+   prover uses their generated components, and the runner retains only decoding;
+2. `[pending]` Migrate the remaining families in dependency order; the LogUp
+   balance is checked by the existing component tests at every step;
 3. `[pending]` When the last family is out of `define_air!`'s opcode list,
    delete `components!` (~1000 lines), the `define_air!` opcode syntax, and
    `runner/src/ops/`.

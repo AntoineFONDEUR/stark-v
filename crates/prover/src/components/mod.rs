@@ -6,8 +6,8 @@
 stwo_macros::components! {
     trace: {
         auipc: air::opcodes::auipc::component,
-        base_alu_imm,
-        base_alu_reg,
+        base_alu_imm: air::opcodes::base_alu_imm::component,
+        base_alu_reg: air::opcodes::base_alu_reg::component,
         branch_eq,
         branch_lt,
         commit,
@@ -195,4 +195,30 @@ mod tests {
 
     crate::test_lookup_e2e!(base_alu_reg, range_check_20, add);
     crate::test_lookup_e2e!(load_store, range_check_20, lw);
+
+    #[test]
+    fn mutated_generated_add_result_fails_component_constraints() {
+        let mut tracer = crate::e2e::run_test_bin("add");
+        tracer.base_alu_reg.add_result_0[0] ^= 1;
+        let traces = super::gen_trace(tracer);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::Components::assert_constraints_on_polys(
+                &traces,
+                &crate::relations::Relations::dummy(),
+            );
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mutated_generated_xori_result_leaves_a_relation_deficit() {
+        let mut tracer = crate::e2e::run_test_bin("xori");
+        tracer.base_alu_imm.xor_0[0] ^= 1;
+        let traces = super::gen_trace(tracer);
+        let (_, claimed_sum) =
+            super::gen_interaction_trace(&traces, &crate::relations::Relations::dummy());
+
+        assert!(!claimed_sum.sum().is_zero());
+    }
 }

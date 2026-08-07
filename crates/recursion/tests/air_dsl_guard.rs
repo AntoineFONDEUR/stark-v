@@ -189,11 +189,11 @@ const VM_INVENTORY: [ComponentOwner; 27] = [
     },
     ComponentOwner {
         name: "base_alu_imm",
-        source: "crates/air/src/schema.rs",
+        source: "crates/air/src/opcodes/base_alu_imm.rs",
     },
     ComponentOwner {
         name: "base_alu_reg",
-        source: "crates/air/src/schema.rs",
+        source: "crates/air/src/opcodes/base_alu_reg.rs",
     },
     ComponentOwner {
         name: "branch_eq",
@@ -293,9 +293,17 @@ const VM_INVENTORY: [ComponentOwner; 27] = [
     },
 ];
 
-const OWNER_POLICIES: [OwnerPolicy; 36] = [
+const OWNER_POLICIES: [OwnerPolicy; 38] = [
     OwnerPolicy {
         source: "crates/air/src/opcodes/auipc.rs",
+        accepted_macro_count: 1,
+    },
+    OwnerPolicy {
+        source: "crates/air/src/opcodes/base_alu_imm.rs",
+        accepted_macro_count: 1,
+    },
+    OwnerPolicy {
+        source: "crates/air/src/opcodes/base_alu_reg.rs",
         accepted_macro_count: 1,
     },
     OwnerPolicy {
@@ -496,6 +504,14 @@ fn vm_component_router_uses_only_the_expected_dsl_routes() {
                 (
                     "auipc".to_owned(),
                     "air::opcodes::auipc::component".to_owned(),
+                ),
+                (
+                    "base_alu_imm".to_owned(),
+                    "air::opcodes::base_alu_imm::component".to_owned(),
+                ),
+                (
+                    "base_alu_reg".to_owned(),
+                    "air::opcodes::base_alu_reg::component".to_owned(),
                 ),
                 ("jal".to_owned(), "air::opcodes::jal::component".to_owned(),),
                 (

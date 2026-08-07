@@ -32,6 +32,8 @@
 //! `split_m31(value)` commits the canonical four-byte representation of a felt
 //! and binds it through the standard range relations. `bitand`, `bitor`, and
 //! `bitxor` commit one byte result and bind it through the bitwise relation.
+//! `add_u32` and `sub_u32` commit wrapping word results plus their terminal
+//! carry or borrow and constrain the byte chain in the same frame.
 
 use std::collections::HashMap;
 
@@ -846,6 +848,14 @@ enum FillStep {
         rhs: Ident,
         output: Ident,
     },
+    /// Evaluate wrapping 32-bit arithmetic over canonical byte limbs.
+    WordArithmetic {
+        kind: WordArithmeticKind,
+        lhs: [Ident; 4],
+        rhs: [Ident; 4],
+        output: [Ident; 4],
+        carries: [Ident; 4],
+    },
     /// Bind the prior word before a write computes its requested next limbs.
     AccessPrepare {
         kind: AccessKind,
@@ -870,6 +880,12 @@ enum BitwiseKind {
     And,
     Or,
     Xor,
+}
+
+#[derive(Clone, Copy)]
+enum WordArithmeticKind {
+    Add,
+    Sub,
 }
 
 impl BitwiseKind {
@@ -1301,10 +1317,12 @@ impl Lowerer<'_> {
                     return Ok(vec![Value::Array(elements)]);
                 }
                 "bitand" | "bitor" | "bitxor" => {
-                    if names.len() != 1 || call.args.len() != 2 {
+                    if names.len() != 1 || !(2..=3).contains(&call.args.len()) {
                         return Err(syn::Error::new_spanned(
                             call,
-                            format!("{callee} takes two byte felts and binds one result"),
+                            format!(
+                                "{callee} takes two byte felts, an optional lookup multiplicity, and binds one result"
+                            ),
                         ));
                     }
                     if self.relation_arities.get("bitwise") != Some(&4) {
@@ -1320,7 +1338,7 @@ impl Lowerer<'_> {
                         _ => unreachable!("matched bitwise intrinsic"),
                     };
                     let mut inputs = Vec::with_capacity(2);
-                    for (position, arg) in call.args.iter().enumerate() {
+                    for (position, arg) in call.args.iter().take(2).enumerate() {
                         let (lowered, degree) = self.lower(arg, scope, budget)?;
                         let cell = match &lowered {
                             Expr::Path(path) => path.path.require_ident()?.clone(),
@@ -1341,11 +1359,18 @@ impl Lowerer<'_> {
                         syn::parse_quote!(#relation_id),
                         0,
                     );
+                    let relation = format_ident!("bitwise");
+                    let mult_cell = self.lower_relation_multiplicity(
+                        &relation,
+                        call.args.get(2),
+                        scope,
+                        budget,
+                    )?;
                     self.relation_entries.push((
-                        format_ident!("bitwise"),
+                        relation,
                         vec![lhs.clone(), rhs.clone(), output.clone(), relation_id_cell],
                         false,
-                        None,
+                        mult_cell,
                     ));
                     self.fill.push(FillStep::Bitwise {
                         kind,
@@ -1357,6 +1382,103 @@ impl Lowerer<'_> {
                         cell: output,
                         degree: 1,
                     }]);
+                }
+                "add_u32" | "sub_u32" => {
+                    if names.len() != 2 || !(2..=3).contains(&call.args.len()) {
+                        return Err(syn::Error::new_spanned(
+                            call,
+                            format!(
+                                "{callee} takes two four-limb words, an optional range-check multiplicity, and binds `(result, carry_or_borrow)`"
+                            ),
+                        ));
+                    }
+                    if self.relation_arities.get("range_check_8_8") != Some(&2) {
+                        return Err(syn::Error::new_spanned(
+                            call,
+                            format!("{callee} requires `relation range_check_8_8(2);`"),
+                        ));
+                    }
+                    let lhs = expect_word(&call.args[0], scope)?;
+                    let rhs = expect_word(&call.args[1], scope)?;
+                    let output = std::array::from_fn(|position| {
+                        let base = format_ident!("{}_{}", names[0], position);
+                        let cell = self.register_column(&base);
+                        self.extra_columns.push(cell.clone());
+                        cell
+                    });
+                    let carries = std::array::from_fn(|position| {
+                        let base = format_ident!("{}_chain_{}", names[0], position);
+                        let cell = self.register_column(&base);
+                        self.extra_columns.push(cell.clone());
+                        cell
+                    });
+                    let kind = if callee == "add_u32" {
+                        WordArithmeticKind::Add
+                    } else {
+                        WordArithmeticKind::Sub
+                    };
+                    for position in 0..4 {
+                        let lhs_limb = &lhs[position];
+                        let rhs_limb = &rhs[position];
+                        let output_limb = &output[position];
+                        let carry = &carries[position];
+                        let carry_in: Expr = if position == 0 {
+                            syn::parse_quote!(0)
+                        } else {
+                            let prior = &carries[position - 1];
+                            syn::parse_quote!(#prior)
+                        };
+                        let equation = match kind {
+                            WordArithmeticKind::Add => syn::parse_quote!(
+                                #lhs_limb + #rhs_limb + #carry_in
+                                    - #output_limb - 256 * #carry
+                            ),
+                            WordArithmeticKind::Sub => syn::parse_quote!(
+                                #lhs_limb + 256 * #carry
+                                    - #rhs_limb - #carry_in - #output_limb
+                            ),
+                        };
+                        self.constraints.push(equation);
+                        self.constraints
+                            .push(syn::parse_quote!(#carry * (1 - #carry)));
+                    }
+                    let relation = format_ident!("range_check_8_8");
+                    let mult_cell = self.lower_relation_multiplicity(
+                        &relation,
+                        call.args.get(2),
+                        scope,
+                        budget,
+                    )?;
+                    self.relation_entries.push((
+                        relation.clone(),
+                        vec![output[0].clone(), output[1].clone()],
+                        false,
+                        mult_cell.clone(),
+                    ));
+                    self.relation_entries.push((
+                        relation,
+                        vec![output[2].clone(), output[3].clone()],
+                        false,
+                        mult_cell,
+                    ));
+                    self.fill.push(FillStep::WordArithmetic {
+                        kind,
+                        lhs: lhs.clone(),
+                        rhs: rhs.clone(),
+                        output: output.clone(),
+                        carries: carries.clone(),
+                    });
+                    let result = Value::Array(
+                        output
+                            .into_iter()
+                            .map(|cell| Value::Scalar { cell, degree: 1 })
+                            .collect(),
+                    );
+                    let terminal = Value::Scalar {
+                        cell: carries[3].clone(),
+                        degree: 1,
+                    };
+                    return Ok(vec![result, terminal]);
                 }
                 "constant" | "sum" | "pow2" | "inv" => {}
                 _ => {
@@ -1546,13 +1668,7 @@ impl Lowerer<'_> {
             }
             Ok(lowerer.register_derived(&base, lowered, degree))
         };
-        let mult_cell = match mult {
-            None => None,
-            Some(expr) => {
-                let base = format_ident!("{}_mult{}", relation, self.relation_entries.len());
-                Some(to_cell(self, expr, base)?)
-            }
-        };
+        let mult_cell = self.lower_relation_multiplicity(&relation, mult, scope, budget)?;
         let mut arg_cells = Vec::new();
         for arg in args {
             if let Ok(ident) = expect_ident(arg)
@@ -1575,6 +1691,24 @@ impl Lowerer<'_> {
         self.relation_entries
             .push((relation, arg_cells, emit, mult_cell));
         Ok(())
+    }
+
+    fn lower_relation_multiplicity(
+        &mut self,
+        relation: &Ident,
+        mult: Option<&Expr>,
+        scope: &HashMap<String, Value>,
+        budget: usize,
+    ) -> syn::Result<Option<Ident>> {
+        let Some(expr) = mult else {
+            return Ok(None);
+        };
+        let (lowered, degree) = self.lower(expr, scope, budget)?;
+        if let Expr::Path(path) = &lowered {
+            return Ok(Some(path.path.require_ident()?.clone()));
+        }
+        let base = format_ident!("{}_mult{}", relation, self.relation_entries.len());
+        Ok(Some(self.register_derived(&base, lowered, degree)))
     }
 
     fn register_access_columns(
@@ -1995,6 +2129,28 @@ fn expect_ident(expr: &Expr) -> syn::Result<Ident> {
         return Ok(ident.clone());
     }
     Err(syn::Error::new_spanned(expr, "expected a plain name"))
+}
+
+fn expect_word(expr: &Expr, scope: &HashMap<String, Value>) -> syn::Result<[Ident; 4]> {
+    let ident = expect_ident(expr)?;
+    let Some(Value::Array(elements)) = scope.get(&ident.to_string()) else {
+        return Err(syn::Error::new_spanned(
+            expr,
+            "word arithmetic takes named four-limb arrays",
+        ));
+    };
+    if elements.len() != 4 {
+        return Err(syn::Error::new_spanned(
+            expr,
+            "word arithmetic takes named four-limb arrays",
+        ));
+    }
+    elements
+        .iter()
+        .map(|value| value.scalar().map(|(cell, _)| cell.clone()))
+        .collect::<syn::Result<Vec<_>>>()?
+        .try_into()
+        .map_err(|_| syn::Error::new_spanned(expr, "word arithmetic takes four limbs"))
 }
 
 fn expect_range(expr: &Expr) -> syn::Result<(usize, usize)> {
@@ -4006,6 +4162,54 @@ fn generate_intrinsic_fill_step(step: &FillStep) -> syn::Result<TokenStream2> {
                 let #output = #base_field::from_u32_unchecked(#operation);
             })
         }
+        FillStep::WordArithmetic {
+            kind,
+            lhs,
+            rhs,
+            output,
+            carries,
+        } => {
+            let steps = lhs
+                .iter()
+                .zip(rhs)
+                .zip(output)
+                .zip(carries)
+                .map(|(((lhs, rhs), output), carry)| match kind {
+                    WordArithmeticKind::Add => quote! {
+                        let __wide = u16::from(
+                            u8::try_from(#lhs.0).expect("word limb must fit in u8"),
+                        ) + u16::from(
+                            u8::try_from(#rhs.0).expect("word limb must fit in u8"),
+                        ) + __carry;
+                        let #output = #base_field::from_u32_unchecked(
+                            u32::from((__wide & 0xff) as u8),
+                        );
+                        __carry = __wide >> 8;
+                        let #carry = #base_field::from_u32_unchecked(u32::from(__carry));
+                    },
+                    WordArithmeticKind::Sub => quote! {
+                        let __wide = i16::from(
+                            u8::try_from(#lhs.0).expect("word limb must fit in u8"),
+                        ) - i16::from(
+                            u8::try_from(#rhs.0).expect("word limb must fit in u8"),
+                        ) - __borrow;
+                        let #output = #base_field::from_u32_unchecked(
+                            u32::from(__wide.rem_euclid(256) as u8),
+                        );
+                        __borrow = i16::from(__wide < 0);
+                        let #carry = #base_field::from_u32_unchecked(__borrow as u32);
+                    },
+                })
+                .collect::<Vec<_>>();
+            let initial = match kind {
+                WordArithmeticKind::Add => quote!(let mut __carry = 0u16;),
+                WordArithmeticKind::Sub => quote!(let mut __borrow = 0i16;),
+            };
+            Ok(quote! {
+                #initial
+                #(#steps)*
+            })
+        }
         _ => Err(syn::Error::new(
             proc_macro2::Span::call_site(),
             "expected an intrinsic fill step",
@@ -4034,7 +4238,9 @@ fn generate_embedded_fill(
                 steps.push(quote! { let #cell = #value; });
             }
             FillStep::Call { .. } => unreachable!("embedded functions make no calls"),
-            FillStep::SplitM31 { .. } | FillStep::Bitwise { .. } => {
+            FillStep::SplitM31 { .. }
+            | FillStep::Bitwise { .. }
+            | FillStep::WordArithmetic { .. } => {
                 steps.push(generate_intrinsic_fill_step(step)?);
             }
             FillStep::AccessPrepare { .. } | FillStep::AccessCommit { .. } => {
@@ -4128,7 +4334,9 @@ fn generate_call_fn(
                     });
                 }
             }
-            FillStep::SplitM31 { .. } | FillStep::Bitwise { .. } => {
+            FillStep::SplitM31 { .. }
+            | FillStep::Bitwise { .. }
+            | FillStep::WordArithmetic { .. } => {
                 steps.push(generate_intrinsic_fill_step(step)?);
             }
             FillStep::AccessPrepare { .. } | FillStep::AccessCommit { .. } => {

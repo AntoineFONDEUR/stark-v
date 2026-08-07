@@ -12,24 +12,24 @@ pub fn execute(
 ) -> Result<(), RunError> {
     match inst.opcode {
         // R-type ALU
-        Opcode::Add => alu::add(cpu, inst, tracer),
-        Opcode::Sub => alu::sub(cpu, inst, tracer),
+        Opcode::Add => alu::add(cpu, mem, inst, tracer),
+        Opcode::Sub => alu::sub(cpu, mem, inst, tracer),
         Opcode::Sll => alu::sll(cpu, inst, tracer),
         Opcode::Slt => alu::slt(cpu, inst, tracer),
         Opcode::Sltu => alu::sltu(cpu, inst, tracer),
-        Opcode::Xor => alu::xor(cpu, inst, tracer),
+        Opcode::Xor => alu::xor(cpu, mem, inst, tracer),
         Opcode::Srl => alu::srl(cpu, inst, tracer),
         Opcode::Sra => alu::sra(cpu, inst, tracer),
-        Opcode::Or => alu::or(cpu, inst, tracer),
-        Opcode::And => alu::and(cpu, inst, tracer),
+        Opcode::Or => alu::or(cpu, mem, inst, tracer),
+        Opcode::And => alu::and(cpu, mem, inst, tracer),
 
         // I-type ALU
-        Opcode::Addi => alu_imm::addi(cpu, inst, tracer),
+        Opcode::Addi => alu_imm::addi(cpu, mem, inst, tracer),
         Opcode::Slti => alu_imm::slti(cpu, inst, tracer),
         Opcode::Sltiu => alu_imm::sltiu(cpu, inst, tracer),
-        Opcode::Xori => alu_imm::xori(cpu, inst, tracer),
-        Opcode::Ori => alu_imm::ori(cpu, inst, tracer),
-        Opcode::Andi => alu_imm::andi(cpu, inst, tracer),
+        Opcode::Xori => alu_imm::xori(cpu, mem, inst, tracer),
+        Opcode::Ori => alu_imm::ori(cpu, mem, inst, tracer),
+        Opcode::Andi => alu_imm::andi(cpu, mem, inst, tracer),
         Opcode::Slli => alu_imm::slli(cpu, inst, tracer),
         Opcode::Srli => alu_imm::srli(cpu, inst, tracer),
         Opcode::Srai => alu_imm::srai(cpu, inst, tracer),
@@ -79,4 +79,73 @@ pub fn execute(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[rstest::rstest]
+    #[case(Opcode::Add, 0xffff_fffe, 5, 3)]
+    #[case(Opcode::Sub, 2, 5, 0xffff_fffd)]
+    #[case(Opcode::Xor, 0xf0f0_00ff, 0x0ff0_ff00, 0xff00_ffff)]
+    #[case(Opcode::Or, 0xf0f0_00ff, 0x0ff0_ff00, 0xfff0_ffff)]
+    #[case(Opcode::And, 0xf0f0_00ff, 0x0ff0_ff00, 0x00f0_0000)]
+    fn generated_register_alu_honors_word_boundaries(
+        #[case] opcode: Opcode,
+        #[case] lhs: u32,
+        #[case] rhs: u32,
+        #[case] expected: u32,
+    ) {
+        let mut cpu = Cpu::new(0x1000, 0, 0);
+        cpu.set_reg(1, lhs);
+        cpu.set_reg(2, rhs);
+        let mut memory = Memory::new();
+        let inst = DecodedInst {
+            opcode,
+            rd: 3,
+            rs1: 1,
+            rs2: 2,
+            imm: 0,
+        };
+        let mut tracer = Tracer {
+            clock: 1,
+            ..Default::default()
+        };
+
+        execute(&mut cpu, &mut memory, &inst, &mut tracer).expect("execution must succeed");
+
+        assert_eq!(cpu.reg(3), expected);
+    }
+
+    #[rstest::rstest]
+    #[case(Opcode::Addi, 0, -1, 0xffff_ffff)]
+    #[case(Opcode::Xori, 0x1234_5678, -1, 0xedcb_a987)]
+    #[case(Opcode::Ori, 0x1234_5678, -1, 0xffff_ffff)]
+    #[case(Opcode::Andi, 0x1234_5678, -1, 0x1234_5678)]
+    fn generated_immediate_alu_sign_extends_the_twelve_bit_operand(
+        #[case] opcode: Opcode,
+        #[case] lhs: u32,
+        #[case] immediate: i32,
+        #[case] expected: u32,
+    ) {
+        let mut cpu = Cpu::new(0x1000, 0, 0);
+        cpu.set_reg(1, lhs);
+        let mut memory = Memory::new();
+        let inst = DecodedInst {
+            opcode,
+            rd: 3,
+            rs1: 1,
+            rs2: 0,
+            imm: immediate,
+        };
+        let mut tracer = Tracer {
+            clock: 1,
+            ..Default::default()
+        };
+
+        execute(&mut cpu, &mut memory, &inst, &mut tracer).expect("execution must succeed");
+
+        assert_eq!(cpu.reg(3), expected);
+    }
 }

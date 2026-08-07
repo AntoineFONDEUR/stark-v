@@ -5,67 +5,63 @@
 //! - shifts_reg family: sll, srl, sra
 //! - lt_reg family: slt, sltu
 
+use air::opcodes::base_alu_reg::base_alu_reg_fill;
+use stwo::core::fields::m31::BaseField;
+
 use super::utils::{compute_lt_reg_witness, compute_shift_witness};
 use crate::trace::Tracer;
-use crate::{Cpu, DecodedInst};
+use crate::{Cpu, DecodedInst, MachineState, Memory};
 
 // =============================================================================
 // Base ALU Reg (add/sub/xor/or/and)
 // =============================================================================
 
-pub fn add(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
-    let old_pc = cpu.pc;
-    let rs1 = cpu.read_reg(inst.rs1, tracer);
-    let rs2 = cpu.read_reg(inst.rs2, tracer);
-    let result = rs1.next.wrapping_add(rs2.next);
-    let rd = cpu.write_reg(inst.rd, result, tracer);
-    cpu.advance_pc();
-    // opcode flags: add=1, sub=0, xor=0, or=0, and=0
-    trace_op!(base_alu_reg: tracer, old_pc, rd, rs1, rs2, 1, 0, 0, 0, 0);
+fn execute_base_alu_reg(
+    cpu: &mut Cpu,
+    memory: &mut Memory,
+    inst: &DecodedInst,
+    tracer: &mut Tracer,
+    flags: [u32; 5],
+) {
+    // Decoding selects the row; generated execution owns state mutation and tracing.
+    let args = [
+        tracer.clock,
+        cpu.pc,
+        u32::from(inst.rd),
+        u32::from(inst.rs1),
+        u32::from(inst.rs2),
+        flags[0],
+        flags[1],
+        flags[2],
+        flags[3],
+        flags[4],
+    ]
+    .map(BaseField::from_u32_unchecked);
+    let [next_pc] = {
+        let mut state = MachineState::new(cpu, memory);
+        base_alu_reg_fill(&mut state, tracer, args, [])
+    };
+    cpu.pc = next_pc.0;
 }
 
-pub fn sub(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
-    let old_pc = cpu.pc;
-    let rs1 = cpu.read_reg(inst.rs1, tracer);
-    let rs2 = cpu.read_reg(inst.rs2, tracer);
-    let result = rs1.next.wrapping_sub(rs2.next);
-    let rd = cpu.write_reg(inst.rd, result, tracer);
-    cpu.advance_pc();
-    // opcode flags: add=0, sub=1, xor=0, or=0, and=0
-    trace_op!(base_alu_reg: tracer, old_pc, rd, rs1, rs2, 0, 1, 0, 0, 0);
+pub fn add(cpu: &mut Cpu, memory: &mut Memory, inst: &DecodedInst, tracer: &mut Tracer) {
+    execute_base_alu_reg(cpu, memory, inst, tracer, [1, 0, 0, 0, 0]);
 }
 
-pub fn xor(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
-    let old_pc = cpu.pc;
-    let rs1 = cpu.read_reg(inst.rs1, tracer);
-    let rs2 = cpu.read_reg(inst.rs2, tracer);
-    let result = rs1.next ^ rs2.next;
-    let rd = cpu.write_reg(inst.rd, result, tracer);
-    cpu.advance_pc();
-    // opcode flags: add=0, sub=0, xor=1, or=0, and=0
-    trace_op!(base_alu_reg: tracer, old_pc, rd, rs1, rs2, 0, 0, 1, 0, 0);
+pub fn sub(cpu: &mut Cpu, memory: &mut Memory, inst: &DecodedInst, tracer: &mut Tracer) {
+    execute_base_alu_reg(cpu, memory, inst, tracer, [0, 1, 0, 0, 0]);
 }
 
-pub fn or(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
-    let old_pc = cpu.pc;
-    let rs1 = cpu.read_reg(inst.rs1, tracer);
-    let rs2 = cpu.read_reg(inst.rs2, tracer);
-    let result = rs1.next | rs2.next;
-    let rd = cpu.write_reg(inst.rd, result, tracer);
-    cpu.advance_pc();
-    // opcode flags: add=0, sub=0, xor=0, or=1, and=0
-    trace_op!(base_alu_reg: tracer, old_pc, rd, rs1, rs2, 0, 0, 0, 1, 0);
+pub fn xor(cpu: &mut Cpu, memory: &mut Memory, inst: &DecodedInst, tracer: &mut Tracer) {
+    execute_base_alu_reg(cpu, memory, inst, tracer, [0, 0, 1, 0, 0]);
 }
 
-pub fn and(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
-    let old_pc = cpu.pc;
-    let rs1 = cpu.read_reg(inst.rs1, tracer);
-    let rs2 = cpu.read_reg(inst.rs2, tracer);
-    let result = rs1.next & rs2.next;
-    let rd = cpu.write_reg(inst.rd, result, tracer);
-    cpu.advance_pc();
-    // opcode flags: add=0, sub=0, xor=0, or=0, and=1
-    trace_op!(base_alu_reg: tracer, old_pc, rd, rs1, rs2, 0, 0, 0, 0, 1);
+pub fn or(cpu: &mut Cpu, memory: &mut Memory, inst: &DecodedInst, tracer: &mut Tracer) {
+    execute_base_alu_reg(cpu, memory, inst, tracer, [0, 0, 0, 1, 0]);
+}
+
+pub fn and(cpu: &mut Cpu, memory: &mut Memory, inst: &DecodedInst, tracer: &mut Tracer) {
+    execute_base_alu_reg(cpu, memory, inst, tracer, [0, 0, 0, 0, 1]);
 }
 
 // =============================================================================

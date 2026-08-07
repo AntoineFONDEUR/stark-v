@@ -693,10 +693,16 @@ mod word_intrinsics {
 
         fn split_and_combine(value) {
             let limbs = split_m31(value);
-            let low_nibble = bitand(limbs[0], 15);
+            let low_nibble = bitand(limbs[0], 15, enabler);
             let high_bit = bitor(limbs[0], 128);
             let flipped_nibble = bitxor(limbs[0], 15);
             return (limbs[0], limbs[1], limbs[2], limbs[3], low_nibble, high_bit, flipped_nibble);
+        }
+
+        fn wrapping_math(lhs: [felt; 4], rhs: [felt; 4]) {
+            let (sum, carry) = add_u32(lhs, rhs, enabler);
+            let (difference, borrow) = sub_u32(lhs, rhs);
+            return (sum, carry, difference, borrow);
         }
     }
 }
@@ -721,6 +727,45 @@ fn word_intrinsic_commits_split_and_bitwise_outputs() {
     use word_intrinsics::prover_columns::SplitAndCombineColumns;
 
     assert_eq!(SplitAndCombineColumns::<()>::SIZE, 9);
+}
+
+#[rstest::rstest]
+#[case(0, 3)]
+#[case(1, 0)]
+#[case(2, 0)]
+#[case(3, 0)]
+#[case(4, 1)]
+#[case(5, 0xf9)]
+#[case(6, 0xff)]
+#[case(7, 0xff)]
+#[case(8, 0xff)]
+#[case(9, 0)]
+fn word_arithmetic_binds_wrapping_limbs_and_terminal_flag(
+    #[case] position: usize,
+    #[case] expected: u32,
+) {
+    let mut tables = word_intrinsics::Tables::default();
+    let lhs = (u32::MAX - 1).to_le_bytes().map(|limb| felt(limb.into()));
+    let rhs = 5u32.to_le_bytes().map(|limb| felt(limb.into()));
+    let inputs = [
+        lhs[0], lhs[1], lhs[2], lhs[3], rhs[0], rhs[1], rhs[2], rhs[3],
+    ];
+    let outputs = word_intrinsics::call_wrapping_math(&mut tables, inputs);
+
+    assert_eq!(outputs[position], felt(expected));
+}
+
+#[test]
+fn word_arithmetic_sets_terminal_borrow_on_underflow() {
+    let mut tables = word_intrinsics::Tables::default();
+    let lhs = 1u32.to_le_bytes().map(|limb| felt(limb.into()));
+    let rhs = 2u32.to_le_bytes().map(|limb| felt(limb.into()));
+    let inputs = [
+        lhs[0], lhs[1], lhs[2], lhs[3], rhs[0], rhs[1], rhs[2], rhs[3],
+    ];
+    let outputs = word_intrinsics::call_wrapping_math(&mut tables, inputs);
+
+    assert_eq!(outputs[9], felt(1));
 }
 
 #[test]

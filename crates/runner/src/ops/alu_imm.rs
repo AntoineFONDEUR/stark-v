@@ -5,9 +5,12 @@
 //! - shifts_imm family: slli, srli, srai
 //! - lt_imm family: slti, sltiu
 
+use air::opcodes::base_alu_imm::base_alu_imm_fill;
+use stwo::core::fields::m31::BaseField;
+
 use super::utils::{compute_lt_imm_witness, compute_shift_witness};
 use crate::trace::Tracer;
-use crate::{Cpu, DecodedInst};
+use crate::{Cpu, DecodedInst, MachineState, Memory};
 
 // =============================================================================
 // Helper functions for immediate decoding
@@ -27,64 +30,50 @@ pub(crate) fn decode_imm_limbs(imm: i32) -> (u32, u32, u32) {
 // Base ALU Imm (addi/xori/ori/andi)
 // =============================================================================
 
-pub fn addi(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
-    let old_pc = cpu.pc;
-    let rs1 = cpu.read_reg(inst.rs1, tracer);
-    let result = rs1.next.wrapping_add(inst.imm as u32);
-    let rd = cpu.write_reg(inst.rd, result, tracer);
-    cpu.advance_pc();
-
+fn execute_base_alu_imm(
+    cpu: &mut Cpu,
+    memory: &mut Memory,
+    inst: &DecodedInst,
+    tracer: &mut Tracer,
+    flags: [u32; 4],
+) {
+    // Decoding selects the row; generated execution owns state mutation and tracing.
     let (imm_0, imm_1, imm_msb) = decode_imm_limbs(inst.imm);
-    // opcode flags: add=1, xor=0, or=0, and=0
-    trace_op!(base_alu_imm: tracer, old_pc, rd, rs1,
-        imm_0, imm_1, imm_msb,
-        1, 0, 0, 0
-    );
+    let args = [
+        tracer.clock,
+        cpu.pc,
+        u32::from(inst.rd),
+        u32::from(inst.rs1),
+        imm_0,
+        imm_1,
+        imm_msb,
+        flags[0],
+        flags[1],
+        flags[2],
+        flags[3],
+    ]
+    .map(BaseField::from_u32_unchecked);
+    let [next_pc] = {
+        let mut state = MachineState::new(cpu, memory);
+        base_alu_imm_fill(&mut state, tracer, args, [])
+    };
+    cpu.pc = next_pc.0;
 }
 
-pub fn xori(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
-    let old_pc = cpu.pc;
-    let rs1 = cpu.read_reg(inst.rs1, tracer);
-    let result = rs1.next ^ (inst.imm as u32);
-    let rd = cpu.write_reg(inst.rd, result, tracer);
-    cpu.advance_pc();
-
-    let (imm_0, imm_1, imm_msb) = decode_imm_limbs(inst.imm);
-    // opcode flags: add=0, xor=1, or=0, and=0
-    trace_op!(base_alu_imm: tracer, old_pc, rd, rs1,
-        imm_0, imm_1, imm_msb,
-        0, 1, 0, 0
-    );
+pub fn addi(cpu: &mut Cpu, memory: &mut Memory, inst: &DecodedInst, tracer: &mut Tracer) {
+    execute_base_alu_imm(cpu, memory, inst, tracer, [1, 0, 0, 0]);
 }
 
-pub fn ori(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
-    let old_pc = cpu.pc;
-    let rs1 = cpu.read_reg(inst.rs1, tracer);
-    let result = rs1.next | (inst.imm as u32);
-    let rd = cpu.write_reg(inst.rd, result, tracer);
-    cpu.advance_pc();
-
-    let (imm_0, imm_1, imm_msb) = decode_imm_limbs(inst.imm);
-    // opcode flags: add=0, xor=0, or=1, and=0
-    trace_op!(base_alu_imm: tracer, old_pc, rd, rs1,
-        imm_0, imm_1, imm_msb,
-        0, 0, 1, 0
-    );
+pub fn xori(cpu: &mut Cpu, memory: &mut Memory, inst: &DecodedInst, tracer: &mut Tracer) {
+    execute_base_alu_imm(cpu, memory, inst, tracer, [0, 1, 0, 0]);
 }
 
-pub fn andi(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
-    let old_pc = cpu.pc;
-    let rs1 = cpu.read_reg(inst.rs1, tracer);
-    let result = rs1.next & (inst.imm as u32);
-    let rd = cpu.write_reg(inst.rd, result, tracer);
-    cpu.advance_pc();
+pub fn ori(cpu: &mut Cpu, memory: &mut Memory, inst: &DecodedInst, tracer: &mut Tracer) {
+    execute_base_alu_imm(cpu, memory, inst, tracer, [0, 0, 1, 0]);
+}
 
-    let (imm_0, imm_1, imm_msb) = decode_imm_limbs(inst.imm);
-    // opcode flags: add=0, xor=0, or=0, and=1
-    trace_op!(base_alu_imm: tracer, old_pc, rd, rs1,
-        imm_0, imm_1, imm_msb,
-        0, 0, 0, 1
-    );
+pub fn andi(cpu: &mut Cpu, memory: &mut Memory, inst: &DecodedInst, tracer: &mut Tracer) {
+    execute_base_alu_imm(cpu, memory, inst, tracer, [0, 0, 0, 1]);
 }
 
 // =============================================================================

@@ -415,15 +415,17 @@ set.
     mode; detailed evidence is recorded below.
 - `[in progress] FELT-002` Migrate opcode execution and retire duplicate
   semantics.
-  - LUI, AUIPC, JAL, and JALR now derive execution, witness rows, AIR,
-    interactions, and VM component routes from direct `define_air_fns!`
-    definitions; their runner modules retain decode adapters only.
+  - LUI, AUIPC, JAL, JALR, and both base ALU families now derive execution,
+    witness rows, AIR, interactions, and VM component routes from direct
+    `define_air_fns!` definitions; their runner modules retain decode adapters
+    only.
   - The existing felt DSL now provides proof-bound canonical M31 splitting and
-    byte-level AND/OR/XOR intrinsics. JALR constrains both its M31 source
-    address and the low-bit clearing lookup.
-  - The active checkpoint has 1,416 VM tables, 1,524 sampled values, and 544 VM
+    byte-level AND/OR/XOR intrinsics plus wrapping `u32` add/subtract with a
+    constrained carry/borrow chain. JALR constrains both its M31 source address
+    and the low-bit clearing lookup.
+  - The active checkpoint has 1,512 VM tables, 1,620 sampled values, and 597 VM
     AIR instructions. Its protocol identifier is
-    `[260724498, 1056429239, 162301300, 1188550917, 1596141750, 682600581, 863947950, 344096256]`.
+    `[1696431044, 1504695671, 1975523688, 1955391245, 877564173, 18316442, 885929987, 784128183]`.
   - Fast boundary, component, and malformed-relation tests precede one
     sequential single-chunk VM proof per migrated family; root E2Es remain
     deferred until the final VM roster.
@@ -833,18 +835,19 @@ Required work, in order:
 1. `[done]` Migrate `lui` end to end and delete its handwritten runner
    semantics.
 2. `[done]` Migrate `auipc`, `jal`, and `jalr`.
-3. `[in progress]` Migrate `base_alu_imm`, `base_alu_reg`, `lt_imm`, `lt_reg`,
-   `branch_eq`, and `branch_lt`.
-4. Migrate `shifts_imm`, `shifts_reg`, `mul`, and `mulh`.
-5. Migrate `load_store`.
-6. Migrate `div` last.
-7. `[in progress]` Preserve one real guest prove/verify test plus focused
+3. `[done]` Migrate `base_alu_imm` and `base_alu_reg`.
+4. `[in progress]` Migrate `lt_imm`, `lt_reg`, `branch_eq`, and `branch_lt`.
+5. Migrate `shifts_imm`, `shifts_reg`, `mul`, and `mulh`.
+6. Migrate `load_store`.
+7. Migrate `div` last.
+8. `[in progress]` Preserve one real guest prove/verify test plus focused
    malformed-witness coverage for every family before deleting its old schema
-   and handler. LUI, AUIPC, JAL, and JALR have both gates.
-8. Delete the obsolete opcode `define_air!` trace block, `components!` support,
+   and handler. LUI, AUIPC, JAL, JALR, and both base ALU families have both
+   gates.
+9. Delete the obsolete opcode `define_air!` trace block, `components!` support,
    and `runner/src/ops` only after the last family moves.
-9. Re-derive the VM AIR program and recursion manifest from the final roster and
-   rerun every root conformance test under a new protocol identity.
+10. Re-derive the VM AIR program and recursion manifest from the final roster
+    and rerun every root conformance test under a new protocol identity.
 
 Done when opcode execution, witness filling, and AIR constraints have one
 felt-function source and no duplicated per-opcode semantics remain.
@@ -1536,6 +1539,67 @@ the recorded command without committing a machine-specific path.
 - Recursive-root proofs remain deferred until the final opcode roster: this
   slice changes VM component geometry but not the leaf, binary, padded-tree, or
   constant-size root boundary.
+
+### `FELT-002 base ALU checkpoint` — 2026-08-07
+
+- `crates/air/src/opcodes/{base_alu_reg,base_alu_imm}.rs` are the sole sources
+  for base arithmetic and bitwise state mutation, witness rows, constraints,
+  relation entries, and component evaluators. Their runner functions decode a
+  one-hot operation tuple and call the generated fill; both obsolete
+  `define_air!` blocks and the stale manual-column tests are gone.
+- The existing `define_air_fns!` compiler now provides `add_u32` and `sub_u32`
+  intrinsics. Each commits the four wrapping result bytes and its carry/borrow
+  chain, constrains the byte equations and boolean chain, and range-checks the
+  selected result. Existing bitwise intrinsics accept an optional relation
+  multiplicity, so one family function can gate each lookup with its opcode
+  flag. No standalone macro or manual component was added.
+- `/usr/bin/time -l cargo test --release -p stwo-macros --test air_fns -- --test-threads=12`:
+  all 56 compiler, access, proof, relation, hint, and intrinsic tests passed in
+  0.01 seconds after release compilation, with 63.37 MB maximum RSS and zero
+  swaps.
+- `/usr/bin/time -l cargo nextest run --release -p runner -j 9 -E 'test(generated_register_alu_honors_word_boundaries) | test(generated_immediate_alu_sign_extends_the_twelve_bit_operand)'`:
+  all nine wrapping-arithmetic, bitwise, and sign-extension boundary cases
+  passed concurrently in 0.01 seconds. Release compilation dominated the
+  44.52-second command and used 1.36 GB maximum RSS with zero swaps.
+- A release nextest command selected the nine exact base-ALU component test
+  names plus `mutated_generated_add_result_fails_component_constraints` and
+  `mutated_generated_xori_result_leaves_a_relation_deficit`, with `-j 11`: all
+  11 component and adversarial gates passed concurrently in 0.68 seconds. The
+  malformed add result violated component constraints, while the malformed XOR
+  result left a non-zero relation sum. Release linking dominated the
+  76.27-second command and used 1.50 GB maximum RSS with zero swaps.
+- `/usr/bin/time -l cargo nextest run --release -p prover -j 1 -E 'test(base_alu_reg_single_chunk_proves_and_verifies) | test(base_alu_imm_single_chunk_proves_and_verifies)'`:
+  the register and immediate proof-capable guests proved and verified
+  sequentially in 13.68 seconds, with 2.05 GB maximum RSS and zero swaps. The
+  opcode-only component fixtures were explicitly rejected as proof fixtures
+  because they never access their declared output address.
+- `cargo test --release -p air --lib -- --test-threads=12`: all 47 AIR tests
+  passed after the broader check exposed and corrected a stale pre-migration JAL
+  column-count assertion.
+- `/usr/bin/time -l cargo test --release -p recursion profile::tests:: -- --nocapture --test-threads=7`:
+  all seven generated-geometry, digest, registry, and fixed-root-wire checks
+  passed in 0.64 seconds after release linking. The active checkpoint has 1,512
+  VM tables, 1,620 sampled values, 597 AIR instructions, protocol identifier
+  `[1696431044, 1504695671, 1975523688, 1955391245, 877564173, 18316442, 885929987, 784128183]`,
+  and VM AIR digest
+  `[1178552387, 2032963711, 526923786, 1772398340, 1481691220, 779525080, 1670936839, 1173528054]`.
+- `cargo test --release -p recursion --test air_dsl_guard -- --nocapture --test-threads=1`:
+  all five roster, owner, direct-DSL, and generated-component route guards
+  passed after adding both new owner files to the exact inventory.
+- `cargo clippy --release -p stwo-macros -p air -p runner -p prover -p recursion --all-targets --no-deps -- -D warnings`
+  and guest-bin release clippy for `base_alu_reg_output` and
+  `base_alu_imm_output` passed with warnings denied.
+- `prek run --all-files`: the external-directory guard and Trunk checks passed
+  after replacing spell-check-hostile hexadecimal fixture notation with the
+  equivalent named boundary.
+- Recursive-root proofs remain deferred until the final opcode roster: this
+  slice changes the VM component geometry and protocol identity, but not a root
+  construction boundary.
+- Crash-history and scheduling measurements keep proof-capable tests sequential.
+  Independent runner and component gates use outer test-process parallelism,
+  while a single proof retains STWO's shared Rayon pool: the measured binary
+  root took 949.04 seconds and 34.62 GB maximum RSS with the shared pool versus
+  1,139.85 seconds and 35.17 GB with outer-only Rayon.
 
 ## Project finish line
 

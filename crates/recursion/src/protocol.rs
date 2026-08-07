@@ -867,7 +867,6 @@ impl std::error::Error for PcsParameterError {}
 pub enum ProofShapeError {
     EmptyTableLayout,
     EmptyTreeLayout,
-    EmptyPreprocessedTreeUnsupported,
     ZeroCount {
         field: &'static str,
     },
@@ -931,10 +930,6 @@ impl fmt::Display for ProofShapeError {
         match self {
             Self::EmptyTableLayout => write!(formatter, "proof shape has no AIR tables"),
             Self::EmptyTreeLayout => write!(formatter, "proof shape has no commitment trees"),
-            Self::EmptyPreprocessedTreeUnsupported => write!(
-                formatter,
-                "the fixed current protocol wire cannot represent an empty preprocessed commitment tree"
-            ),
             Self::ZeroCount { field } => write!(formatter, "proof-shape {field} count is zero"),
             Self::CountOutOfRange { field, value } => {
                 write!(
@@ -1486,7 +1481,7 @@ mod tests {
     }
 
     #[test]
-    fn fixed_shape_rejects_an_empty_preprocessed_tree() {
+    fn empty_preprocessed_tree_is_excluded_from_the_trace_path_count() {
         let parameters = valid_pcs()
             .validate()
             .expect("fixture PCS parameters are valid");
@@ -1494,7 +1489,47 @@ mod tests {
         shape.tree_heights[0] = M31Word::ZERO;
         assert_eq!(
             shape.validate(parameters),
-            Err(ProofShapeError::EmptyPreprocessedTreeUnsupported)
+            Err(ProofShapeError::CountMismatch {
+                field: "trace paths",
+                expected: 3,
+                actual: 6,
+            })
+        );
+    }
+
+    #[test]
+    fn fixed_lifting_rejects_an_empty_preprocessed_tree() {
+        let parameters = valid_pcs()
+            .validate()
+            .expect("fixture PCS parameters are valid");
+        let mut shape = valid_shape();
+        shape.tree_heights[0] = M31Word::ZERO;
+        shape.trace_path_count = word(3);
+        assert_eq!(
+            shape.validate(parameters),
+            Err(ProofShapeError::TreeHeightMismatch {
+                tree: 0,
+                expected: 8,
+                actual: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn inferred_lifting_accepts_an_empty_preprocessed_tree() {
+        let mut parameters = valid_pcs();
+        parameters.lifting_log_size = OptionalM31Word::None;
+        let parameters = parameters
+            .validate()
+            .expect("fixture PCS parameters are valid");
+        let mut shape = inferred_lifting_shape();
+        shape.tree_heights[0] = M31Word::ZERO;
+        shape.trace_path_count = word(6);
+        assert_eq!(
+            shape
+                .validate(parameters)
+                .map(|shape| shape.lifting_log_size()),
+            Ok(8)
         );
     }
 

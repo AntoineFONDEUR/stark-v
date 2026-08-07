@@ -911,10 +911,10 @@ Required work, in order:
    one release-mode single-chunk proof for each changed family.
 7. `[done]` Measure the same base-ALU guest before and after with wall time and
    peak RSS. Treat constraint count as a proxy, not a performance result.
-8. `[pending]` Re-derive the fixed VM profile and protocol identity, then run
-   the one-segment leaf, two-segment binary, and three-segment padded root
-   proofs sequentially under that final identity. Do not rerun larger equivalent
-   tree shapes.
+8. `[done]` Re-derive the fixed VM profile and protocol identity, then run the
+   one-segment leaf, two-segment binary, and three-segment padded root proofs
+   sequentially under that final identity. Do not rerun larger equivalent tree
+   shapes.
 9. `[pending]` Update current-state compiler, AIR, recursion, and roadmap
    documentation; run release clippy and repository hooks; commit and push.
 
@@ -1966,9 +1966,12 @@ the recorded command without committing a machine-specific path.
 - `/usr/bin/time -l cargo test --release -p recursion --features parallel --lib tree::tests::capacity_segmented_guest_produces_a_two_leaf_root -- --ignored --exact --nocapture --test-threads=1`:
   the final-identity two-segment root passed in 942.85 seconds of test time and
   943.28 seconds wall time with 29.808 GB maximum RSS and zero swaps.
-- Remaining gate: run the three-segment padded root proof under this final
-  protocol identity, then close the task with release clippy, repository hooks,
-  and pushed evidence.
+- `/usr/bin/time -l cargo test --release -p recursion --features parallel --lib tree::tests::cycle_segmented_guest_produces_the_expected_root::case_1_three -- --ignored --exact --nocapture --test-threads=1`:
+  the final-identity three-segment root, padded to four leaves, passed in
+  2,079.78 seconds of test time and 2,080.04 seconds wall time with 30.856 GB
+  maximum RSS and zero swaps.
+- Remaining gate: close the task with release clippy, repository hooks, and
+  pushed evidence.
 
 ## Project finish line
 

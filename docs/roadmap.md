@@ -1957,6 +1957,9 @@ the recorded command without committing a machine-specific path.
 - Current-state compiler and AIR documents no longer describe completed opcode
   and runner migrations as pending. Feature-goal documents remain goal documents
   and were not deleted.
+- Implementation commit `b0caea39` was pushed to
+  `origin/chore/scratchpad-cleanups`. Release clippy passed with warnings
+  denied, and repository plus commit hooks passed.
 - Remaining gate: run the one-segment, two-segment, and three-segment padded
   root proofs sequentially under this final protocol identity, then close the
   task with release clippy, repository hooks, and pushed evidence.

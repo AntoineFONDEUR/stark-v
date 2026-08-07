@@ -338,6 +338,18 @@ set.
     GB peak RSS. Every run reported zero swaps.
   - Adversarial slice: commit `51aeb2f1` pushed to
     `origin/chore/scratchpad-cleanups`.
+  - Completed slice: binary recursion lanes no longer publish unused
+    interaction-PoW nonce input tuples. Focused binary transcript-root, query,
+    trace-Merkle, and FRI-Merkle relation tests close exactly, and two real
+    recursion-child proofs close the complete prepared binary witness before
+    parent proving.
+  - Binary-closure evidence: 20 focused relation-boundary tests and all 9
+    transcript-payload tests passed in release mode. The proof-backed binary
+    witness test passed in 314.88 seconds with 10.57 GB peak RSS and zero swaps
+    using two cached child proofs. The direct-DSL guard and scoped release
+    clippy with warnings denied passed.
+  - Binary-closure slice: commit `ba793a61` pushed to
+    `origin/chore/scratchpad-cleanups`.
   - Next slice: rerun current binary and padded-root conformance before
     benchmarking the split.
 - `[pending] SYS-001` Implement proof-bound syscalls and output journal.
@@ -1185,6 +1197,36 @@ the recorded command without committing a machine-specific path.
   zero matches.
 - `prek run --all-files`: passed.
 - Commit `f1614b7e` pushed to `origin/chore/scratchpad-cleanups`.
+
+### `PRE-001` — 2026-08-06
+
+- The first active-profile binary-root rerun reached the prepared parent witness
+  and rejected a nonzero universal relation sum after 811.73 seconds; peak RSS
+  was 29.54 GB and no swaps occurred.
+- Focused binary boundary tests isolated the imbalance to the child transcript
+  interaction-PoW nonce. VM and Poseidon2 segment lanes consume their nonce
+  through the joint binder, while left and right recursion lanes only absorb the
+  nonce into their child transcript and therefore publish no typed
+  verifier-input use.
+- `cargo test --release -p recursion --lib transcript_payload_air::tests:: -- --nocapture`:
+  all 9 lane-routing and active-profile payload tests passed.
+- `cargo test --release -p recursion --lib close_exactly -- --nocapture`: all 20
+  segment and binary relation-boundary tests passed, including transcript root,
+  query position, trace Merkle, FRI Merkle, PCS, FRI, control, and lowering
+  closure.
+- `STARK_V_RECURSION_CHILD_CACHE_DIR=<temporary-cache> cargo test --release -p recursion --features parallel --lib recursive_proof::tests::two_recursion_children_close_binary_witness_relations -- --exact --nocapture --test-threads=1`:
+  two real recursion-child proofs closed the complete prepared parent witness in
+  314.88 seconds with 10.57 GB maximum RSS and zero swaps, without paying for a
+  parent STARK proof.
+- `cargo test --release -p recursion --test air_dsl_guard -- --nocapture`: all 5
+  direct-DSL structural guards passed.
+- `cargo clippy --release -p recursion --features parallel --all-targets --no-deps -- -D warnings`:
+  passed in 11.06 seconds. The dependency-inclusive form reports existing
+  warnings from `external/stwo`; the submodule remains unchanged.
+- `prek run --files <changed-files>` and repository commit hooks passed.
+- Commit `ba793a61` pushed to `origin/chore/scratchpad-cleanups`.
+- Current-profile binary and padded-root conformance remain required before
+  PRE-001 step 7 is complete.
 
 ## Project finish line
 

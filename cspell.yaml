@@ -106,6 +106,7 @@ words:
   - multiset
   - multisets
   - mults
+  - nextest
   - nocapture
   - nomem
   - norelax

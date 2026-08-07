@@ -1977,6 +1977,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "rand",
+ "rstest",
  "runner",
  "simd",
  "stwo",

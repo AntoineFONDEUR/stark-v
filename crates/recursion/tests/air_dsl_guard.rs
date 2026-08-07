@@ -185,7 +185,7 @@ const UNIVERSAL_INVENTORY: [ComponentOwner; 36] = [
 const VM_INVENTORY: [ComponentOwner; 27] = [
     ComponentOwner {
         name: "auipc",
-        source: "crates/air/src/schema.rs",
+        source: "crates/air/src/opcodes/auipc.rs",
     },
     ComponentOwner {
         name: "base_alu_imm",
@@ -213,11 +213,11 @@ const VM_INVENTORY: [ComponentOwner; 27] = [
     },
     ComponentOwner {
         name: "jal",
-        source: "crates/air/src/schema.rs",
+        source: "crates/air/src/opcodes/jal.rs",
     },
     ComponentOwner {
         name: "jalr",
-        source: "crates/air/src/schema.rs",
+        source: "crates/air/src/opcodes/jalr.rs",
     },
     ComponentOwner {
         name: "load_store",
@@ -293,7 +293,19 @@ const VM_INVENTORY: [ComponentOwner; 27] = [
     },
 ];
 
-const OWNER_POLICIES: [OwnerPolicy; 33] = [
+const OWNER_POLICIES: [OwnerPolicy; 36] = [
+    OwnerPolicy {
+        source: "crates/air/src/opcodes/auipc.rs",
+        accepted_macro_count: 1,
+    },
+    OwnerPolicy {
+        source: "crates/air/src/opcodes/jal.rs",
+        accepted_macro_count: 1,
+    },
+    OwnerPolicy {
+        source: "crates/air/src/opcodes/jalr.rs",
+        accepted_macro_count: 1,
+    },
     OwnerPolicy {
         source: "crates/air/src/opcodes/lui.rs",
         accepted_macro_count: 1,
@@ -480,7 +492,18 @@ fn vm_component_router_uses_only_the_expected_dsl_routes() {
     assert_eq!(
         (custom_routes, detached),
         (
-            vec![("lui".to_owned(), "air::opcodes::lui::component".to_owned(),)],
+            vec![
+                (
+                    "auipc".to_owned(),
+                    "air::opcodes::auipc::component".to_owned(),
+                ),
+                ("jal".to_owned(), "air::opcodes::jal::component".to_owned(),),
+                (
+                    "jalr".to_owned(),
+                    "air::opcodes::jalr::component".to_owned(),
+                ),
+                ("lui".to_owned(), "air::opcodes::lui::component".to_owned()),
+            ],
             vec!["poseidon2".to_owned()],
         )
     );

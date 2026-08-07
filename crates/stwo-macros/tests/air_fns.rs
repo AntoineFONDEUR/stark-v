@@ -683,6 +683,46 @@ mod hints {
     }
 }
 
+mod word_intrinsics {
+    stwo_macros::define_air_fns! {
+        max_degree: 3,
+
+        relation range_check_8_8(2);
+        relation range_check_m31(2);
+        relation bitwise(4);
+
+        fn split_and_combine(value) {
+            let limbs = split_m31(value);
+            let low_nibble = bitand(limbs[0], 15);
+            let high_bit = bitor(limbs[0], 128);
+            let flipped_nibble = bitxor(limbs[0], 15);
+            return (limbs[0], limbs[1], limbs[2], limbs[3], low_nibble, high_bit, flipped_nibble);
+        }
+    }
+}
+
+#[rstest::rstest]
+#[case(0, 0x78)]
+#[case(1, 0x56)]
+#[case(2, 0x34)]
+#[case(3, 0x12)]
+#[case(4, 0x08)]
+#[case(5, 0xf8)]
+#[case(6, 0x77)]
+fn word_intrinsic_binds_expected_output(#[case] position: usize, #[case] expected: u32) {
+    let mut tables = word_intrinsics::Tables::default();
+    let outputs = word_intrinsics::call_split_and_combine(&mut tables, [felt(0x1234_5678)]);
+
+    assert_eq!(outputs[position], felt(expected));
+}
+
+#[test]
+fn word_intrinsic_commits_split_and_bitwise_outputs() {
+    use word_intrinsics::prover_columns::SplitAndCombineColumns;
+
+    assert_eq!(SplitAndCombineColumns::<()>::SIZE, 9);
+}
+
 #[test]
 fn test_hint_roundtrips_and_verifies() {
     let mut tables = hints::Tables::default();

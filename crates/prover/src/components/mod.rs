@@ -5,15 +5,15 @@
 // component generated through the AIR DSL in its owning crate.
 stwo_macros::components! {
     trace: {
-        auipc,
+        auipc: air::opcodes::auipc::component,
         base_alu_imm,
         base_alu_reg,
         branch_eq,
         branch_lt,
         commit,
         div,
-        jal,
-        jalr,
+        jal: air::opcodes::jal::component,
+        jalr: air::opcodes::jalr::component,
         load_store,
         lt_imm,
         lt_reg,

@@ -48,6 +48,13 @@ tree reduction, padding, or protocol geometry changes; fixed root encoding and
 profile-owned verifier scheduling do not gain coverage from repeating the same
 binary shape at larger counts.
 
+Opcode migrations use a smaller ladder: runner boundary tests, component AIR
+tests with focused malformed rows, then one proof-capable single-chunk VM
+prove/verify per migrated family. Opcode-local geometry changes do not rerun a
+recursive root; the three root shapes are revalidated after the final VM roster
+is frozen. Small component tests may run concurrently, while proof jobs remain
+sequential unless a checked-in memory measurement establishes a safe bound.
+
 ## Non-negotiable architecture gates
 
 - Host continuation and recursive proving remain separate crates and APIs.
@@ -408,6 +415,18 @@ set.
     mode; detailed evidence is recorded below.
 - `[in progress] FELT-002` Migrate opcode execution and retire duplicate
   semantics.
+  - LUI, AUIPC, JAL, and JALR now derive execution, witness rows, AIR,
+    interactions, and VM component routes from direct `define_air_fns!`
+    definitions; their runner modules retain decode adapters only.
+  - The existing felt DSL now provides proof-bound canonical M31 splitting and
+    byte-level AND/OR/XOR intrinsics. JALR constrains both its M31 source
+    address and the low-bit clearing lookup.
+  - The active checkpoint has 1,416 VM tables, 1,524 sampled values, and 544 VM
+    AIR instructions. Its protocol identifier is
+    `[260724498, 1056429239, 162301300, 1188550917, 1596141750, 682600581, 863947950, 344096256]`.
+  - Fast boundary, component, and malformed-relation tests precede one
+    sequential single-chunk VM proof per migrated family; root E2Es remain
+    deferred until the final VM roster.
 - `[pending] REL-001` Harden and measure the completed system.
 
 ## Macro-only recursion migration
@@ -813,7 +832,7 @@ Required work, in order:
 
 1. `[done]` Migrate `lui` end to end and delete its handwritten runner
    semantics.
-2. Migrate `auipc`, `jal`, and `jalr`.
+2. `[done]` Migrate `auipc`, `jal`, and `jalr`.
 3. Migrate `base_alu_imm`, `base_alu_reg`, `lt_imm`, `lt_reg`, `branch_eq`, and
    `branch_lt`.
 4. Migrate `shifts_imm`, `shifts_reg`, `mul`, and `mulh`.
@@ -821,7 +840,7 @@ Required work, in order:
 6. Migrate `div` last.
 7. `[in progress]` Preserve one real guest prove/verify test plus focused
    malformed-witness coverage for every family before deleting its old schema
-   and handler. LUI has both gates.
+   and handler. LUI, AUIPC, JAL, and JALR have both gates.
 8. Delete the obsolete opcode `define_air!` trace block, `components!` support,
    and `runner/src/ops` only after the last family moves.
 9. Re-derive the VM AIR program and recursion manifest from the final roster and
@@ -1466,6 +1485,55 @@ the recorded command without committing a machine-specific path.
   geometry but not tree reduction, padding, or the constant-size root wire, so
   repeating one-, two-, and three-segment roots here would add cost without a
   new recursion boundary.
+
+### `FELT-002 AUIPC/JAL/JALR checkpoint` — 2026-08-07
+
+- `crates/air/src/opcodes/{auipc,jal,jalr}.rs` are the sole sources for those
+  instructions' state mutation, witness rows, constraints, relation entries, and
+  component evaluators through direct `define_air_fns!` invocations. Their
+  runner functions retain decoded-argument adapters and apply the generated
+  next-PC output; the three obsolete `define_air!` blocks are gone.
+- The existing felt DSL now provides `split_m31`, `bitand`, `bitor`, and
+  `bitxor`. The split commits canonical little-endian limbs, constrains their
+  recomposition, and registers both range relations. Each bit operation commits
+  its output and registers the corresponding preprocessed bitwise tuple. JALR
+  additionally preserves the source-register M31 range boundary.
+- `/usr/bin/time -lp cargo test --release -p stwo-macros --test air_fns -- --nocapture --test-threads=1`:
+  all 45 compiler, access, proof, relation, hint, and intrinsic tests passed in
+  0.04 seconds after release compilation; the command used 1.21 GB maximum RSS
+  and zero swaps.
+- `/usr/bin/time -lp cargo test --release -p runner generated_execution -- --nocapture --test-threads=1`:
+  all 12 generated LUI/AUIPC/JAL/JALR execution-boundary tests passed in 0.00
+  seconds; release compilation used 1.35 GB maximum RSS and zero swaps.
+- `/usr/bin/time -lp cargo nextest run --release -p prover --lib -E 'test(/components::tests::test_(auipc|jal|jalr)_e2e/)' --test-threads=3`:
+  all three component AIR gates passed concurrently in 0.24 seconds with 59.88
+  MB maximum RSS and zero swaps.
+- `/usr/bin/time -lp cargo nextest run --release -p prover --test integration -E 'test(/(auipc_destination_limb_mutation_fails_component_constraints|jalr_target_lsb_mutation_leaves_a_relation_deficit)/)' --test-threads=2`:
+  both malformed boundaries were rejected in 0.32 seconds with 213.66 MB maximum
+  RSS and zero swaps. LUI's malformed split test was also reduced from full
+  proving to a 0.18-second component constraint check.
+- `/usr/bin/time -lp cargo nextest run --release -p prover --test integration -E 'test(/(auipc|jal|jalr)_standard_relations_prove_and_verify/)' --test-threads=1`:
+  the three proof-capable single-chunk guests proved and verified sequentially
+  in 20.58 seconds with 2.01 GB maximum RSS and zero swaps. The final JALR
+  source range check was revalidated by its 6.86-second single-chunk proof.
+- `/usr/bin/time -lp cargo test --release -p recursion profile::tests:: -- --nocapture --test-threads=1`:
+  all seven generated-geometry, digest, registry, and fixed-root-wire checks
+  passed in 0.35 seconds. The active checkpoint has 1,416 VM tables, 1,524
+  sampled values, 544 AIR instructions, protocol identifier
+  `[260724498, 1056429239, 162301300, 1188550917, 1596141750, 682600581, 863947950, 344096256]`,
+  and VM AIR digest
+  `[1382158882, 639948062, 696853649, 1967380268, 1649896554, 286238969, 116982786, 411321569]`.
+- `cargo test --release -p recursion --test air_dsl_guard -- --nocapture --test-threads=1`:
+  all five roster, owner, direct-DSL, and generated-component route guards
+  passed.
+- `cargo clippy --release -p stwo-macros -p air -p runner -p prover -p recursion --all-targets --no-deps -- -D warnings`
+  and guest-bin release clippy for `auipc_output`, `jal_output`, and
+  `jalr_output` passed with warnings denied.
+- `prek run --all-files`: both the external-directory guard and Trunk checks
+  passed.
+- Recursive-root proofs remain deferred until the final opcode roster: this
+  slice changes VM component geometry but not the leaf, binary, padded-tree, or
+  constant-size root boundary.
 
 ## Project finish line
 

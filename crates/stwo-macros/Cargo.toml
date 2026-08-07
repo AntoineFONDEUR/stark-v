@@ -15,6 +15,7 @@ syn.workspace = true
 debug-utils.workspace = true
 num-traits.workspace = true
 rand.workspace = true
+rstest.workspace = true
 runner.workspace = true
 simd.workspace = true
 stwo.workspace = true

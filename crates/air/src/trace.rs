@@ -374,9 +374,7 @@ mod tests {
 
         #[test]
         fn test_jal_table_to_table_with_enabler() {
-            let mut table = JalTable::new();
-            let rd = Access::default();
-            table.push(2, 8, rd, 100);
+            let table = JalTable::new();
 
             // Header cells retain the full schema when terminal rendering truncates wide tables.
             let headers: Vec<String> = table

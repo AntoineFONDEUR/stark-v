@@ -4,9 +4,9 @@
 > implements static control flow, functions, hints, degree-budget
 > materialization, relation statements, embedded components, and proof-bound VM
 > register/aligned-memory access. Poseidon2 and every recursion-local AIR use it
-> in production. LUI is the first production opcode whose execution, witness,
-> and AIR all come from a felt function; the other inner VM opcode AIRs still
-> use `define_air!` with separate runner handlers. Macro source and tests are
+> in production. LUI, AUIPC, JAL, and JALR have one felt-function source for
+> execution, witness filling, and AIR; the other inner VM opcode AIRs still use
+> `define_air!` with separate runner handlers. Macro source and tests are
 > authoritative for implemented syntax.
 
 ## The observation
@@ -124,9 +124,9 @@ lookups, and component integration from one declaration.
 
 `define_air_fns!` provides the felt-function path: degree-budget
 materialization, static `for`/`map`/`sum`, inline functions and function I/O,
-hints, external relation statements, embedded flag columns, and embedded
-component integration. Poseidon2, LUI, and every recursion-local AIR use this
-path.
+hints, external relation statements, canonical M31 splitting, byte-level lookup
+operations, embedded flag columns, and embedded component integration.
+Poseidon2, LUI, AUIPC, JAL, JALR, and every recursion-local AIR use this path.
 
 The remaining compiler work is opcode execution and runner migration. It is not
 a recursion-local macro migration. Every component reachable from the recursion
@@ -196,14 +196,21 @@ Opcode compiler capabilities, in dependency order:
    not derive in-row. See `test_hint_*` in
    `crates/stwo-macros/tests/air_fns.rs`.
 
-4. **Dispatch.** Opcode families with flag columns (`base_alu_reg`'s
+4. **Word intrinsics.** ✅ _Implemented._ `split_m31(value)` commits the
+   canonical four-byte representation, constrains its recomposition, and
+   consumes `range_check_8_8` plus `range_check_m31`. `bitand`, `bitor`, and
+   `bitxor` commit one byte output and consume the corresponding preprocessed
+   `bitwise` row. AUIPC and JAL use the split for their written word; JALR
+   splits its canonical target and binds the cleared low bit through `bitand`.
+
+5. **Dispatch.** Opcode families with flag columns (`base_alu_reg`'s
    add/sub/xor/or/and) are one function with one-hot felt parameters. Arithmetic
    selectors and relation multiplicities gate each variant; there is no dynamic
    branch in the AIR language. The decode step stays in the runner
    (`air::instructions`) and calls the generated family function with the
    selected flag tuple.
 
-The capabilities (1), (2), and (3) are in place. Tests in
+The capabilities (1) through (4) are in place. Tests in
 `crates/stwo-macros/tests/air_fns.rs` prove generated register and memory
 accesses through external relation boundaries, reject stale clocks, incorrect
 prior values, read-side writes, and non-zero x0 writes, and exercise gap filling
@@ -215,6 +222,9 @@ The **integration seam is also in place**. `define_air!` now takes an
 
 ```text
 external: {
+    auipc: crate::opcodes::auipc,
+    jal: crate::opcodes::jal,
+    jalr: crate::opcodes::jalr,
     poseidon2: crate::poseidon2,
     lui: crate::opcodes::lui,
 }
@@ -222,10 +232,11 @@ external: {
 
 Each entry generates the `Tracer` field, initialization, `total_traces`, debug,
 and column re-export, so the monolithic `Tracer` is composable. The component
-router assigns Poseidon2 to the detached hash proof and LUI to the VM proof.
-Migrating another opcode means defining it via `define_air_fns!`, adding it to
-`external:`, routing its generated component, and removing its old schema and
-runner semantics after focused valid and malformed proof tests pass.
+router assigns Poseidon2 to the detached hash proof and all four generated
+opcode tables to the VM proof. Migrating another opcode means defining it via
+`define_air_fns!`, adding it to `external:`, routing its generated component,
+and removing its schema and runner semantics after focused valid and malformed
+tests pass.
 
 ### What this retires (the `components!` question)
 
@@ -237,8 +248,9 @@ needs prover-side stwo types the air crate does not depend on. But
 composition for poseidon2. The retirement path is therefore not "merge
 `components!` into `define_air!`" but:
 
-1. `[done]` Migrate `lui` end to end: the air crate owns its felt function, the
-   prover uses its generated component, and the runner retains only decoding;
+1. `[done]` Migrate `lui`, `auipc`, `jal`, and `jalr` end to end: the air crate
+   owns their felt functions, the prover uses their generated components, and
+   the runner retains only decoding;
 2. `[pending]` Migrate the remaining families in dependency order (the LogUp
    balance is checked by the existing e2e constraint tests at every step);
 3. `[pending]` When the last family is out of `define_air!`'s opcode list,

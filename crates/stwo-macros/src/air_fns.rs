@@ -29,6 +29,9 @@
 //! state on the witness path while generating the standard memory-access and
 //! clock-range relations in the same lowered frame. Memory operations address
 //! aligned 32-bit words; byte and half-word lane semantics stay in felt code.
+//! `split_m31(value)` commits the canonical four-byte representation of a felt
+//! and binds it through the standard range relations. `bitand`, `bitor`, and
+//! `bitxor` commit one byte result and bind it through the bitwise relation.
 
 use std::collections::HashMap;
 
@@ -834,6 +837,15 @@ enum FillStep {
         callee: Ident,
         args: Vec<Ident>,
     },
+    /// Bind a felt to its canonical little-endian byte representation.
+    SplitM31 { value: Expr, limbs: [Ident; 4] },
+    /// Evaluate a byte-level operation whose result is lookup-constrained.
+    Bitwise {
+        kind: BitwiseKind,
+        lhs: Ident,
+        rhs: Ident,
+        output: Ident,
+    },
     /// Bind the prior word before a write computes its requested next limbs.
     AccessPrepare {
         kind: AccessKind,
@@ -851,6 +863,23 @@ enum FillStep {
         desired: Option<[Ident; 4]>,
         addr_inverse: Option<Ident>,
     },
+}
+
+#[derive(Clone, Copy)]
+enum BitwiseKind {
+    And,
+    Or,
+    Xor,
+}
+
+impl BitwiseKind {
+    const fn relation_id(self) -> u32 {
+        match self {
+            Self::And => 0,
+            Self::Or => 1,
+            Self::Xor => 2,
+        }
+    }
 }
 
 struct Lowerer<'a> {
@@ -1219,6 +1248,115 @@ impl Lowerer<'_> {
                     let cell = self.register_derived(&base, lowered, degree);
                     elements[position] = Value::Scalar { cell, degree };
                     return Ok(vec![Value::Array(elements)]);
+                }
+                "split_m31" => {
+                    if names.len() != 1 || call.args.len() != 1 {
+                        return Err(syn::Error::new_spanned(
+                            call,
+                            "split_m31 takes one felt and binds one four-limb array",
+                        ));
+                    }
+                    for (relation, arity) in
+                        [("range_check_8_8", 2usize), ("range_check_m31", 2usize)]
+                    {
+                        if self.relation_arities.get(relation) != Some(&arity) {
+                            return Err(syn::Error::new_spanned(
+                                call,
+                                format!("split_m31 requires `relation {relation}({arity});`"),
+                            ));
+                        }
+                    }
+                    let (value, _) = self.lower(&call.args[0], scope, budget)?;
+                    let limbs = std::array::from_fn(|position| {
+                        let base = format_ident!("{}_{}", names[0], position);
+                        let cell = self.register_column(&base);
+                        self.extra_columns.push(cell.clone());
+                        cell
+                    });
+                    let [limb_0, limb_1, limb_2, limb_3] = limbs.clone();
+                    self.constraints.push(syn::parse_quote!(
+                        #limb_0 + 256 * #limb_1 + 65536 * #limb_2
+                            + 16777216 * #limb_3 - (#value)
+                    ));
+                    self.relation_entries.push((
+                        format_ident!("range_check_8_8"),
+                        vec![limb_1.clone(), limb_2.clone()],
+                        false,
+                        None,
+                    ));
+                    self.relation_entries.push((
+                        format_ident!("range_check_m31"),
+                        vec![limb_0.clone(), limb_3.clone()],
+                        false,
+                        None,
+                    ));
+                    self.fill.push(FillStep::SplitM31 {
+                        value,
+                        limbs: limbs.clone(),
+                    });
+                    let elements = limbs
+                        .into_iter()
+                        .map(|cell| Value::Scalar { cell, degree: 1 })
+                        .collect();
+                    return Ok(vec![Value::Array(elements)]);
+                }
+                "bitand" | "bitor" | "bitxor" => {
+                    if names.len() != 1 || call.args.len() != 2 {
+                        return Err(syn::Error::new_spanned(
+                            call,
+                            format!("{callee} takes two byte felts and binds one result"),
+                        ));
+                    }
+                    if self.relation_arities.get("bitwise") != Some(&4) {
+                        return Err(syn::Error::new_spanned(
+                            call,
+                            format!("{callee} requires `relation bitwise(4);`"),
+                        ));
+                    }
+                    let kind = match callee.to_string().as_str() {
+                        "bitand" => BitwiseKind::And,
+                        "bitor" => BitwiseKind::Or,
+                        "bitxor" => BitwiseKind::Xor,
+                        _ => unreachable!("matched bitwise intrinsic"),
+                    };
+                    let mut inputs = Vec::with_capacity(2);
+                    for (position, arg) in call.args.iter().enumerate() {
+                        let (lowered, degree) = self.lower(arg, scope, budget)?;
+                        let cell = match &lowered {
+                            Expr::Path(path) => path.path.require_ident()?.clone(),
+                            _ => self.register_derived(
+                                &format_ident!("{}_input_{}", names[0], position),
+                                lowered,
+                                degree,
+                            ),
+                        };
+                        inputs.push(cell);
+                    }
+                    let [lhs, rhs]: [Ident; 2] = inputs.try_into().expect("two bitwise inputs");
+                    let output = self.register_column(&names[0]);
+                    self.extra_columns.push(output.clone());
+                    let relation_id = kind.relation_id();
+                    let relation_id_cell = self.register_derived(
+                        &format_ident!("{}_op", names[0]),
+                        syn::parse_quote!(#relation_id),
+                        0,
+                    );
+                    self.relation_entries.push((
+                        format_ident!("bitwise"),
+                        vec![lhs.clone(), rhs.clone(), output.clone(), relation_id_cell],
+                        false,
+                        None,
+                    ));
+                    self.fill.push(FillStep::Bitwise {
+                        kind,
+                        lhs,
+                        rhs,
+                        output: output.clone(),
+                    });
+                    return Ok(vec![Value::Scalar {
+                        cell: output,
+                        degree: 1,
+                    }]);
                 }
                 "constant" | "sum" | "pow2" | "inv" => {}
                 _ => {
@@ -3842,6 +3980,39 @@ fn generate_access_fill_step(step: &FillStep, state_path: &Path) -> syn::Result<
     }
 }
 
+fn generate_intrinsic_fill_step(step: &FillStep) -> syn::Result<TokenStream2> {
+    let base_field = quote!(stwo::core::fields::m31::BaseField);
+    match step {
+        FillStep::SplitM31 { value, limbs } => {
+            let value = concrete_expr(value)?;
+            Ok(quote! {
+                let [#(#limbs),*] = (#value).0.to_le_bytes().map(|limb| {
+                    #base_field::from_u32_unchecked(u32::from(limb))
+                });
+            })
+        }
+        FillStep::Bitwise {
+            kind,
+            lhs,
+            rhs,
+            output,
+        } => {
+            let operation = match kind {
+                BitwiseKind::And => quote!(#lhs.0 & #rhs.0),
+                BitwiseKind::Or => quote!(#lhs.0 | #rhs.0),
+                BitwiseKind::Xor => quote!(#lhs.0 ^ #rhs.0),
+            };
+            Ok(quote! {
+                let #output = #base_field::from_u32_unchecked(#operation);
+            })
+        }
+        _ => Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "expected an intrinsic fill step",
+        )),
+    }
+}
+
 fn generate_embedded_fill(
     function: &LoweredFn,
     flags: &[Ident],
@@ -3863,6 +4034,9 @@ fn generate_embedded_fill(
                 steps.push(quote! { let #cell = #value; });
             }
             FillStep::Call { .. } => unreachable!("embedded functions make no calls"),
+            FillStep::SplitM31 { .. } | FillStep::Bitwise { .. } => {
+                steps.push(generate_intrinsic_fill_step(step)?);
+            }
             FillStep::AccessPrepare { .. } | FillStep::AccessCommit { .. } => {
                 let (state_path, _) = vm_access.expect("access lowering requires vm config");
                 steps.push(generate_access_fill_step(step, state_path)?);
@@ -3953,6 +4127,9 @@ fn generate_call_fn(
                         let [#(#rets),*] = #callee_fn(tables, [#(#args),*]);
                     });
                 }
+            }
+            FillStep::SplitM31 { .. } | FillStep::Bitwise { .. } => {
+                steps.push(generate_intrinsic_fill_step(step)?);
             }
             FillStep::AccessPrepare { .. } | FillStep::AccessCommit { .. } => {
                 let (state_path, _) = vm_access.expect("access lowering requires vm config");

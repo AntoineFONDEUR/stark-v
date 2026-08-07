@@ -31,6 +31,9 @@ stwo_macros::define_air! {
     // Fn-DSL tables folded into the `Tracer` (defined via `define_air_fns!`).
     // The component router assigns each table to a constituent proof.
     external: {
+        auipc: crate::opcodes::auipc,
+        jal: crate::opcodes::jal,
+        jalr: crate::opcodes::jalr,
         poseidon2: crate::poseidon2,
         lui: crate::opcodes::lui,
     }
@@ -766,122 +769,6 @@ stwo_macros::define_air! {
                 - enabler * range_check_8_8(rs1_msl_shifted, rs2_msl_shifted),
                 // When the comparison scan fired, the limb difference is > 0.
                 - prefix_sum_final * range_check_20(diff_val - 1),
-            },
-        },
-
-        // ==========================================================================
-        // 9. AUIPC
-        // ==========================================================================
-        auipc: {
-            committed: {
-                clock, pc, rd,
-                imm_felt,
-            },
-            derived: {
-                rd_felt: rd_next_0 + pow2(8) * rd_next_1 + pow2(16) * rd_next_2 + pow2(24) * rd_next_3,
-                pc_next: pc + 4,
-                clock_next: clock + 1,
-                rd_clock_diff: clock - rd_clock_prev,
-            },
-            constraints: {
-                // rd = pc + imm
-                rd_felt - (pc + imm_felt),
-            },
-            lookups: {
-                // Program access (U-type): Program(pc, AUIPC, rd_idx, imm, 0)
-                -enabler * program_access(pc, constant(crate::instructions::Opcode::Auipc as u32), rd_addr, imm_felt, 0),
-                -enabler * registers_state(pc, clock),
-                enabler * registers_state(pc_next, clock_next),
-                // rd = pc + imm is an M31: middle limbs are bytes, outer pair is
-                // checked as an M31 split.
-                - enabler * range_check_8_8(rd_next_1, rd_next_2),
-                - enabler * range_check_m31(rd_next_0, rd_next_3),
-                // Write to rd (REG_AS = 0).
-                -enabler * memory_access(0, rd_addr, rd_clock_prev, rd_prev_0, rd_prev_1, rd_prev_2, rd_prev_3),
-                enabler * memory_access(0, rd_addr, clock, rd_next_0, rd_next_1, rd_next_2, rd_next_3),
-                - enabler * range_check_20(rd_clock_diff),
-            },
-        },
-
-        // ==========================================================================
-        // 11. JALR
-        // ==========================================================================
-        jalr: {
-            committed: {
-                clock, pc, rd, rs1,
-                to_pc_over_two, to_pc_lsb,
-                imm_felt,
-            },
-            derived: {
-                rs1_felt: rs1_next_0 + pow2(8) * rs1_next_1 + pow2(16) * rs1_next_2 + pow2(24) * rs1_next_3,
-                rd_felt: rd_next_0 + pow2(8) * rd_next_1 + pow2(16) * rd_next_2 + pow2(24) * rd_next_3,
-                // Jump target, even-aligned
-                jump_target: 2 * to_pc_over_two,
-                clock_next: clock + 1,
-                rs1_clock_diff: clock - rs1_clock_prev,
-                rd_clock_diff: clock - rd_clock_prev,
-            },
-            constraints: {
-                to_pc_lsb * (1 - to_pc_lsb),
-                // 2 * to_pc_over_two + to_pc_lsb = rs1 + imm
-                2 * to_pc_over_two + to_pc_lsb - (rs1_felt + imm_felt),
-                // rd = pc + 4, gated by rd_addr (x0 writes discarded)
-                enabler * rd_addr * (rd_felt - (pc + 4)),
-            },
-            lookups: {
-                // Program access (I-type): Program(pc, JALR, rd_idx, rs1_idx, imm)
-                -enabler * program_access(pc, constant(crate::instructions::Opcode::Jalr as u32), rd_addr, rs1_addr, imm_felt),
-                // Read rs1 (REG_AS = 0).
-                -enabler * memory_access(0, rs1_addr, rs1_clock_prev, rs1_prev_0, rs1_prev_1, rs1_prev_2, rs1_prev_3),
-                enabler * memory_access(0, rs1_addr, clock, rs1_next_0, rs1_next_1, rs1_next_2, rs1_next_3),
-                - enabler * range_check_20(rs1_clock_diff),
-                // rs1 is an M31 (the jump target must be a valid pc).
-                - enabler * range_check_m31(rs1_next_0, rs1_next_3),
-                // Jump: pc moves to the even-aligned target.
-                -enabler * registers_state(pc, clock),
-                enabler * registers_state(jump_target, clock_next),
-                // rd = pc + 4 is an M31.
-                - enabler * range_check_8_8(rd_next_1, rd_next_2),
-                - enabler * range_check_m31(rd_next_0, rd_next_3),
-                // Write rd.
-                -enabler * memory_access(0, rd_addr, rd_clock_prev, rd_prev_0, rd_prev_1, rd_prev_2, rd_prev_3),
-                enabler * memory_access(0, rd_addr, clock, rd_next_0, rd_next_1, rd_next_2, rd_next_3),
-                - enabler * range_check_20(rd_clock_diff),
-            },
-        },
-
-        // ==========================================================================
-        // 12. JAL
-        // ==========================================================================
-        jal: {
-            committed: {
-                clock, pc, rd,
-                imm_felt,
-            },
-            derived: {
-                rd_felt: rd_next_0 + pow2(8) * rd_next_1 + pow2(16) * rd_next_2 + pow2(24) * rd_next_3,
-                jump_target: pc + imm_felt,
-                clock_next: clock + 1,
-                rd_clock_diff: clock - rd_clock_prev,
-            },
-            lookups: {
-                // Program access (U-type): Program(pc, JAL, rd_idx, imm, 0)
-                -enabler * program_access(pc, constant(crate::instructions::Opcode::Jal as u32), rd_addr, imm_felt, 0),
-                // Unconditional jump: pc moves to pc + imm.
-                -enabler * registers_state(pc, clock),
-                enabler * registers_state(jump_target, clock_next),
-                // rd = pc + 4 is an M31.
-                - enabler * range_check_8_8(rd_next_1, rd_next_2),
-                - enabler * range_check_m31(rd_next_0, rd_next_3),
-                // Write to rd (REG_AS = 0).
-                -enabler * memory_access(0, rd_addr, rd_clock_prev, rd_prev_0, rd_prev_1, rd_prev_2, rd_prev_3),
-                enabler * memory_access(0, rd_addr, clock, rd_next_0, rd_next_1, rd_next_2, rd_next_3),
-                - enabler * range_check_20(rd_clock_diff),
-            },
-            constraints: {
-                // rd = pc + 4, gated by enabler (padding) and rd_addr (x0
-                // writes are discarded)
-                enabler * rd_addr * (rd_felt - (pc + 4)),
             },
         },
 

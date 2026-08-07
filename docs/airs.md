@@ -11,11 +11,13 @@ The active definition is split across these source files:
 - `crates/air/src/schema.rs` declares VM relations, preprocessed lookups, the
   remaining trace tables, and external felt-generated tables through
   `define_air!`.
-- `crates/air/src/opcodes/lui.rs` declares LUI execution, witness generation,
-  constraints, and relations through `define_air_fns!`.
+- `crates/air/src/opcodes/{lui,auipc,jal,jalr}.rs` declare upper-immediate and
+  jump execution, witness generation, constraints, and relations through
+  `define_air_fns!`.
 - `crates/air/src/poseidon2.rs` declares Poseidon2 through `define_air_fns!`.
 - `crates/prover/src/components/mod.rs` fixes the VM constituent roster and
-  routes generated LUI into the VM proof and Poseidon2 into its detached proof.
+  routes generated opcode components into the VM proof and Poseidon2 into its
+  detached proof.
 - `crates/runner/src/ops/` holds decode adapters for migrated functions and
   executes the remaining opcode handlers.
 - `crates/prover/src/public_data.rs` defines verifier-owned boundary terms.

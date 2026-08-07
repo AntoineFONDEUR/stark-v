@@ -181,9 +181,10 @@ fn lui_standard_relations_prove_and_verify() {
 
 /// LUI's generated write constraint rejects a destination limb inconsistent with the immediate.
 #[test_log::test]
-fn lui_destination_limb_mutation_is_rejected() {
+fn lui_destination_limb_mutation_fails_component_constraints() {
+    use prover::components::{self, Components};
     use prover::e2e::{ensure_guest_built, guest_bin_dir};
-    use prover::prove_rv32im;
+    use prover::relations::Relations;
     use runner::run;
 
     ensure_guest_built();
@@ -191,13 +192,106 @@ fn lui_destination_limb_mutation_is_rejected() {
     let elf = std::fs::read(&elf_path).expect("read proof-capable LUI ELF");
     let mut run_result = run(&elf, 10_000).expect("execute LUI chunk");
     run_result.tracer.lui.rd_next_1[0] ^= 1;
-    let config = PcsConfig::default();
-    let preprocessing = prover::preprocess(config);
+    let traces = components::gen_trace(run_result.tracer);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        prove_rv32im(run_result, config, &preprocessing)
+        Components::assert_constraints_on_polys(&traces, &Relations::dummy());
     }));
 
     assert!(result.is_err());
+}
+
+/// A felt-defined AUIPC row closes its program, state, register, and range relations.
+#[test_log::test]
+fn auipc_standard_relations_prove_and_verify() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("auipc_output");
+    let elf = std::fs::read(&elf_path).expect("read proof-capable AUIPC ELF");
+    let run_result = run(&elf, 10_000).expect("execute AUIPC chunk");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
+}
+
+/// A felt-defined JAL row closes its program, state, register, and range relations.
+#[test_log::test]
+fn jal_standard_relations_prove_and_verify() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("jal_output");
+    let elf = std::fs::read(&elf_path).expect("read proof-capable JAL ELF");
+    let run_result = run(&elf, 10_000).expect("execute JAL chunk");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
+}
+
+/// A felt-defined JALR row closes its program, state, register, range, and bitwise relations.
+#[test_log::test]
+fn jalr_standard_relations_prove_and_verify() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("jalr_output");
+    let elf = std::fs::read(&elf_path).expect("read proof-capable JALR ELF");
+    let run_result = run(&elf, 10_000).expect("execute JALR chunk");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
+}
+
+/// AUIPC's generated split rejects a destination limb inconsistent with PC plus immediate.
+#[test_log::test]
+fn auipc_destination_limb_mutation_fails_component_constraints() {
+    use prover::components::{self, Components};
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::relations::Relations;
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("auipc_output");
+    let elf = std::fs::read(&elf_path).expect("read proof-capable AUIPC ELF");
+    let mut run_result = run(&elf, 10_000).expect("execute AUIPC chunk");
+    run_result.tracer.auipc.rd_value_0[0] ^= 1;
+    let traces = components::gen_trace(run_result.tracer);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Components::assert_constraints_on_polys(&traces, &Relations::dummy());
+    }));
+
+    assert!(result.is_err());
+}
+
+/// JALR's cleared low bit must match the preprocessed bitwise table.
+#[test_log::test]
+fn jalr_target_lsb_mutation_leaves_a_relation_deficit() {
+    use prover::components::{self, gen_interaction_trace};
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::relations::Relations;
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("jalr_output");
+    let elf = std::fs::read(&elf_path).expect("read proof-capable JALR ELF");
+    let mut run_result = run(&elf, 10_000).expect("execute JALR chunk");
+    run_result.tracer.jalr.target_lsb[0] ^= 1;
+    let traces = components::gen_trace(run_result.tracer);
+    let (_, claimed_sum) = gen_interaction_trace(&traces, &Relations::dummy());
+
+    assert!(!claimed_sum.sum().is_zero());
 }
 
 /// A COMMIT chain cannot place a later execution clock before an earlier one.

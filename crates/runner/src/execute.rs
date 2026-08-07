@@ -55,12 +55,12 @@ pub fn execute(
         Opcode::Bgeu => branch::bgeu(cpu, inst, tracer),
 
         // Jumps
-        Opcode::Jal => jump::jal(cpu, inst, tracer),
-        Opcode::Jalr => jump::jalr(cpu, inst, tracer),
+        Opcode::Jal => jump::jal(cpu, mem, inst, tracer),
+        Opcode::Jalr => jump::jalr(cpu, mem, inst, tracer),
 
         // Upper immediates
         Opcode::Lui => upper::lui(cpu, mem, inst, tracer),
-        Opcode::Auipc => upper::auipc(cpu, inst, tracer),
+        Opcode::Auipc => upper::auipc(cpu, mem, inst, tracer),
 
         // M-extension
         Opcode::Mul => muldiv::mul(cpu, inst, tracer),

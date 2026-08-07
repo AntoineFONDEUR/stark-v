@@ -927,6 +927,7 @@ struct Lowerer<'a> {
     inline_fns: &'a HashMap<String, AirFn>,
     fn_name: Ident,
     vm_access_enabled: bool,
+    materialize_relation_args: bool,
 }
 
 impl Lowerer<'_> {
@@ -1340,13 +1341,21 @@ impl Lowerer<'_> {
                     let mut inputs = Vec::with_capacity(2);
                     for (position, arg) in call.args.iter().take(2).enumerate() {
                         let (lowered, degree) = self.lower(arg, scope, budget)?;
-                        let cell = match &lowered {
-                            Expr::Path(path) => path.path.require_ident()?.clone(),
-                            _ => self.register_derived(
-                                &format_ident!("{}_input_{}", names[0], position),
-                                lowered,
-                                degree,
-                            ),
+                        // Degree-one inputs keep batched bitwise denominators within the AIR bound.
+                        let cell = if self.materialize_relation_args && degree > 1 {
+                            let Expr::Path(path) = self.materialize(lowered) else {
+                                unreachable!("materialize returns a cell path");
+                            };
+                            path.path.require_ident()?.clone()
+                        } else {
+                            match &lowered {
+                                Expr::Path(path) => path.path.require_ident()?.clone(),
+                                _ => self.register_derived(
+                                    &format_ident!("{}_input_{}", names[0], position),
+                                    lowered,
+                                    degree,
+                                ),
+                            }
                         };
                         inputs.push(cell);
                     }
@@ -1661,6 +1670,13 @@ impl Lowerer<'_> {
         };
         let to_cell = |lowerer: &mut Self, expr: &Expr, base: Ident| -> syn::Result<Ident> {
             let (lowered, degree) = lowerer.lower(expr, scope, budget)?;
+            // Degree-one tuple cells keep batched LogUp denominators within the AIR bound.
+            if lowerer.materialize_relation_args && degree > 1 {
+                let Expr::Path(path) = lowerer.materialize(lowered) else {
+                    unreachable!("materialize returns a cell path");
+                };
+                return Ok(path.path.require_ident()?.clone());
+            }
             if let Expr::Path(path) = &lowered
                 && let Some(ident) = path.path.get_ident()
             {
@@ -1674,8 +1690,15 @@ impl Lowerer<'_> {
             if let Ok(ident) = expect_ident(arg)
                 && let Some(value @ Value::Array(_)) = scope.get(&ident.to_string())
             {
-                for (cell, _) in value.flatten() {
-                    arg_cells.push(cell);
+                for (cell, degree) in value.flatten() {
+                    if self.materialize_relation_args && degree > 1 {
+                        let Expr::Path(path) = self.materialize(syn::parse_quote!(#cell)) else {
+                            unreachable!("materialize returns a cell path");
+                        };
+                        arg_cells.push(path.path.require_ident()?.clone());
+                    } else {
+                        arg_cells.push(cell);
+                    }
                 }
                 continue;
             }
@@ -2267,6 +2290,7 @@ struct LowerFnOptions<'a> {
     materialize_rets: bool,
     fixed_params: &'a std::collections::HashSet<String>,
     vm_access_enabled: bool,
+    materialize_relation_args: bool,
 }
 
 fn lower_fn(
@@ -2297,6 +2321,7 @@ fn lower_fn(
         inline_fns,
         fn_name: function.name.clone(),
         vm_access_enabled: options.vm_access_enabled,
+        materialize_relation_args: options.materialize_relation_args,
     };
 
     // Every table has one generated activity column. Making it a built-in
@@ -2769,6 +2794,8 @@ pub fn define_air_fns(input: TokenStream) -> TokenStream {
                 materialize_rets: embedded.is_some(),
                 fixed_params: &fixed_params,
                 vm_access_enabled: vm_access.is_some(),
+                // Trusted preprocessed components route higher-degree entries through singleton tails.
+                materialize_relation_args: embedded_preprocessed.is_empty(),
             },
         ) {
             Ok(result) => {

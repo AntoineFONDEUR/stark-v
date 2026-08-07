@@ -10,3 +10,5 @@ pub mod jalr;
 pub mod lt_imm;
 pub mod lt_reg;
 pub mod lui;
+pub mod shifts_imm;
+pub mod shifts_reg;

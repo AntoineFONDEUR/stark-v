@@ -20,8 +20,8 @@ stwo_macros::components! {
         lui: air::opcodes::lui::component,
         mul,
         mulh,
-        shifts_imm,
-        shifts_reg,
+        shifts_imm: air::opcodes::shifts_imm::component,
+        shifts_reg: air::opcodes::shifts_reg::component,
         program,
         memory,
         merkle,
@@ -164,6 +164,42 @@ mod tests {
     }
 
     #[test]
+    fn shifts_reg_constraint_degrees_fit_the_declared_bound() {
+        let eval = super::shifts_reg::air::Eval {
+            log_size: 6,
+            relations: crate::relations::Relations::dummy(),
+        };
+        let evaluated = eval.evaluate(ExprEvaluator::new());
+        let degrees = evaluated.constraint_degree_bounds();
+        let breaches = degrees
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, degree)| *degree > 3)
+            .collect::<Vec<_>>();
+
+        assert!(breaches.is_empty(), "{breaches:?}");
+    }
+
+    #[test]
+    fn shifts_imm_constraint_degrees_fit_the_declared_bound() {
+        let eval = super::shifts_imm::air::Eval {
+            log_size: 6,
+            relations: crate::relations::Relations::dummy(),
+        };
+        let evaluated = eval.evaluate(ExprEvaluator::new());
+        let degrees = evaluated.constraint_degree_bounds();
+        let breaches = degrees
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, degree)| *degree > 3)
+            .collect::<Vec<_>>();
+
+        assert!(breaches.is_empty(), "{breaches:?}");
+    }
+
+    #[test]
     fn test_mul_info_offsets() {
         let eval = super::mul::air::Eval {
             log_size: 6,
@@ -185,8 +221,9 @@ mod tests {
     crate::test_lookup_e2e!(base_alu_reg, range_check_8_8, add);
     crate::test_lookup_e2e!(base_alu_reg, range_check_8_8, sub);
 
-    crate::test_lookup_e2e!(shifts_reg, range_check_8_11, sll);
-    crate::test_lookup_e2e!(shifts_reg, range_check_8_11, srl);
+    crate::test_lookup_e2e!(shifts_reg, bitwise, sll);
+    crate::test_lookup_e2e!(shifts_reg, bitwise, sra);
+    crate::test_lookup_e2e!(shifts_imm, range_check_8_8, srai);
 
     crate::test_lookup_e2e!(load_store, range_check_8_8_4, lb);
     crate::test_lookup_e2e!(load_store, range_check_8_8_4, sb);
@@ -267,6 +304,32 @@ mod tests {
     fn mutated_generated_blt_sign_flip_leaves_a_relation_deficit() {
         let mut tracer = crate::e2e::run_test_bin("blt");
         tracer.branch_lt.rs1_flipped[0] ^= 1;
+        let traces = super::gen_trace(tracer);
+        let (_, claimed_sum) =
+            super::gen_interaction_trace(&traces, &crate::relations::Relations::dummy());
+
+        assert!(!claimed_sum.sum().is_zero());
+    }
+
+    #[test]
+    fn mutated_generated_sll_result_fails_component_constraints() {
+        let mut tracer = crate::e2e::run_test_bin("sll");
+        tracer.shifts_reg.rd_next_0[0] ^= 1;
+        let traces = super::gen_trace(tracer);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::Components::assert_constraints_on_polys(
+                &traces,
+                &crate::relations::Relations::dummy(),
+            );
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mutated_generated_srai_sign_mask_leaves_a_relation_deficit() {
+        let mut tracer = crate::e2e::run_test_bin("srai");
+        tracer.shifts_imm.sign_mask[0] ^= 1;
         let traces = super::gen_trace(tracer);
         let (_, claimed_sum) =
             super::gen_interaction_trace(&traces, &crate::relations::Relations::dummy());

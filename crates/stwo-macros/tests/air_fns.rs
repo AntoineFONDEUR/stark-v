@@ -292,6 +292,74 @@ mod shared {
     }
 }
 
+mod inline_relation_degree {
+    stwo_macros::define_air_fns! {
+        max_degree: 3,
+        logup_batch: 2,
+
+        relation product(1);
+
+        inline fn multiply(lhs, rhs) {
+            return lhs * rhs;
+        }
+
+        fn host(a, b, c, d) {
+            let first = multiply(a, b);
+            let second = multiply(c, d);
+            consume product(first);
+            consume product(second);
+            return first + second;
+        }
+    }
+}
+
+#[test]
+fn test_inline_relation_arguments_fit_the_degree_bound() {
+    use stwo_constraint_framework::FrameworkEval;
+    use stwo_constraint_framework::expr::ExprEvaluator;
+
+    let evaluated = inline_relation_degree::host::air::Eval {
+        log_size: 4,
+        relations: inline_relation_degree::AirFnRelations::dummy(),
+    }
+    .evaluate(ExprEvaluator::new());
+    let degrees = evaluated.constraint_degree_bounds();
+
+    assert!(degrees.iter().all(|degree| *degree <= 3), "{degrees:?}");
+}
+
+mod derived_bitwise_degree {
+    stwo_macros::define_air_fns! {
+        max_degree: 3,
+        logup_batch: 2,
+
+        relation bitwise(4);
+
+        fn host(value, a, b, c, d) {
+            let first_mask = a * b;
+            let second_mask = c * d;
+            let first = bitand(value, first_mask);
+            let second = bitand(value, second_mask);
+            return first + second;
+        }
+    }
+}
+
+#[test]
+fn test_derived_bitwise_inputs_fit_the_degree_bound() {
+    use stwo_constraint_framework::FrameworkEval;
+    use stwo_constraint_framework::expr::ExprEvaluator;
+
+    let evaluated = derived_bitwise_degree::host::air::Eval {
+        log_size: 4,
+        relations: derived_bitwise_degree::AirFnRelations::dummy(),
+    }
+    .evaluate(ExprEvaluator::new());
+    let degrees = evaluated.constraint_degree_bounds();
+
+    assert!(degrees.iter().all(|degree| *degree <= 3), "{degrees:?}");
+}
+
 mod embedded_relation_bundle {
     stwo_constraint_framework::relation!(PassRelation, 1);
     stwo_constraint_framework::relation!(RecordRelation, 1);

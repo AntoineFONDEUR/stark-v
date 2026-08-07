@@ -7,9 +7,9 @@
 
 use air::opcodes::base_alu_imm::base_alu_imm_fill;
 use air::opcodes::lt_imm::lt_imm_fill;
+use air::opcodes::shifts_imm::shifts_imm_fill;
 use stwo::core::fields::m31::BaseField;
 
-use super::utils::compute_shift_witness;
 use crate::trace::Tracer;
 use crate::{Cpu, DecodedInst, MachineState, Memory};
 
@@ -81,73 +81,42 @@ pub fn andi(cpu: &mut Cpu, memory: &mut Memory, inst: &DecodedInst, tracer: &mut
 // Shifts Imm (slli/srli/srai)
 // =============================================================================
 
-pub fn slli(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
-    let old_pc = cpu.pc;
-    let rs1 = cpu.read_reg(inst.rs1, tracer);
-    let shamt = inst.imm as u32 & 0x1F;
-    let result = rs1.next << shamt;
-    let rd = cpu.write_reg(inst.rd, result, tracer);
-    cpu.advance_pc();
-
-    let w = compute_shift_witness(rs1.next, shamt, true, false);
-    let bit_multiplier = 1u32 << (shamt % 8);
-
-    // opcode flags: sll=1, srl=0, sra=0
-    trace_op!(shifts_imm: tracer, old_pc, rd, rs1,
-        w.rs1_sign, shamt,
-        1, 0, 0,  // opcode flags
-        bit_multiplier, 0,  // bit_multiplier_left, bit_multiplier_right
-        w.bit_shift_marker[0], w.bit_shift_marker[1], w.bit_shift_marker[2], w.bit_shift_marker[3],
-        w.bit_shift_marker[4], w.bit_shift_marker[5], w.bit_shift_marker[6], w.bit_shift_marker[7],
-        w.limb_shift_marker[0], w.limb_shift_marker[1], w.limb_shift_marker[2], w.limb_shift_marker[3],
-        w.bit_shift_carry[0], w.bit_shift_carry[1], w.bit_shift_carry[2], w.bit_shift_carry[3]
-    );
+fn execute_shifts_imm(
+    cpu: &mut Cpu,
+    memory: &mut Memory,
+    inst: &DecodedInst,
+    tracer: &mut Tracer,
+    flags: [u32; 3],
+) {
+    // Decoding selects direction and fill; generated execution owns the shift.
+    let args = [
+        tracer.clock,
+        cpu.pc,
+        u32::from(inst.rd),
+        u32::from(inst.rs1),
+        inst.imm as u32 & 0x1f,
+        flags[0],
+        flags[1],
+        flags[2],
+    ]
+    .map(BaseField::from_u32_unchecked);
+    let [next_pc] = {
+        let mut state = MachineState::new(cpu, memory);
+        shifts_imm_fill(&mut state, tracer, args, [])
+    };
+    cpu.pc = next_pc.0;
 }
 
-pub fn srli(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
-    let old_pc = cpu.pc;
-    let rs1 = cpu.read_reg(inst.rs1, tracer);
-    let shamt = inst.imm as u32 & 0x1F;
-    let result = rs1.next >> shamt;
-    let rd = cpu.write_reg(inst.rd, result, tracer);
-    cpu.advance_pc();
-
-    let w = compute_shift_witness(rs1.next, shamt, false, false);
-    let bit_multiplier = 1u32 << (shamt % 8);
-
-    // opcode flags: sll=0, srl=1, sra=0
-    trace_op!(shifts_imm: tracer, old_pc, rd, rs1,
-        w.rs1_sign, shamt,
-        0, 1, 0,  // opcode flags
-        0, bit_multiplier,  // bit_multiplier_left, bit_multiplier_right
-        w.bit_shift_marker[0], w.bit_shift_marker[1], w.bit_shift_marker[2], w.bit_shift_marker[3],
-        w.bit_shift_marker[4], w.bit_shift_marker[5], w.bit_shift_marker[6], w.bit_shift_marker[7],
-        w.limb_shift_marker[0], w.limb_shift_marker[1], w.limb_shift_marker[2], w.limb_shift_marker[3],
-        w.bit_shift_carry[0], w.bit_shift_carry[1], w.bit_shift_carry[2], w.bit_shift_carry[3]
-    );
+pub fn slli(cpu: &mut Cpu, memory: &mut Memory, inst: &DecodedInst, tracer: &mut Tracer) {
+    execute_shifts_imm(cpu, memory, inst, tracer, [1, 0, 0]);
 }
 
-pub fn srai(cpu: &mut Cpu, inst: &DecodedInst, tracer: &mut Tracer) {
-    let old_pc = cpu.pc;
-    let rs1 = cpu.read_reg(inst.rs1, tracer);
-    let shamt = inst.imm as u32 & 0x1F;
-    let result = ((rs1.next as i32) >> shamt) as u32;
-    let rd = cpu.write_reg(inst.rd, result, tracer);
-    cpu.advance_pc();
+pub fn srli(cpu: &mut Cpu, memory: &mut Memory, inst: &DecodedInst, tracer: &mut Tracer) {
+    execute_shifts_imm(cpu, memory, inst, tracer, [0, 1, 0]);
+}
 
-    let w = compute_shift_witness(rs1.next, shamt, false, true);
-    let bit_multiplier = 1u32 << (shamt % 8);
-
-    // opcode flags: sll=0, srl=0, sra=1
-    trace_op!(shifts_imm: tracer, old_pc, rd, rs1,
-        w.rs1_sign, shamt,
-        0, 0, 1,  // opcode flags
-        0, bit_multiplier,  // bit_multiplier_left, bit_multiplier_right
-        w.bit_shift_marker[0], w.bit_shift_marker[1], w.bit_shift_marker[2], w.bit_shift_marker[3],
-        w.bit_shift_marker[4], w.bit_shift_marker[5], w.bit_shift_marker[6], w.bit_shift_marker[7],
-        w.limb_shift_marker[0], w.limb_shift_marker[1], w.limb_shift_marker[2], w.limb_shift_marker[3],
-        w.bit_shift_carry[0], w.bit_shift_carry[1], w.bit_shift_carry[2], w.bit_shift_carry[3]
-    );
+pub fn srai(cpu: &mut Cpu, memory: &mut Memory, inst: &DecodedInst, tracer: &mut Tracer) {
+    execute_shifts_imm(cpu, memory, inst, tracer, [0, 0, 1]);
 }
 
 // =============================================================================

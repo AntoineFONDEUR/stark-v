@@ -14,12 +14,12 @@ pub fn execute(
         // R-type ALU
         Opcode::Add => alu::add(cpu, mem, inst, tracer),
         Opcode::Sub => alu::sub(cpu, mem, inst, tracer),
-        Opcode::Sll => alu::sll(cpu, inst, tracer),
+        Opcode::Sll => alu::sll(cpu, mem, inst, tracer),
         Opcode::Slt => alu::slt(cpu, mem, inst, tracer),
         Opcode::Sltu => alu::sltu(cpu, mem, inst, tracer),
         Opcode::Xor => alu::xor(cpu, mem, inst, tracer),
-        Opcode::Srl => alu::srl(cpu, inst, tracer),
-        Opcode::Sra => alu::sra(cpu, inst, tracer),
+        Opcode::Srl => alu::srl(cpu, mem, inst, tracer),
+        Opcode::Sra => alu::sra(cpu, mem, inst, tracer),
         Opcode::Or => alu::or(cpu, mem, inst, tracer),
         Opcode::And => alu::and(cpu, mem, inst, tracer),
 
@@ -30,9 +30,9 @@ pub fn execute(
         Opcode::Xori => alu_imm::xori(cpu, mem, inst, tracer),
         Opcode::Ori => alu_imm::ori(cpu, mem, inst, tracer),
         Opcode::Andi => alu_imm::andi(cpu, mem, inst, tracer),
-        Opcode::Slli => alu_imm::slli(cpu, inst, tracer),
-        Opcode::Srli => alu_imm::srli(cpu, inst, tracer),
-        Opcode::Srai => alu_imm::srai(cpu, inst, tracer),
+        Opcode::Slli => alu_imm::slli(cpu, mem, inst, tracer),
+        Opcode::Srli => alu_imm::srli(cpu, mem, inst, tracer),
+        Opcode::Srai => alu_imm::srai(cpu, mem, inst, tracer),
 
         // Loads
         Opcode::Lb => load::lb(cpu, mem, inst, tracer),
@@ -247,5 +247,69 @@ mod tests {
         execute(&mut cpu, &mut memory, &inst, &mut tracer).expect("execution must succeed");
 
         assert_eq!(cpu.pc, expected_pc);
+    }
+
+    #[rstest::rstest]
+    #[case(Opcode::Sll, 0x1234_5678, 8, 0x3456_7800)]
+    #[case(Opcode::Sll, 1, 32, 1)]
+    #[case(Opcode::Srl, 0x8000_0001, 31, 1)]
+    #[case(Opcode::Sra, 0x8000_0000, 31, u32::MAX)]
+    #[case(Opcode::Sra, i32::MAX as u32, 31, 0)]
+    fn generated_register_shift_masks_the_amount_and_selects_the_fill(
+        #[case] opcode: Opcode,
+        #[case] value: u32,
+        #[case] shift: u32,
+        #[case] expected: u32,
+    ) {
+        let mut cpu = Cpu::new(0x1000, 0, 0);
+        cpu.set_reg(1, value);
+        cpu.set_reg(2, shift);
+        let mut memory = Memory::new();
+        let inst = DecodedInst {
+            opcode,
+            rd: 3,
+            rs1: 1,
+            rs2: 2,
+            imm: 0,
+        };
+        let mut tracer = Tracer {
+            clock: 1,
+            ..Default::default()
+        };
+
+        execute(&mut cpu, &mut memory, &inst, &mut tracer).expect("execution must succeed");
+
+        assert_eq!(cpu.reg(3), expected);
+    }
+
+    #[rstest::rstest]
+    #[case(Opcode::Slli, 1, 31, 0x8000_0000)]
+    #[case(Opcode::Srli, 0x8000_0000, 31, 1)]
+    #[case(Opcode::Srai, 0x8000_0000, 31, u32::MAX)]
+    #[case(Opcode::Srai, 0x8000_0000, 0, 0x8000_0000)]
+    fn generated_immediate_shift_honors_extreme_amounts(
+        #[case] opcode: Opcode,
+        #[case] value: u32,
+        #[case] shift: i32,
+        #[case] expected: u32,
+    ) {
+        let mut cpu = Cpu::new(0x1000, 0, 0);
+        cpu.set_reg(1, value);
+        let mut memory = Memory::new();
+        let inst = DecodedInst {
+            opcode,
+            rd: 3,
+            rs1: 1,
+            rs2: 0,
+            imm: shift,
+        };
+        let mut tracer = Tracer {
+            clock: 1,
+            ..Default::default()
+        };
+
+        execute(&mut cpu, &mut memory, &inst, &mut tracer).expect("execution must succeed");
+
+        assert_eq!(cpu.reg(3), expected);
     }
 }

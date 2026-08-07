@@ -269,6 +269,74 @@ fn branch_lt_single_chunk_proves_and_verifies() {
     assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
 }
 
+/// One register-shift chunk closes every generated component relation.
+#[test_log::test]
+fn shifts_reg_single_chunk_proves_and_verifies() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("shifts_reg_output");
+    let elf = std::fs::read(&elf_path).expect("read register-shift ELF");
+    let run_result = run(&elf, 10_000).expect("execute one register-shift chunk");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
+}
+
+/// One immediate-shift chunk closes every generated component relation.
+#[test_log::test]
+fn shifts_imm_single_chunk_proves_and_verifies() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("shifts_imm_output");
+    let elf = std::fs::read(&elf_path).expect("read immediate-shift ELF");
+    let run_result = run(&elf, 10_000).expect("execute one immediate-shift chunk");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
+}
+
+/// Every register-shift row in the single-chunk guest satisfies the aggregate AIR.
+#[test_log::test]
+fn shifts_reg_single_chunk_satisfies_aggregate_constraints() {
+    use prover::components::{self, Components};
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("shifts_reg_output");
+    let elf = std::fs::read(&elf_path).expect("read register-shift ELF");
+    let run_result = run(&elf, 10_000).expect("execute one register-shift chunk");
+    let traces = components::gen_trace(run_result.tracer);
+
+    Components::assert_constraints_on_polys(&traces, &Relations::dummy());
+}
+
+/// Every immediate-shift row in the single-chunk guest satisfies the aggregate AIR.
+#[test_log::test]
+fn shifts_imm_single_chunk_satisfies_aggregate_constraints() {
+    use prover::components::{self, Components};
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("shifts_imm_output");
+    let elf = std::fs::read(&elf_path).expect("read immediate-shift ELF");
+    let run_result = run(&elf, 10_000).expect("execute one immediate-shift chunk");
+    let traces = components::gen_trace(run_result.tracer);
+
+    Components::assert_constraints_on_polys(&traces, &Relations::dummy());
+}
+
 /// A felt-defined LUI row closes its program, state, register, and range relations.
 #[test_log::test]
 fn lui_standard_relations_prove_and_verify() {

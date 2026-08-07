@@ -245,11 +245,11 @@ const VM_INVENTORY: [ComponentOwner; 27] = [
     },
     ComponentOwner {
         name: "shifts_imm",
-        source: "crates/air/src/schema.rs",
+        source: "crates/air/src/opcodes/shifts_imm.rs",
     },
     ComponentOwner {
         name: "shifts_reg",
-        source: "crates/air/src/schema.rs",
+        source: "crates/air/src/opcodes/shifts_reg.rs",
     },
     ComponentOwner {
         name: "program",
@@ -293,7 +293,7 @@ const VM_INVENTORY: [ComponentOwner; 27] = [
     },
 ];
 
-const OWNER_POLICIES: [OwnerPolicy; 42] = [
+const OWNER_POLICIES: [OwnerPolicy; 44] = [
     OwnerPolicy {
         source: "crates/air/src/opcodes/auipc.rs",
         accepted_macro_count: 1,
@@ -332,6 +332,14 @@ const OWNER_POLICIES: [OwnerPolicy; 42] = [
     },
     OwnerPolicy {
         source: "crates/air/src/opcodes/lui.rs",
+        accepted_macro_count: 1,
+    },
+    OwnerPolicy {
+        source: "crates/air/src/opcodes/shifts_imm.rs",
+        accepted_macro_count: 1,
+    },
+    OwnerPolicy {
+        source: "crates/air/src/opcodes/shifts_reg.rs",
         accepted_macro_count: 1,
     },
     OwnerPolicy {
@@ -551,6 +559,14 @@ fn vm_component_router_uses_only_the_expected_dsl_routes() {
                     "air::opcodes::lt_reg::component".to_owned(),
                 ),
                 ("lui".to_owned(), "air::opcodes::lui::component".to_owned()),
+                (
+                    "shifts_imm".to_owned(),
+                    "air::opcodes::shifts_imm::component".to_owned(),
+                ),
+                (
+                    "shifts_reg".to_owned(),
+                    "air::opcodes::shifts_reg::component".to_owned(),
+                ),
             ],
             vec!["poseidon2".to_owned()],
         )

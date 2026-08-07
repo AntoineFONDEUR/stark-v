@@ -1,10 +1,9 @@
 # Syscalls and the output journal
 
-> **Status: journal AIR, public-boundary wiring, and recursive-root validation
-> implemented; the guest SDK remains.** Canonical `ecall` dispatches on `a7`.
-> Syscall ID 1 authenticates the `a0` word, advances a Poseidon2 journal, and
-> exposes only proof-bound segment endpoints. Every other ID fails with
-> `RunError::UnsupportedSyscall` before the PC advances.
+> **Status: implemented and validated through a recursive root.** Canonical
+> `ecall` dispatches on `a7`. Syscall ID 1 authenticates the `a0` word, advances
+> a Poseidon2 journal, and exposes only proof-bound segment endpoints. Every
+> other ID fails with `RunError::UnsupportedSyscall` before the PC advances.
 
 ## Current capability
 
@@ -13,6 +12,8 @@ recursive statement boundary:
 
 - `crates/air/src/schema.rs` defines `commit` directly through the existing
   `define_air!` DSL. There is no manual component or syscall-specific macro.
+- `guest_lib::commit(u32)` is the guest API. It places selector 1 in `a7`, the
+  committed word in `a0`, and executes the canonical `ecall`.
 - The row authenticates canonical `ecall`, `a7 == 1`, the `a0` register read,
   the PC/clock transition, and the register access clocks.
 - The runner records the journal Poseidon2 call before commitment finalization.
@@ -26,9 +27,9 @@ recursive statement boundary:
   initial and final digests to `MachineState::public_io_state`, so ordinary
   binary statement folding carries journal continuity toward the root.
 
-The guest-facing SDK call is the remaining interface work. A real COMMIT
-execution already produces and verifies a constant-size recursive root, while
-application and VM claim mutation tests reject forged journal boundaries.
+The one- and two-COMMIT guest fixtures use the SDK. A real SDK COMMIT execution
+produces and verifies a constant-size recursive root, while application and VM
+claim mutation tests reject forged journal boundaries.
 
 ## Journal transition
 
@@ -83,7 +84,7 @@ The same canonical `ecall` front end will also dispatch guest-callable
 precompiles described in `docs/precompiles.md`. Those features remain planned
 and must reuse the existing AIR DSL.
 
-## Remaining work
+## Implementation checklist
 
 1. `[done]` Decode canonical `ecall` and reject unsupported syscall IDs before
    state mutation.
@@ -96,9 +97,8 @@ and must reuse the existing AIR DSL.
    its transcript.
 6. `[done]` Validate the continuation boundary and recursive leaf/root mapping
    with a real COMMIT proof, including forged recursive claims.
-7. `[pending]` Add the guest SDK COMMIT call and its unit, segmented, and
+7. `[done]` Add the guest SDK COMMIT call and its unit, segmented, and
    application-root tests.
 
-The completed recursive milestone verifies a COMMIT-derived digest from one
-constant-size root without accepting any runner-only journal value. SYS-001
-finishes when the guest SDK and its segmented application test are checked in.
+The complete path verifies an SDK COMMIT-derived digest from one constant-size
+root without accepting any runner-only journal value.

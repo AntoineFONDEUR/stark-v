@@ -364,7 +364,7 @@ set.
     less peak RSS with the checked-in capped-outer plus STWO-inner scheduler
     than with outer Rayon alone.
   - Completion slice: step 8 evidence is recorded below; PRE-001 is complete.
-- `[active] SYS-001` Implement proof-bound syscalls and output journal.
+- `[done] SYS-001` Implement proof-bound syscalls and output journal.
   - Completed slice: canonical `ecall` decoding, canonical program tuples, and
     an internal `a7`/`a0` dispatcher are implemented. Unsupported calls remain
     rejected before state mutation.
@@ -391,8 +391,11 @@ set.
   - Completed slice: a real COMMIT-bearing VM chunk assembled into the universal
     leaf, encoded as the 3,479,096-byte root, matched the 4,945-step verifier
     plan, and passed native application verification.
-  - Next slice: expose the guest SDK and validate its segmented application
-    path.
+  - Completed slice: `guest_lib::commit(u32)` exposes the proved ABI without a
+    new macro. The SDK-backed one- and two-COMMIT fixtures pass the unit,
+    runner, ordered-journal, segmented-boundary, VM-proof, and application-root
+    gates.
+  - Completion slice: step 7 evidence is recorded below; SYS-001 is complete.
 - `[pending] FELT-001` Complete witness-side felt-function VM access.
 - `[pending] FELT-002` Migrate opcode execution and retire duplicate semantics.
 - `[pending] REL-001` Harden and measure the completed system.
@@ -746,7 +749,7 @@ fail both host continuation and recursive leaf/root construction and the result
 is tested, committed, and pushed. Reordering complete tuples remains valid
 because the shared LogUp relation binds a multiset.
 
-### `[active] SYS-001` Syscalls and output journal
+### `[done] SYS-001` Syscalls and output journal
 
 Dependencies: `PRE-001`.
 
@@ -763,11 +766,11 @@ Required work, in order:
 4. `[done]` Bind the register value, Poseidon2 transition, ordered journal
    relation, and public initial/final endpoints.
 5. `[done]` Add the endpoints to VM public data and the Fiat-Shamir transcript.
-6. `[in progress]` Chain endpoints in `continuation` and map them into recursive
-   leaf and root statements under a new protocol identity.
-7. `[pending]` Expose the guest SDK only after VM, continuation, and
-   recursive-root tests reject changed words, broken states, dropped, inserted,
-   and reordered steps.
+6. `[done]` Chain endpoints in `continuation` and map them into recursive leaf
+   and root statements under a new protocol identity.
+7. `[done]` Expose the guest SDK only after VM, continuation, and recursive-root
+   tests reject changed words, broken states, dropped, inserted, and reordered
+   steps.
 
 Done when an application verifies one proof-bound journal digest at the root and
 no runner-only value can affect it.
@@ -1364,8 +1367,28 @@ the recorded command without committing a machine-specific path.
   before native verification. Its focused conformance test now pins the
   4,945-step plan and recursion AIR digest
   `[1270421312, 1168180329, 1487888523, 1859018076, 1573466635, 85579857, 111495589, 650827603]`.
-- SYS-001 step 6 is complete. The guest SDK and its segmented application test
-  remain step 7.
+- At commit `978886e1`, SYS-001 step 6 was complete and the guest SDK plus its
+  segmented application test remained step 7.
+- `cargo test --release -p guest-lib syscalls::tests::commit_selector_matches_the_proved_abi -- --exact --nocapture --test-threads=1`:
+  the SDK selector test passed. The wrapper places selector 1 in `a7`, the word
+  in `a0`, and executes `ecall` through one ordinary function call.
+- `cargo test --release -p runner --test syscalls -- --nocapture --test-threads=1`:
+  all 7 SDK-backed syscall tests passed in 0.11 seconds, including distinct-word
+  ordering and adjacent journal state across four-cycle segments.
+- `/usr/bin/time -l cargo test --release -p prover --test integration commit_standard_relations_prove_and_verify -- --exact --nocapture --test-threads=1`:
+  the SDK-backed one-chunk VM proof passed in 6.74 seconds with 1.97 GB maximum
+  RSS and zero swaps.
+- `/usr/bin/time -l cargo test --release -p recursion --features parallel tree::tests::one_commit_recursion_leaf_is_the_complete_root --lib -- --ignored --exact --nocapture --test-threads=1`:
+  the SDK-backed COMMIT execution encoded to the fixed 3,479,096-byte root,
+  matched the 4,945-step verifier plan, and passed native application
+  verification in 553.98 seconds. The command took 645.18 seconds including
+  release recompilation, with 19.95 GB maximum RSS and zero swaps.
+- Workspace release clippy passed for `guest-lib`, `runner`, and `recursion`.
+  Standalone `guest-bin` release clippy passed for its production library and
+  RISC-V binaries; `--all-targets` is invalid for this no-std target because it
+  requests an unavailable Rust test harness. Changed-file repository hooks
+  passed.
+- SYS-001 step 7 is complete. SYS-001 is complete.
 
 ## Project finish line
 

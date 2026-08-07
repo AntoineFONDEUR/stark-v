@@ -47,7 +47,7 @@ fn unsupported_ecall_reaches_the_internal_dispatcher() {
 }
 
 #[test]
-fn commit_ecall_records_the_authenticated_register_reads() {
+fn guest_sdk_commit_records_the_authenticated_register_reads() {
     let result = run_commit_once();
 
     assert_eq!(

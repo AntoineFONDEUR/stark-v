@@ -406,7 +406,8 @@ set.
   - Completion slice: the focused generated-row, malformed-boundary, embedded
     tracer-table, toy proof, and runner state-interface tests pass in release
     mode; detailed evidence is recorded below.
-- `[pending] FELT-002` Migrate opcode execution and retire duplicate semantics.
+- `[in progress] FELT-002` Migrate opcode execution and retire duplicate
+  semantics.
 - `[pending] REL-001` Harden and measure the completed system.
 
 ## Macro-only recursion migration
@@ -804,21 +805,23 @@ Required work:
 Done when generated felt functions can execute and fill real VM access rows and
 focused tests reject stale clocks, incorrect prior values, and illegal writes.
 
-### `[pending] FELT-002` Opcode and runner migration
+### `[in progress] FELT-002` Opcode and runner migration
 
 Dependencies: `FELT-001`.
 
 Required work, in order:
 
-1. Migrate `lui` end to end and delete its handwritten runner semantics.
+1. `[done]` Migrate `lui` end to end and delete its handwritten runner
+   semantics.
 2. Migrate `auipc`, `jal`, and `jalr`.
 3. Migrate `base_alu_imm`, `base_alu_reg`, `lt_imm`, `lt_reg`, `branch_eq`, and
    `branch_lt`.
 4. Migrate `shifts_imm`, `shifts_reg`, `mul`, and `mulh`.
 5. Migrate `load_store`.
 6. Migrate `div` last.
-7. Preserve one real guest prove/verify test plus focused malformed-witness
-   coverage for every family before deleting its old schema and handler.
+7. `[in progress]` Preserve one real guest prove/verify test plus focused
+   malformed-witness coverage for every family before deleting its old schema
+   and handler. LUI has both gates.
 8. Delete the obsolete opcode `define_air!` trace block, `components!` support,
    and `runner/src/ops` only after the last family moves.
 9. Re-derive the VM AIR program and recursion manifest from the final roster and
@@ -1428,8 +1431,41 @@ the recorded command without committing a machine-specific path.
   the affected crates and targets passed with warnings denied.
 - FELT-001 does not change the production component roster or recursion
   protocol, so no VM or recursion-root conformance run is required at this
-  boundary. FELT-002 starts with the production `lui` migration, where the
-  roster and protocol identity first change.
+  boundary. FELT-002 starts with the production `lui` migration, where component
+  geometry and protocol identity first change.
+
+### `FELT-002 LUI checkpoint` — 2026-08-07
+
+- `crates/air/src/opcodes/lui.rs` is the single source for LUI state mutation,
+  witness rows, constraints, and relation entries through `define_air_fns!`. The
+  runner only converts decoded fields to felt arguments and applies the
+  generated next-PC output. The old `define_air!` table and handwritten write
+  and PC semantics are gone.
+- `/usr/bin/time -lp cargo test --release -p runner lui_generated_execution_ -- --nocapture --test-threads=1`:
+  all 4 generated execution boundary tests passed; the test body took 0.00
+  seconds after a 41.94-second release build, with 1.35 GB maximum RSS and zero
+  swaps.
+- `/usr/bin/time -lp cargo test --release -p prover --lib components::tests::test_lui_e2e -- --exact --nocapture --test-threads=1`:
+  the LUI-only trace and AIR constraint gate passed in 0.18 seconds.
+- `/usr/bin/time -lp cargo test --release -p prover --test integration lui_standard_relations_prove_and_verify -- --exact --nocapture --test-threads=1`:
+  the proof-capable single-chunk LUI guest proved and verified in 6.76 seconds,
+  with 2.03 GB maximum RSS and zero swaps.
+- `/usr/bin/time -lp cargo test --release -p prover --test integration lui_destination_limb_mutation_is_rejected -- --exact --nocapture --test-threads=1`:
+  changing one generated destination limb failed with `ConstraintsNotSatisfied`;
+  the rejection test took 6.73 seconds, with 2.10 GB maximum RSS and zero swaps.
+- `cargo test --release -p recursion --test air_dsl_guard -- --nocapture --test-threads=1`:
+  all 5 roster, owner, direct-DSL, and component-route guards passed.
+- `/usr/bin/time -lp cargo test --release -p recursion --lib profile::tests:: -- --nocapture --test-threads=1`:
+  all 7 generated-geometry, digest, registry, and fixed-root-wire checks passed
+  in 0.31 seconds. The LUI checkpoint has VM geometry 1,387 tables, 1,495
+  sampled values, and 521 AIR instructions under a new protocol identifier.
+- `cargo clippy --release -p air -p runner -p prover -p recursion --all-targets --no-deps -- -D warnings`
+  and standalone guest `cargo clippy --release --bin lui_output -- -D warnings`:
+  both release lint gates passed.
+- Root proof E2Es remain deferred until the final opcode roster. LUI changes VM
+  geometry but not tree reduction, padding, or the constant-size root wire, so
+  repeating one-, two-, and three-segment roots here would add cost without a
+  new recursion boundary.
 
 ## Project finish line
 

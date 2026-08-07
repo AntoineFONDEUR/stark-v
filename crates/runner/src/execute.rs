@@ -59,7 +59,7 @@ pub fn execute(
         Opcode::Jalr => jump::jalr(cpu, inst, tracer),
 
         // Upper immediates
-        Opcode::Lui => upper::lui(cpu, inst, tracer),
+        Opcode::Lui => upper::lui(cpu, mem, inst, tracer),
         Opcode::Auipc => upper::auipc(cpu, inst, tracer),
 
         // M-extension

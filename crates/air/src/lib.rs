@@ -6,6 +6,9 @@
 
 #![feature(allocator_api)]
 
+// Generated dynamic components use the same owner path in this crate and its consumers.
+extern crate self as air;
+
 #[macro_use]
 mod schema;
 pub use schema::relations;
@@ -13,6 +16,7 @@ pub use schema::relations;
 pub mod clock;
 pub mod digest;
 pub mod instructions;
+pub mod opcodes;
 pub mod poseidon2;
 pub mod preprocessed;
 pub mod relation_eval;

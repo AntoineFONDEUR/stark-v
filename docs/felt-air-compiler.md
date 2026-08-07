@@ -4,9 +4,9 @@
 > implements static control flow, functions, hints, degree-budget
 > materialization, relation statements, embedded components, and proof-bound VM
 > register/aligned-memory access. Poseidon2 and every recursion-local AIR use it
-> in production, while the other inner VM AIRs use `define_air!`. Opcode
-> execution still has separate runner handlers; migrating those handlers into
-> felt functions is the remaining unification work. Macro source and tests are
+> in production. LUI is the first production opcode whose execution, witness,
+> and AIR all come from a felt function; the other inner VM opcode AIRs still
+> use `define_air!` with separate runner handlers. Macro source and tests are
 > authoritative for implemented syntax.
 
 ## The observation
@@ -118,14 +118,15 @@ line.
 
 ## Relation to the current DSL
 
-`define_air!` provides the table-schema path used by the inner VM roster. It
-generates the column layout, witness evaluation, constraints, lookups, and
-component integration from one declaration.
+`define_air!` provides the table-schema path used by most of the inner VM
+roster. It generates the column layout, witness evaluation, constraints,
+lookups, and component integration from one declaration.
 
 `define_air_fns!` provides the felt-function path: degree-budget
 materialization, static `for`/`map`/`sum`, inline functions and function I/O,
 hints, external relation statements, embedded flag columns, and embedded
-component integration. Poseidon2 and every recursion-local AIR use this path.
+component integration. Poseidon2, LUI, and every recursion-local AIR use this
+path.
 
 The remaining compiler work is opcode execution and runner migration. It is not
 a recursion-local macro migration. Every component reachable from the recursion
@@ -136,7 +137,7 @@ the structural guard rejects a handwritten `FrameworkEval`, standalone
 ## Migrating the opcode AIRs and runner
 
 Target state: one function per opcode family, whose body **is** simultaneously
-the executable semantics (the runner calls `call_lui` and gets the right
+the executable semantics (the runner calls the generated fill and gets the right
 result), the witness fill (the call pushes the table row), and the AIR (the same
 body compiled to constraints). `define_air!`'s
 `committed/derived/constraints/lookups` schema, the `components!` composition
@@ -152,45 +153,18 @@ Opcode compiler capabilities, in dependency order:
    `AirFnRelations` field, and balanced across the proof. See the
    `extern_relation` tests in `crates/stwo-macros/tests/air_fns.rs` (a `source`
    function emits `pass(x)`, a `sink` consumes it, and the relation cancels).
-   What remains is wiring the _specific_ zkVM relations (`program_access`,
-   `memory_access`, `registers_state`, range checks) — i.e. an opcode body
-   reads:
-
-   The schema entry
-
-   ```text
-   lui: {
-       committed: { clock, pc, rd, imm_0, imm_1, imm_2 },
-       derived: {
-           imm: imm_0 + pow2(4) * imm_1 + pow2(12) * imm_2,
-           pc_next: pc + 4, clock_next: clock + 1,
-           rd_val_1: imm_0 * pow2(4),
-           rd_clock_diff: clock - rd_clock_prev,
-       },
-       lookups: {
-           -enabler * program_access(pc, LUI, rd_addr, imm, 0),
-           -enabler * registers_state(pc, clock),
-           enabler * registers_state(pc_next, clock_next),
-           -enabler * range_check_8_8_4(imm_1, imm_2, imm_0),
-           -enabler * memory_access(0, rd_addr, rd_clock_prev, rd_prev_0, ...),
-           enabler * memory_access(0, rd_addr, clock, 0, rd_val_1, imm_1, imm_2),
-           -enabler * range_check_20(rd_clock_diff),
-       },
-   }
-   ```
-
-   becomes a function whose body requests the architectural access directly:
+   LUI now wires the zkVM relations directly from its production felt function:
 
    ```text
    fn lui(clock, pc, rd_addr, imm_0, imm_1, imm_2) {
-       consume range_check_8_8_4(imm_1, imm_2, imm_0);
-       let imm = imm_0 + 2**4 * imm_1 + 2**12 * imm_2;
+       let imm = imm_0 + 16 * imm_1 + 4096 * imm_2;
        consume program_access(
            pc, constant(crate::instructions::Opcode::Lui as u32), rd_addr, imm, 0
        );
-       write_reg rd(clock, rd_addr, [0, imm_0 * 2**4, imm_1, imm_2]);
        consume registers_state(pc, clock);
        emit registers_state(pc + 4, clock + 1);
+       consume range_check_8_8_4(imm_1, imm_2, imm_0);
+       write_reg rd(clock, rd_addr, [0, 16 * imm_0, imm_1, imm_2]);
        return pc + 4;
    }
    ```
@@ -240,19 +214,18 @@ The **integration seam is also in place**. `define_air!` now takes an
 `external:` section listing fn-DSL tables to fold into the `Tracer`:
 
 ```text
-external: { poseidon2: crate::poseidon2 }   // air/src/schema.rs
+external: {
+    poseidon2: crate::poseidon2,
+    lui: crate::opcodes::lui,
+}
 ```
 
 Each entry generates the `Tracer` field, initialization, `total_traces`, debug,
-and column re-export, so the monolithic `Tracer` is composable. Poseidon2 is the
-first entry and the component router assigns it to the `detached` section used
-by the standalone hash proof. Migrating an opcode is additive: define it via
-`define_air_fns!`, add it to `external:`, route its generated component to the
-appropriate constituent proof, and remove its prior table from the schema's
-`trace:` block. Each family remains guarded by real prove-and-verify tests. The
-remaining per-opcode work is to express each handler as a felt function, route
-its generated embedded table into the component roster, and delete the duplicate
-schema and runner handler only after its focused proof tests pass.
+and column re-export, so the monolithic `Tracer` is composable. The component
+router assigns Poseidon2 to the detached hash proof and LUI to the VM proof.
+Migrating another opcode means defining it via `define_air_fns!`, adding it to
+`external:`, routing its generated component, and removing its old schema and
+runner semantics after focused valid and malformed proof tests pass.
 
 ### What this retires (the `components!` question)
 
@@ -264,12 +237,12 @@ needs prover-side stwo types the air crate does not depend on. But
 composition for poseidon2. The retirement path is therefore not "merge
 `components!` into `define_air!`" but:
 
-1. migrate one simple opcode (`lui`) end to end — function in the air crate,
-   generated component in the prover, handler deleted from the runner;
-2. migrate the remaining families one PR each (the LogUp balance is checked by
-   the existing e2e constraint tests at every step);
-3. when the last family is out of `define_air!`'s opcode list, delete
-   `components!` (~1000 lines), the `define_air!` opcode syntax, and
+1. `[done]` Migrate `lui` end to end: the air crate owns its felt function, the
+   prover uses its generated component, and the runner retains only decoding;
+2. `[pending]` Migrate the remaining families in dependency order (the LogUp
+   balance is checked by the existing e2e constraint tests at every step);
+3. `[pending]` When the last family is out of `define_air!`'s opcode list,
+   delete `components!` (~1000 lines), the `define_air!` opcode syntax, and
    `runner/src/ops/`.
 
 Until then `components!` stays; any interim investment in it (or in new

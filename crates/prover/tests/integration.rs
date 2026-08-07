@@ -161,6 +161,45 @@ fn commit_standard_relations_prove_and_verify() {
     assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
 }
 
+/// A felt-defined LUI row closes its program, state, register, and range relations.
+#[test_log::test]
+fn lui_standard_relations_prove_and_verify() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("lui_output");
+    let elf = std::fs::read(&elf_path).expect("read proof-capable LUI ELF");
+    let run_result = run(&elf, 10_000).expect("execute LUI chunk");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
+}
+
+/// LUI's generated write constraint rejects a destination limb inconsistent with the immediate.
+#[test_log::test]
+fn lui_destination_limb_mutation_is_rejected() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::prove_rv32im;
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("lui_output");
+    let elf = std::fs::read(&elf_path).expect("read proof-capable LUI ELF");
+    let mut run_result = run(&elf, 10_000).expect("execute LUI chunk");
+    run_result.tracer.lui.rd_next_1[0] ^= 1;
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        prove_rv32im(run_result, config, &preprocessing)
+    }));
+
+    assert!(result.is_err());
+}
+
 /// A COMMIT chain cannot place a later execution clock before an earlier one.
 #[test_log::test]
 fn commit_reordered_clock_link_is_rejected_before_proving() {

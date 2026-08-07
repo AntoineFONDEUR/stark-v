@@ -32,6 +32,7 @@ stwo_macros::define_air! {
     // The component router assigns each table to a constituent proof.
     external: {
         poseidon2: crate::poseidon2,
+        lui: crate::opcodes::lui,
     }
     trace: {
         base_alu_reg: {
@@ -769,39 +770,7 @@ stwo_macros::define_air! {
         },
 
         // ==========================================================================
-        // 9. LUI
-        // ==========================================================================
-        lui: {
-            committed: {
-                clock, pc, rd,
-                imm_0, imm_1, imm_2,
-            },
-            derived: {
-                // imm = imm_0 + 2^4 * imm_1 + 2^12 * imm_2 (U-type immediate)
-                imm: imm_0 + pow2(4) * imm_1 + pow2(12) * imm_2,
-                pc_next: pc + 4,
-                clock_next: clock + 1,
-                // Limb 1 of the value written to rd: imm << 12 has limbs (0, imm_0 * 2^4, imm_1, imm_2)
-                rd_val_1: imm_0 * pow2(4),
-                rd_clock_diff: clock - rd_clock_prev,
-            },
-            lookups: {
-                // Program access (U-type): Program(pc, LUI, rd_idx, imm, 0)
-                -enabler * program_access(pc, constant(crate::instructions::Opcode::Lui as u32), rd_addr, imm, 0),
-                // Register state transition: clock advances, pc steps by 4.
-                -enabler * registers_state(pc, clock),
-                enabler * registers_state(pc_next, clock_next),
-                // U-type immediate limb ranges.
-                - enabler * range_check_8_8_4(imm_1, imm_2, imm_0),
-                // Write to rd (REG_AS = 0): rd := imm << 12.
-                -enabler * memory_access(0, rd_addr, rd_clock_prev, rd_prev_0, rd_prev_1, rd_prev_2, rd_prev_3),
-                enabler * memory_access(0, rd_addr, clock, 0, rd_val_1, imm_1, imm_2),
-                - enabler * range_check_20(rd_clock_diff),
-            },
-        },
-
-        // ==========================================================================
-        // 10. AUIPC
+        // 9. AUIPC
         // ==========================================================================
         auipc: {
             committed: {

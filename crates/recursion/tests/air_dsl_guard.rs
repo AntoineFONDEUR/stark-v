@@ -233,7 +233,7 @@ const VM_INVENTORY: [ComponentOwner; 27] = [
     },
     ComponentOwner {
         name: "lui",
-        source: "crates/air/src/schema.rs",
+        source: "crates/air/src/opcodes/lui.rs",
     },
     ComponentOwner {
         name: "mul",
@@ -293,7 +293,11 @@ const VM_INVENTORY: [ComponentOwner; 27] = [
     },
 ];
 
-const OWNER_POLICIES: [OwnerPolicy; 32] = [
+const OWNER_POLICIES: [OwnerPolicy; 33] = [
+    OwnerPolicy {
+        source: "crates/air/src/opcodes/lui.rs",
+        accepted_macro_count: 1,
+    },
     OwnerPolicy {
         source: "crates/air/src/poseidon2.rs",
         accepted_macro_count: 1,
@@ -471,11 +475,14 @@ fn every_reachable_air_owner_uses_only_the_direct_dsl() {
 }
 
 #[test]
-fn vm_component_router_detaches_only_dsl_poseidon() {
+fn vm_component_router_uses_only_the_expected_dsl_routes() {
     let (custom_routes, detached) = parse_vm_component_router();
     assert_eq!(
         (custom_routes, detached),
-        (vec![], vec!["poseidon2".to_owned()])
+        (
+            vec![("lui".to_owned(), "air::opcodes::lui::component".to_owned(),)],
+            vec!["poseidon2".to_owned()],
+        )
     );
 }
 

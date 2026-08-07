@@ -17,7 +17,7 @@ stwo_macros::components! {
         load_store,
         lt_imm,
         lt_reg,
-        lui,
+        lui: air::opcodes::lui::component,
         mul,
         mulh,
         shifts_imm,

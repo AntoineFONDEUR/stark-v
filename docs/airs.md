@@ -8,14 +8,16 @@
 
 The active definition is split across these source files:
 
-- `crates/air/src/schema.rs` declares VM relations, preprocessed lookups,
-  trace-table columns, derived expressions, constraints, and lookups through
+- `crates/air/src/schema.rs` declares VM relations, preprocessed lookups, the
+  remaining trace tables, and external felt-generated tables through
   `define_air!`.
+- `crates/air/src/opcodes/lui.rs` declares LUI execution, witness generation,
+  constraints, and relations through `define_air_fns!`.
 - `crates/air/src/poseidon2.rs` declares Poseidon2 through `define_air_fns!`.
 - `crates/prover/src/components/mod.rs` fixes the VM constituent roster and
-  identifies DSL-owned tables, currently Poseidon2, committed by a detached
-  constituent proof.
-- `crates/runner/src/ops/` executes instructions and fills the trace tables.
+  routes generated LUI into the VM proof and Poseidon2 into its detached proof.
+- `crates/runner/src/ops/` holds decode adapters for migrated functions and
+  executes the remaining opcode handlers.
 - `crates/prover/src/public_data.rs` defines verifier-owned boundary terms.
 
 When prose and generated source disagree, the generated source is authoritative.
@@ -93,7 +95,8 @@ either roster.
 
 ## Verification expectations
 
-Each opcode family has a real guest proof test in
-`crates/prover/src/components/mod.rs`. Constraint changes also require focused
-tests that mutate the relevant witness or public value and demonstrate
-rejection. Green witness-generation tests alone do not establish soundness.
+Each opcode family has a guest execution and constraint test in
+`crates/prover/src/components/mod.rs`. A migrated family also requires a real
+prove/verify test and focused mutation coverage in `crates/prover/tests` before
+its old schema and handler semantics are removed. Green witness-generation tests
+alone do not establish soundness.

@@ -425,14 +425,14 @@ set.
     magnitude, exceptional cases, and range relations. Batched LogUp arguments
     with nonlinear expressions are materialized by the compiler so generated
     constraints stay within the declared cubic degree.
-  - The complete migration checkpoint has 1,905 VM tables, 2,013 sampled values,
-    and 787 VM AIR instructions. Its protocol identifier is
-    `[1201321936, 1233882972, 279865999, 1954284523, 1154633417, 1357347584, 450458594, 1504555888]`.
+  - The final release profile has 1,821 VM tables, 1,929 sampled values, and 764
+    VM AIR instructions. Its protocol identifier is
+    `[1122088815, 199896233, 548794552, 565669788, 1855511304, 1221397337, 1681829803, 847892263]`.
   - Fast boundary, component, and malformed-relation tests precede one
     sequential single-chunk VM proof per migrated family. One segment-leaf root
-    passed on the complete migrated roster. `FELT-003` owns the final protocol
-    freeze because its lowering work changes VM geometry.
-- `[active] FELT-003` Recover shared-output encoding efficiency in the felt
+    plus the binary and padded-root constructions pass under the final protocol
+    identity.
+- `[done] FELT-003` Recover shared-output encoding efficiency in the felt
   compiler.
   - Preserve the compiler's existing opcode activity invariant: the synthesized
     enabler is the boolean sum of individually boolean opcode flags, so an
@@ -443,7 +443,7 @@ set.
   - Record per-family geometry deltas, keep only measured wins, then re-freeze
     the protocol and run the one-, two-, and padded-root conformance proofs
     once.
-- `[pending] REL-001` Harden and measure the completed system.
+- `[active] REL-001` Harden and measure the completed system.
 
 ## Macro-only recursion migration
 
@@ -869,7 +869,7 @@ Required work, in order:
 Done when opcode execution, witness filling, and AIR constraints have one
 felt-function source and no duplicated per-opcode semantics remain.
 
-### `[active] FELT-003` Shared-output lowering efficiency
+### `[done] FELT-003` Shared-output lowering efficiency
 
 Dependencies: `FELT-002`.
 
@@ -915,7 +915,7 @@ Required work, in order:
    one-segment leaf, two-segment binary, and three-segment padded root proofs
    sequentially under that final identity. Do not rerun larger equivalent tree
    shapes.
-9. `[pending]` Update current-state compiler, AIR, recursion, and roadmap
+9. `[done]` Update current-state compiler, AIR, recursion, and roadmap
    documentation; run release clippy and repository hooks; commit and push.
 
 Done when eligible operations share their committed output without weakening the
@@ -925,7 +925,7 @@ identity.
 
 ## Final hardening
 
-### `[pending] REL-001` Security, performance, and release evidence
+### `[active] REL-001` Security, performance, and release evidence
 
 Dependencies: `FELT-003`.
 
@@ -1970,8 +1970,10 @@ the recorded command without committing a machine-specific path.
   the final-identity three-segment root, padded to four leaves, passed in
   2,079.78 seconds of test time and 2,080.04 seconds wall time with 30.856 GB
   maximum RSS and zero swaps.
-- Remaining gate: close the task with release clippy, repository hooks, and
-  pushed evidence.
+- `cargo clippy --release -p stwo-macros -p air -p runner -p prover -p continuation -p recursion --all-targets --no-deps -- -D warnings`
+  passed, and `prek run --all-files` passed. Current-state documentation was
+  checked against the final root profile; future compiler-cost and guest
+  precompile work remains explicitly labeled as future scope.
 
 ## Project finish line
 

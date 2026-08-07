@@ -69,17 +69,17 @@ binary shape at larger counts.
 
 ## Documentation map
 
-| Document                    | Class                        | Authority                                                                   |
-| --------------------------- | ---------------------------- | --------------------------------------------------------------------------- |
-| `docs/roadmap.md`           | Current execution ledger     | Task order, task status, completion gates, and evidence                     |
-| `README.md`                 | Current state                | Supported user-facing behavior and measured commands                        |
-| `docs/airs.md`              | Current state                | Active AIR architecture; source remains authoritative for exact constraints |
-| `docs/recursion.md`         | Current design               | Recursive statements, verifier architecture, and soundness invariants       |
-| `docs/felt-air-compiler.md` | Partially implemented design | Compiler facilities and opcode/runner target                                |
-| `docs/precompiles.md`       | Active implementation design | Cross-proof hash binding state and remaining PRE-001 work                   |
-| `docs/syscalls.md`          | Planned feature              | Syscall and output-journal target                                           |
-| `CONTRIBUTING.md`           | Current process              | Development and submission workflow                                         |
-| `SECURITY.md`               | Current policy               | Security scope and private reporting                                        |
+| Document                    | Class                         | Authority                                                                   |
+| --------------------------- | ----------------------------- | --------------------------------------------------------------------------- |
+| `docs/roadmap.md`           | Current execution ledger      | Task order, task status, completion gates, and evidence                     |
+| `README.md`                 | Current state                 | Supported user-facing behavior and measured commands                        |
+| `docs/airs.md`              | Current state                 | Active AIR architecture; source remains authoritative for exact constraints |
+| `docs/recursion.md`         | Current design                | Recursive statements, verifier architecture, and soundness invariants       |
+| `docs/felt-air-compiler.md` | Partially implemented design  | Compiler facilities and opcode/runner target                                |
+| `docs/precompiles.md`       | Current implementation design | Cross-proof hash binding and measured scheduling policy                     |
+| `docs/syscalls.md`          | Planned feature               | Syscall and output-journal target                                           |
+| `CONTRIBUTING.md`           | Current process               | Development and submission workflow                                         |
+| `SECURITY.md`               | Current policy                | Security scope and private reporting                                        |
 
 A planned document is not stale merely because its feature is absent. It is
 wrong if it presents the target as implemented, references an API that no longer
@@ -295,13 +295,13 @@ set.
   - The earlier integrated-Poseidon profile produced real segment-leaf, binary,
     padded-binary, 4-segment, and 8-segment roots through the same fixed wire
     and verifier plan. The active split-proof profile has revalidated real
-    segment-leaf and binary roots; PRE-001 step 7 tracks its padded rerun.
+    segment-leaf, binary, and padded roots through the same fixed interface.
   - Evidence: real 1-, 2-, and 3-segment roots encoded and verified under the
     prior profile, fixed wire and verifier-shape vectors passed, and outer-only
     proof parallelism was measured and rejected as slower than the retained
     shared-pool strategy. The active PRE-001 evidence records the split-profile
     root.
-- `[active] PRE-001` Prepare the hash-precompile proof split for production.
+- `[done] PRE-001` Prepare the hash-precompile proof split for production.
   - Completed slice: prototype square emit, square consume, and Poseidon host
     binding components derive their tables, constraints, evaluators, and
     interaction traces directly from `define_air_fns!`.
@@ -356,8 +356,15 @@ set.
   - Completed slice: the real active-profile padded three-segment root encoded
     to the same frozen wire size, matched the same verifier plan, and passed in
     2,095.59 seconds with 35.56 GB peak RSS and zero swaps.
-  - Next slice: benchmark the split and record its supported scheduling policy.
-- `[pending] SYS-001` Implement proof-bound syscalls and output journal.
+  - Completed slice: compared with the integrated profile, the split is 16.90%
+    faster for a segment-leaf root, 0.95% slower for a binary root, and 0.21%
+    slower for a padded root. It is a modularity boundary with a leaf benefit,
+    not a blanket speedup.
+  - Completed slice: the active binary root is 20.10% faster and uses 0.55 GB
+    less peak RSS with the checked-in capped-outer plus STWO-inner scheduler
+    than with outer Rayon alone.
+  - Completion slice: step 8 evidence is recorded below; PRE-001 is complete.
+- `[active] SYS-001` Implement proof-bound syscalls and output journal.
 - `[pending] FELT-001` Complete witness-side felt-function VM access.
 - `[pending] FELT-002` Migrate opcode execution and retire duplicate semantics.
 - `[pending] REL-001` Harden and measure the completed system.
@@ -680,7 +687,7 @@ completed `PRO-001` profile silently: any changed roster, public claim, or proof
 artifact receives a new manifest identity and repeats affected recursion
 conformance tests.
 
-### `[active] PRE-001` Hash precompile
+### `[done] PRE-001` Hash precompile
 
 Dependencies: `REC-010`.
 
@@ -703,15 +710,15 @@ Required work, in order:
 7. `[done]` Bind the changed artifact to a new protocol manifest and rerun root
    conformance tests. Real segment-leaf, binary, and padded roots pass through
    the same fixed wire and verifier plan.
-8. `[in progress]` Measure the split against the integrated Poseidon2 component
-   and record the supported profile rather than assuming a performance win.
+8. `[done]` Measure the split against the integrated Poseidon2 component and
+   record the supported profile rather than assuming a performance win.
 
 Done when forged outputs, missing or extra tuples, and input/output re-pairing
 fail both host continuation and recursive leaf/root construction and the result
 is tested, committed, and pushed. Reordering complete tuples remains valid
 because the shared LogUp relation binds a multiset.
 
-### `[pending] SYS-001` Syscalls and output journal
+### `[active] SYS-001` Syscalls and output journal
 
 Dependencies: `PRE-001`.
 
@@ -1242,6 +1249,19 @@ the recorded command without committing a machine-specific path.
 - PRE-001 step 7 is complete. The one-, two-, and padded three-segment roots
   cover every distinct tree construction without repeating the same binary shape
   at larger exact powers.
+- The integrated profile took 666.93, 940.10, and 2,091.22 seconds for the same
+  segment-leaf, binary, and padded constructions. The active split profile took
+  554.23, 949.04, and 2,095.59 seconds respectively: -16.90%, +0.95%, and
+  +0.21%.
+- A detached current-source feature composition enabled outer Rayon while
+  disabling `stwo/parallel` and `stwo-constraint-framework/parallel`;
+  `cargo tree -e features` confirmed neither inner feature was active.
+- `/usr/bin/time -l env CARGO_TARGET_DIR=<shared-target> cargo test --release -p recursion --features parallel --lib tree::tests::capacity_segmented_guest_produces_a_two_leaf_root -- --ignored --exact --nocapture --test-threads=1`:
+  the outer-only binary root passed in 1,139.75 seconds with 35.17 GB maximum
+  RSS and zero swaps. Against the checked-in 949.04-second, 34.62-GB shared
+  configuration, outer-only was 20.10% slower and used 0.55 GB more peak RSS.
+- The supported scheduler remains the checked-in two-proof outer wave plus STWO
+  inner parallelism in one Rayon pool. PRE-001 is complete.
 
 ## Project finish line
 

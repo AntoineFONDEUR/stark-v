@@ -81,6 +81,12 @@ The implemented foundation includes:
   tables;
 - component, malformed-witness, relation-closure, and leaf-binding tests.
 
+The supported parallel profile proves at most two independent tree jobs in an
+outer Rayon wave and retains STWO proof-kernel parallelism in the same pool. An
+outer-only active-profile binary root was 20.10% slower and used 0.55 GB more
+peak RSS, so independent-job parallelism does not replace inner parallelism once
+the tree reaches its single root proof.
+
 Segment, empty, and binary witnesses produce recursion proofs that bind the
 expected protocol, statement, component claims, interaction claims, and STWO
 proof. A real recursion proof can be encoded and verified as either binary

@@ -1,25 +1,24 @@
 # Hash precompiles: proving Poseidon2 outside the RV32IM prover
 
-> **Status: production split implemented; hardening and measurement remain.**
-> The VM component router detaches the DSL-owned Poseidon2 table. One
-> `SegmentProof` carries the VM proof, standalone Poseidon2 proof, and joint
-> interaction nonce. Host verification, continuation, and the recursive segment
-> leaf replay both constituent transcripts and require exact cancellation of
-> their shared `poseidon2_io` relation sum. The active profile has produced and
-> verified one real split-proof recursive root. Production tests reject missing
-> and extra tuples at the host binder, re-paired outputs in the generated
-> Poseidon2 AIR, and mutations across every recursive Poseidon2 proof region.
-> The changed profile passes real segment-leaf, binary, and padded-root
-> conformance. PRE-001 still requires comparative performance measurements.
+> **Status: production split implemented, hardened, and measured.** The VM
+> component router detaches the DSL-owned Poseidon2 table. One `SegmentProof`
+> carries the VM proof, standalone Poseidon2 proof, and joint interaction nonce.
+> Host verification, continuation, and the recursive segment leaf replay both
+> constituent transcripts and require exact cancellation of their shared
+> `poseidon2_io` relation sum. The active profile passes real segment-leaf,
+> binary, and padded-root conformance. Production tests reject missing and extra
+> tuples at the host binder, re-paired outputs in the generated Poseidon2 AIR,
+> and mutations across every recursive Poseidon2 proof region.
 
 The implemented split takes the Poseidon2 table out of the RV32IM STWO instance
 and proves it in its own instance, binding the two proofs through their shared
 LogUp relation. The VM constituent emits `(input, output)` permutation tuples;
 the hash constituent consumes them and attests they are real permutations. The
 current prover stages the two ordered commitments around one joint transcript
-handshake. Scheduling independent work concurrently remains a measured
-optimization, not a soundness requirement. Further hash functions can follow the
-same relation-bound segment-artifact pattern.
+handshake. The measured scheduler uses capped outer Rayon waves for independent
+tree proofs and retains STWO parallelism for the single proof left at the root.
+Scheduling remains an optimization, not a soundness requirement. Further hash
+functions can follow the same relation-bound segment-artifact pattern.
 
 ## Why LogUp binding, not preprocessing
 
@@ -91,25 +90,36 @@ before deriving the segment statement.
    extra tuple proofs at exact shared-sum cancellation. The generated Poseidon2
    AIR rejects outputs re-paired with different inputs, and the recursive leaf
    rejects independent mutations across the detached proof wire.
+7. **scheduling**: one Rayon pool proves at most two independent tree jobs at a
+   time and also serves STWO proof kernels. The cap keeps peak RSS within the
+   measured 35.56 GB envelope and descendants are discarded after every level.
 
 ## What it buys
 
 - Separating Poseidon2 removes its 16-lane, 8-external-round, 14-internal-round
-  permutation trace from the VM proof. Whether the second proof's fixed cost is
-  a net performance win remains unmeasured.
+  permutation trace from the VM proof. The measured split improves the
+  segment-leaf root but is effectively neutral for binary and padded roots; it
+  is not a blanket performance win.
 - A dedicated hash instance can be sized independently. Safe outer scheduling
-  can overlap independent work only where measurements justify the extra memory.
+  overlaps at most two independent proofs under the measured memory limit.
 - Each additional hash precompile is the same shape: a relation, a
   `define_air_fns!` table, a prover instance, one sum check in the binder. A
   guest-visible precompile call (ecall) reduces to emitting the relation from a
   small adapter component.
 
-## Remaining work
+## Measured profile
 
-- **Cost crossover**: for tiny segments the fixed cost of a second proof
-  (commitments, FRI) may exceed the column savings. Measure representative
-  segment sizes before selecting an outer scheduling policy or claiming a
-  performance win.
+| Root construction | Integrated Poseidon2 | Split Poseidon2 | Split delta |
+| ----------------- | -------------------- | --------------- | ----------- |
+| Segment leaf      | 666.93 s             | 554.23 s        | -16.90%     |
+| Binary            | 940.10 s             | 949.04 s        | +0.95%      |
+| Padded binary     | 2,091.22 s           | 2,095.59 s      | +0.21%      |
+
+The checked-in shared scheduler completes the active binary root in 949.04
+seconds with 34.62 GB peak RSS. The same source with only outer Rayon takes
+1,139.75 seconds with 35.17 GB peak RSS: 20.10% slower and 0.55 GB larger. The
+supported profile therefore retains the capped outer waves and STWO inner
+parallelism in one Rayon pool.
 
 Reordering complete tuples is valid because LogUp authenticates a multiset;
 changing how inputs and outputs are paired is not.

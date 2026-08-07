@@ -137,6 +137,7 @@ mod tests {
                 ("merkle", 18),
                 ("poseidon2", 16),
                 ("poseidon2_io", 32),
+                ("journal", 10),
                 ("bitwise", 4),
                 ("range_check_20", 1),
                 ("range_check_8_11", 2),

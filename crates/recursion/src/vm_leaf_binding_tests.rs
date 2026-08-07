@@ -9,7 +9,7 @@
 
 use air::digest::M31Word;
 use air::trace::Poseidon2Table;
-use num_traits::Zero;
+use num_traits::{One, Zero};
 use prover::poseidon2_channel::Poseidon2M31Channel;
 use stwo::core::channel::Channel;
 use stwo::core::fields::FieldExpOps;
@@ -87,7 +87,6 @@ use super::wire::ProofKind;
 
 const SEMANTIC_CIRCUIT_ID: u32 = 23;
 const PUBLIC_LOGUP_CIRCUIT_ID: u32 = 24;
-const VM_RELATION_CHALLENGE_COUNT: u32 = 12;
 
 fn semantic_circuits() -> (
     VmPublicClaimSemanticsCircuit,
@@ -128,6 +127,9 @@ fn semantic_circuits() -> (
 
 fn leaf_binding_relation_sum(mut channel: Poseidon2M31Channel) -> SecureField {
     let shape = shape();
+    let vm_relation_challenge_count =
+        u32::try_from(prover::relations::Relations::DESCRIPTORS.len())
+            .expect("the VM relation registry fits the transcript counter");
     let public_data = public_data();
     let (reference, witness, _claim_words, statement_words) = semantic_circuits();
     let public_logup_reference = build_vm_public_logup_reference(shape, 1)
@@ -135,11 +137,11 @@ fn leaf_binding_relation_sum(mut channel: Poseidon2M31Channel) -> SecureField {
     let vm_plan = plan_for_schema_with_counts(
         VerifierSchema::Vm,
         1,
-        VM_RELATION_CHALLENGE_COUNT,
+        vm_relation_challenge_count,
         public_logup_reference.public_term_count(),
     );
     let poseidon2_plan =
-        plan_for_schema_with_counts(VerifierSchema::Poseidon2, 1, VM_RELATION_CHALLENGE_COUNT, 0);
+        plan_for_schema_with_counts(VerifierSchema::Poseidon2, 1, vm_relation_challenge_count, 0);
     let recursion_plan = plan_for_schema_with_counts(VerifierSchema::Recursion, 1, 1, 0);
     let (provisional_execution, _, _, _) = recording_joint_executions_for_with_claimed_sums(
         &vm_plan,
@@ -177,6 +179,7 @@ fn leaf_binding_relation_sum(mut channel: Poseidon2M31Channel) -> SecureField {
             shared_relation_sum,
         );
     let challenge_words = public_logup_challenge_words(&transcript_execution);
+    let journal_public_sum = journal_public_sum(&transcript_execution, &public_data);
     let public_logup_witness = build_vm_public_logup_circuit(
         shape,
         1,
@@ -192,6 +195,27 @@ fn leaf_binding_relation_sum(mut channel: Poseidon2M31Channel) -> SecureField {
 
     let recursion_relations = RecursionRelations::draw(&mut channel);
     let vm_relations = prover::relations::Relations::draw(&mut channel);
+    let native_journal_public_sum = {
+        let mut initial = [M31::zero(); 10];
+        for (target, value) in initial[2..]
+            .iter_mut()
+            .zip(public_data.initial_public_io_state)
+        {
+            *target = M31::from(value);
+        }
+        let mut final_values = [M31::zero(); 10];
+        final_values[0] = M31::from(public_data.journal_count);
+        final_values[1] = M31::from(public_data.journal_last_clock);
+        for (target, value) in final_values[2..]
+            .iter_mut()
+            .zip(public_data.final_public_io_state)
+        {
+            *target = M31::from(value);
+        }
+        let initial_denominator: SecureField = vm_relations.journal.combine(&initial);
+        let final_denominator: SecureField = vm_relations.journal.combine(&final_values);
+        initial_denominator.inverse() - final_denominator.inverse()
+    };
     let claim_relations = VmPublicClaimInputRelations::draw(&mut channel);
     let claim_hash_relations = VmPublicClaimHashRelations::draw(&mut channel);
     let io_hash_relations = VmPublicIoHashRelations::draw(&mut channel);
@@ -424,7 +448,38 @@ fn leaf_binding_relation_sum(mut channel: Poseidon2M31Channel) -> SecureField {
     )
     .expect("reference public LogUp circuit has a zero output");
 
-    claim_input_sum
+    let statement_source = statement_source_terms(&statement_words, &statement_relations);
+    let claim_digest_source =
+        claim_digest_source_terms(&public_data, shape, &verifier_input_relations);
+    let claimed_sum_source =
+        claimed_sum_source_terms(interaction_claimed_sum, &verifier_input_relations);
+    let shared_relation_sum_source =
+        shared_relation_sum_source_terms(shared_relation_sum, &verifier_input_relations);
+    let joint_binding_source = joint_binding_source_terms(
+        segment_binding,
+        &verifier_input_relations,
+        &randomness_relations,
+    );
+    let transcript_draw_source = transcript_draw_source_terms(
+        &transcript_execution,
+        SEGMENT_VERIFIER_ID,
+        &transcript_state_relations,
+    ) + transcript_draw_source_terms(
+        &poseidon2_execution,
+        super::control_air::POSEIDON2_VERIFIER_ID,
+        &transcript_state_relations,
+    );
+    let air_challenge_sink = air_challenge_sink_terms(
+        &transcript_execution,
+        SEGMENT_VERIFIER_ID,
+        &relation_challenge_relations,
+    ) + air_challenge_sink_terms(
+        &poseidon2_execution,
+        super::control_air::POSEIDON2_VERIFIER_ID,
+        &relation_challenge_relations,
+    );
+    let public_control_source = public_control_source_terms(&vm_plan, &control_relations);
+    let total = claim_input_sum
         + relation_challenge_sum
         + public_control_sum
         + claim_hash_sum
@@ -438,18 +493,44 @@ fn leaf_binding_relation_sum(mut channel: Poseidon2M31Channel) -> SecureField {
         + semantic_public_sum
         + public_logup_public_sum
         + range_sum
-        + statement_source_terms(&statement_words, &statement_relations)
-        + claim_digest_source_terms(&public_data, shape, &verifier_input_relations)
-        + claimed_sum_source_terms(interaction_claimed_sum, &verifier_input_relations)
-        + shared_relation_sum_source_terms(shared_relation_sum, &verifier_input_relations)
-        + joint_binding_source_terms(
-            segment_binding,
-            &verifier_input_relations,
-            &randomness_relations,
-        )
-        + transcript_draw_source_terms(&transcript_execution, &transcript_state_relations)
-        + air_challenge_sink_terms(&transcript_execution, &relation_challenge_relations)
-        + public_control_source_terms(&vm_plan, &control_relations)
+        + statement_source
+        + claim_digest_source
+        + claimed_sum_source
+        + shared_relation_sum_source
+        + joint_binding_source
+        + transcript_draw_source
+        + air_challenge_sink
+        + public_control_source;
+    let breakdown = [
+        ("claim_input", claim_input_sum),
+        ("relation_challenge", relation_challenge_sum),
+        ("public_control", public_control_sum),
+        ("claim_hash", claim_hash_sum),
+        ("io_hash", io_hash_sum),
+        ("poseidon", poseidon_sum),
+        ("semantic_input", semantic_input_sum),
+        ("public_logup_input", public_logup_input_sum),
+        ("mul", mul_sum),
+        ("linear", linear_sum),
+        ("inverse", inverse_sum),
+        ("semantic_public", semantic_public_sum),
+        ("public_logup_public", public_logup_public_sum),
+        ("range", range_sum),
+        ("statement_source", statement_source),
+        ("claim_digest_source", claim_digest_source),
+        ("claimed_sum_source", claimed_sum_source),
+        ("shared_relation_sum_source", shared_relation_sum_source),
+        ("joint_binding_source", joint_binding_source),
+        ("transcript_draw_source", transcript_draw_source),
+        ("air_challenge_sink", air_challenge_sink),
+        ("public_control_source", public_control_source),
+    ];
+    assert_eq!(
+        total,
+        SecureField::zero(),
+        "journal_public_sum={journal_public_sum:?} native_journal_public_sum={native_journal_public_sum:?} breakdown={breakdown:#?}"
+    );
+    total
 }
 
 fn public_logup_challenge_words(
@@ -473,6 +554,41 @@ fn relation_challenge_draw(
         .find(|operation| operation.step() == VerifierStep::DrawRelationChallenge { challenge })
         .and_then(|operation| operation.draw())
         .expect("fixture transcript contains every requested VM relation challenge")
+}
+
+fn journal_public_sum(
+    execution: &VerifierTranscriptExecution<RecordingTranscriptBackend>,
+    public_data: &prover::public_data::PublicData,
+) -> SecureField {
+    let words = relation_challenge_draw(execution, 6);
+    let z = SecureField::from_m31_array(core::array::from_fn(|index| {
+        M31::from(words[index].as_u32())
+    }));
+    let alpha = SecureField::from_m31_array(core::array::from_fn(|index| {
+        M31::from(words[index + 4].as_u32())
+    }));
+    let initial = [0, 0]
+        .into_iter()
+        .chain(public_data.initial_public_io_state)
+        .map(M31::from)
+        .collect::<Vec<_>>();
+    let final_values = [public_data.journal_count, public_data.journal_last_clock]
+        .into_iter()
+        .chain(public_data.final_public_io_state)
+        .map(M31::from)
+        .collect::<Vec<_>>();
+    let combine = |values: &[M31]| {
+        values
+            .iter()
+            .copied()
+            .fold(
+                (SecureField::zero(), SecureField::one()),
+                |(sum, power), value| (sum + power * value, power * alpha),
+            )
+            .0
+            - z
+    };
+    combine(&initial).inverse() - combine(&final_values).inverse()
 }
 
 fn claimed_sum_source_terms(
@@ -573,7 +689,7 @@ fn joint_binding_source_terms(
                     M31::from(u32::try_from(limb).expect("nonce limb fits u32")),
                     M31::from(value),
                 ]);
-                sum + denominator.inverse() + denominator.inverse()
+                sum + denominator.inverse()
             })
         });
     [
@@ -609,6 +725,7 @@ fn joint_binding_source_terms(
 
 fn transcript_draw_source_terms(
     execution: &VerifierTranscriptExecution<RecordingTranscriptBackend>,
+    verifier_id: u32,
     relations: &TranscriptStateRelations,
 ) -> SecureField {
     execution
@@ -620,7 +737,7 @@ fn transcript_draw_source_terms(
             };
             let encoded = operation.step().encode();
             let mut tuple = vec![
-                M31::from(SEGMENT_VERIFIER_ID),
+                M31::from(verifier_id),
                 M31::from(operation.sequence()),
                 M31::from(encoded.tag()),
                 M31::from(encoded.args()[0]),
@@ -642,6 +759,7 @@ fn transcript_draw_source_terms(
 
 fn air_challenge_sink_terms(
     execution: &VerifierTranscriptExecution<RecordingTranscriptBackend>,
+    verifier_id: u32,
     relations: &RelationChallengeRelations,
 ) -> SecureField {
     execution
@@ -664,7 +782,7 @@ fn air_challenge_sink_terms(
                 .enumerate()
                 .map(move |(word_index, word)| {
                     let denominator: SecureField = relations.word.combine(&[
-                        M31::from(SEGMENT_VERIFIER_ID),
+                        M31::from(verifier_id),
                         M31::from(AIR_EVALUATION_CHALLENGE_SCOPE),
                         M31::from(challenge),
                         M31::from(

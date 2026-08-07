@@ -416,18 +416,20 @@ set.
 - `[in progress] FELT-002` Migrate opcode execution and retire duplicate
   semantics.
   - LUI, AUIPC, JAL, JALR, both base ALUs, both comparisons, and the branch,
-    shift, and multiplication families now derive execution, witness rows, AIR,
-    interactions, and VM component routes from direct `define_air_fns!`
-    definitions; their runner modules retain decode adapters only.
+    shift, multiplication, and load/store families now derive execution, witness
+    rows, AIR, interactions, and VM component routes from direct
+    `define_air_fns!` definitions; their runner modules retain decode adapters
+    only.
   - The existing felt DSL now provides proof-bound canonical M31 splitting and
     byte-level AND/OR/XOR intrinsics plus wrapping `u32` add/subtract with a
-    constrained carry/borrow chain. Batched LogUp arguments with nonlinear
-    expressions are materialized by the same compiler so generated constraints
-    stay within the declared cubic degree. JALR constrains both its M31 source
-    address and the low-bit clearing lookup.
-  - The active checkpoint has 1,681 VM tables, 1,789 sampled values, and 683 VM
+    constrained carry/borrow chain. Dynamic word access selects register or
+    aligned-memory state while preserving x0. Batched LogUp arguments with
+    nonlinear expressions are materialized by the same compiler so generated
+    constraints stay within the declared cubic degree. JALR constrains both its
+    M31 source address and the low-bit clearing lookup.
+  - The active checkpoint has 1,726 VM tables, 1,834 sampled values, and 695 VM
     AIR instructions. Its protocol identifier is
-    `[915081946, 1206305469, 307660850, 106314972, 1803682289, 1766607321, 444822829, 1292162663]`.
+    `[466445823, 1367009901, 1596720998, 1043908003, 1382761831, 1599587195, 1994327166, 195567491]`.
   - Fast boundary, component, and malformed-relation tests precede one
     sequential single-chunk VM proof per migrated family; root E2Es remain
     deferred until the final VM roster.
@@ -841,12 +843,12 @@ Required work, in order:
 4. `[done]` Migrate `lt_imm`, `lt_reg`, `branch_eq`, and `branch_lt`.
 5. `[done]` Migrate `shifts_imm` and `shifts_reg`.
 6. `[done]` Migrate `mul` and `mulh`.
-7. `[in progress]` Migrate `load_store`.
-8. Migrate `div` last.
+7. `[done]` Migrate `load_store`.
+8. `[in progress]` Migrate `div` last.
 9. `[in progress]` Preserve one real guest prove/verify test plus focused
    malformed-witness coverage for every family before deleting its old schema
    and handler. LUI, AUIPC, JAL, JALR, both base ALUs, both comparisons, and the
-   branch, shift, and multiplication families have both gates.
+   branch, shift, multiplication, and load/store families have both gates.
 10. Delete the obsolete opcode `define_air!` trace block, `components!` support,
     and `runner/src/ops` only after the last family moves.
 11. Re-derive the VM AIR program and recursion manifest from the final roster
@@ -1748,6 +1750,53 @@ the recorded command without committing a machine-specific path.
 - Recursive-root proofs remain deferred until the final opcode roster because
   this slice changes VM geometry and protocol identity but not a root
   construction boundary.
+
+### `FELT-002 load/store checkpoint` — 2026-08-07
+
+- `crates/air/src/opcodes/load_store.rs` is the sole source for LB, LH, LBU,
+  LHU, LW, SB, SH, and SW state transitions, witness rows, constraints,
+  relations, and component evaluation through a direct `define_air_fns!`
+  invocation. The runner retains decode-to-argument adapters only; the manual
+  schema block and handwritten load/store witnesses are gone.
+- The existing felt DSL now accepts `read_word` and `write_word` statements
+  whose constrained boolean address-space argument selects register or aligned
+  memory access. Generated register writes preserve x0, while address-zero
+  memory writes remain valid. This is an extension of `define_air_fns!`, not a
+  standalone or opcode-specific macro.
+- Byte and half-word lane selection, sign extension, alignment, and preservation
+  of untouched store bytes are relation-bound. A canonical base-address range
+  check also prevents M31 modulus wraparound from mapping an out-of-range base
+  into an accepted low effective address. Unaligned traced stores publish their
+  aligned word address consistently with the memory relation.
+- `cargo test --release -p stwo-macros --test air_fns`: all 68 compiler, access,
+  relation, malformed-row, and toy prove/verify tests passed. Ten focused
+  dynamic-access cases cover both address spaces, x0, address-zero memory,
+  invalid selectors, and forged rows.
+- `cargo test --release -p runner generated_`: all 69 generated-execution
+  boundary cases passed, including every load lane, every byte and half-word
+  store lane, full words, preserved bytes, and register aliases. The aligned
+  byte-write trace regression also passed independently.
+- Eleven exact load/store component and adversarial cases passed concurrently;
+  changing a load result or an untouched store limb violated generated
+  constraints. `cargo test --release -p air --lib` passed all 46 AIR tests.
+- The exact single-chunk aggregate AIR check passed in 2.61 seconds.
+  `/usr/bin/time -l cargo nextest run --release -p prover --test integration -j 1 -E 'test(=load_store_single_chunk_proves_and_verifies)'`
+  proved and verified the proof-capable load/store guest in 6.803 seconds with
+  2.03 GB maximum RSS and zero swaps.
+- All seven generated-geometry, digest, registry, and fixed-root-wire profile
+  tests passed. The active checkpoint has 1,726 VM tables, 1,834 sampled values,
+  695 AIR instructions, protocol identifier
+  `[466445823, 1367009901, 1596720998, 1043908003, 1382761831, 1599587195, 1994327166, 195567491]`,
+  and VM AIR digest
+  `[440386542, 1501448090, 1399437031, 1738029001, 951731387, 970859645, 942115080, 1256533305]`.
+- `cargo test --release -p recursion --test air_dsl_guard -- --nocapture --test-threads=1`
+  passed all five exact-roster, owner, direct-DSL, and generated-route guards.
+  Host and guest release clippy passed with warnings denied; the
+  dependency-inclusive host command separately reports two existing warnings in
+  `external/stwo`. Repository and commit hooks passed.
+- Implementation commit `273cc005` was pushed to
+  `origin/chore/scratchpad-cleanups`. Recursive-root proofs remain deferred
+  until division freezes the final opcode roster.
 
 ## Project finish line
 

@@ -1,3 +1,5 @@
+//! Program-commitment rows derived from canonical instruction decoding.
+
 use crate::commitment::{CommitmentError, MemoryLayout};
 use crate::instructions::{DecodedInst, Opcode};
 use crate::memory::Memory;
@@ -77,6 +79,7 @@ pub fn decode_program_word(addr: u32, word: u32) -> Result<[u32; 4], CommitmentE
             inst.rs2 as u32,
             imm_to_felt(inst.imm),
         ],
+        Opcode::Ecall => [opcode_id, 0, 0, 0],
     };
 
     Ok(values)
@@ -201,5 +204,13 @@ mod tests {
 
         let beq_vals = decode_program_word(base + 32, beq).unwrap();
         assert_eq!(beq_vals, [Opcode::Beq as u32, 1, 2, imm_to_felt(8),]);
+    }
+
+    #[test]
+    fn ecall_has_one_canonical_program_tuple() {
+        assert_eq!(
+            decode_program_word(0, 0x0000_0073),
+            Ok([Opcode::Ecall as u32, 0, 0, 0]),
+        );
     }
 }

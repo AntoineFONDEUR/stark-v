@@ -1,4 +1,6 @@
 #![feature(allocator_api)]
+//! Segmented RV32IM execution and proof-witness construction.
+
 mod commitment;
 mod cpu;
 mod elf;
@@ -6,6 +8,7 @@ mod execute;
 mod io;
 mod memory;
 mod program;
+mod syscalls;
 #[macro_use]
 mod trace;
 mod ops;
@@ -43,6 +46,9 @@ pub enum RunError {
 
     #[error("Invalid instruction at PC=0x{pc:08x}")]
     InvalidInstruction { pc: u32 },
+
+    #[error("Unsupported syscall {id} at PC=0x{pc:08x}")]
+    UnsupportedSyscall { pc: u32, id: u32 },
 
     #[error("Exceeded maximum cycles ({max})")]
     MaxCyclesExceeded { cycles: u64, max: u64 },
@@ -320,7 +326,7 @@ fn run_segments_impl<F: Fn(&Tracer) -> bool>(
         // Update tracer clock before executing instruction
         tracer.clock += 1;
 
-        execute(&mut cpu, &mut mem, &inst, &mut tracer);
+        execute(&mut cpu, &mut mem, &inst, &mut tracer)?;
 
         // Halt on infinite loop (PC unchanged after execution) - backup detection
         if cpu.pc == prev_pc {

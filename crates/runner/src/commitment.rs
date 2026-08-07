@@ -660,7 +660,7 @@ mod tests {
             }
 
             tracer.clock += 1;
-            execute(&mut cpu, &mut mem, &inst, &mut tracer);
+            execute(&mut cpu, &mut mem, &inst, &mut tracer)?;
 
             if cpu.pc == prev_pc {
                 let output_len = mem.read_u32(loaded.output_len_addr);

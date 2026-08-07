@@ -1,3 +1,5 @@
+//! RV32IM instruction identities and canonical word decoding.
+
 use rustc_hash::FxHashMap;
 
 /// Instruction cache: maps PC address to decoded instruction.
@@ -66,6 +68,9 @@ pub enum Opcode {
     Divu,
     Rem,
     Remu,
+
+    // System instructions
+    Ecall,
 }
 
 /// Decoded instruction with all fields extracted.
@@ -224,6 +229,9 @@ impl DecodedInst {
                 (Opcode::Auipc, imm_u)
             }
 
+            // Only the canonical ECALL word is part of the supported system ISA.
+            0b1110011 if inst == 0x0000_0073 => (Opcode::Ecall, 0),
+
             _ => return None,
         };
 
@@ -234,5 +242,19 @@ impl DecodedInst {
             rs2,
             imm,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rstest::rstest;
+
+    use super::*;
+
+    #[rstest]
+    #[case::ecall(0x0000_0073, Some(Opcode::Ecall))]
+    #[case::ebreak(0x0010_0073, None)]
+    fn system_word_decoding_is_exact(#[case] word: u32, #[case] expected: Option<Opcode>) {
+        assert_eq!(DecodedInst::decode(word).map(|inst| inst.opcode), expected);
     }
 }

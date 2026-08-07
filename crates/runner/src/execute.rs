@@ -1,8 +1,15 @@
+//! Instruction execution routed to opcode and syscall handlers.
+
 use crate::ops::{alu, alu_imm, branch, jump, load, muldiv, store, upper};
-use crate::{Cpu, DecodedInst, Memory, Opcode, Tracer};
+use crate::{Cpu, DecodedInst, Memory, Opcode, RunError, Tracer, syscalls};
 
 /// Execute a decoded instruction. Each opcode handles PC advancement internally.
-pub fn execute(cpu: &mut Cpu, mem: &mut Memory, inst: &DecodedInst, tracer: &mut Tracer) {
+pub fn execute(
+    cpu: &mut Cpu,
+    mem: &mut Memory,
+    inst: &DecodedInst,
+    tracer: &mut Tracer,
+) -> Result<(), RunError> {
     match inst.opcode {
         // R-type ALU
         Opcode::Add => alu::add(cpu, inst, tracer),
@@ -64,5 +71,12 @@ pub fn execute(cpu: &mut Cpu, mem: &mut Memory, inst: &DecodedInst, tracer: &mut
         Opcode::Divu => muldiv::divu(cpu, inst, tracer),
         Opcode::Rem => muldiv::rem(cpu, inst, tracer),
         Opcode::Remu => muldiv::remu(cpu, inst, tracer),
+
+        // Dispatch before advancing so rejected calls cannot mutate execution state.
+        Opcode::Ecall => {
+            syscalls::dispatch(cpu)?;
+            cpu.advance_pc();
+        }
     }
+    Ok(())
 }

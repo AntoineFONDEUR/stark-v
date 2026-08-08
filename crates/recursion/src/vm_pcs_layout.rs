@@ -372,7 +372,7 @@ mod tests {
     use crate::pcs_deep_circuit::{PcsDeepProfile, build_pcs_deep_reference};
     use crate::protocol::{OptionalM31Word, PcsParameters};
 
-    const VM_COLUMN_COUNT: usize = 1_757;
+    const VM_COLUMN_COUNT: usize = 1_821;
     const TREE_COUNT: usize = 4;
     const FRI_LAYER_COUNT: usize = 5;
     const QUERY_COUNT: usize = 2;

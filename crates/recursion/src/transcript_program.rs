@@ -1713,8 +1713,11 @@ pub(crate) mod tests {
     }
 
     #[rstest]
+    // Binary lanes absorb the interaction-PoW nonce into their child
+    // transcripts without publishing typed verifier-input words, so the binary
+    // input count excludes both lanes' four nonce limbs.
     #[case::segment(ProofKind::SegmentLeaf, 1_037, 980)]
-    #[case::binary(ProofKind::BinaryNode, 1_008, 952)]
+    #[case::binary(ProofKind::BinaryNode, 1_008, 944)]
     #[case::empty(ProofKind::EmptyLeaf, 0, 0)]
     fn proof_kind_activates_only_its_semantic_payload_sources(
         #[case] kind: ProofKind,

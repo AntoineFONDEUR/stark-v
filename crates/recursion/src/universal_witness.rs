@@ -37,7 +37,7 @@ use crate::fri_merkle_air::{
 };
 use crate::fri_verifier_circuit::{
     FriVerifierCircuit, FriVerifierProfile, FriVerifierWitness, build_fri_verifier_circuit,
-    build_fri_verifier_reference, restore_authenticated_query_values,
+    build_fri_verifier_reference, verify_derived_query_values,
 };
 use crate::fri_verifier_control_air::{
     FriVerifierControlLane, FriVerifierControlPreprocessed, FriVerifierQueryLane,
@@ -421,9 +421,8 @@ pub(crate) fn prepare_segment_leaf(
         .copied()
         .map(|word| BaseField::from(word.as_u32()))
         .collect::<Vec<_>>();
-    let mut fri_opening =
-        FriMerkleOpeningSet::from_wire(&raw_queries, &leaf.proof().fri_layers[..]);
-    let mut poseidon2_fri_opening = FriMerkleOpeningSet::from_wire(
+    let fri_opening = FriMerkleOpeningSet::from_wire(&raw_queries, &leaf.proof().fri_layers[..]);
+    let poseidon2_fri_opening = FriMerkleOpeningSet::from_wire(
         &poseidon2_raw_queries,
         &leaf.poseidon2_proof().fri_layers[..],
     );
@@ -441,7 +440,7 @@ pub(crate) fn prepare_segment_leaf(
         deep_randomness,
         &raw_queries,
     )?;
-    let mut authenticated_values = fri_opening
+    let authenticated_values = fri_opening
         .layers
         .iter()
         .map(|layer| {
@@ -453,24 +452,14 @@ pub(crate) fn prepare_segment_leaf(
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    restore_authenticated_query_values(
+    verify_derived_query_values(
         &preprocessing.fri_profiles[0],
         &deep_answers,
-        &mut authenticated_values,
+        &authenticated_values,
         &fri_alphas,
         &raw_queries,
     )
-    .map_err(|error| stage("VM FRI query reconstruction", error))?;
-    for (layer, values) in fri_opening.layers.iter_mut().zip(&authenticated_values) {
-        for (slot, value) in layer
-            .queries
-            .iter_mut()
-            .flat_map(|query| query.values.iter_mut())
-            .zip(values)
-        {
-            *slot = (*value).into();
-        }
-    }
+    .map_err(|error| stage("VM FRI query canonicity", error))?;
     let pcs_circuit = build_pcs_deep_circuit(
         &preprocessing.pcs_profiles[0],
         PcsDeepWitness {
@@ -568,7 +557,7 @@ pub(crate) fn prepare_segment_leaf(
         poseidon2_deep_randomness,
         &poseidon2_raw_queries,
     )?;
-    let mut poseidon2_authenticated_values = poseidon2_fri_opening
+    let poseidon2_authenticated_values = poseidon2_fri_opening
         .layers
         .iter()
         .map(|layer| {
@@ -580,28 +569,14 @@ pub(crate) fn prepare_segment_leaf(
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    restore_authenticated_query_values(
+    verify_derived_query_values(
         &preprocessing.fri_profiles[1],
         &poseidon2_deep_answers,
-        &mut poseidon2_authenticated_values,
+        &poseidon2_authenticated_values,
         &poseidon2_fri_alphas,
         &poseidon2_raw_queries,
     )
-    .map_err(|error| stage("Poseidon2 FRI query reconstruction", error))?;
-    for (layer, values) in poseidon2_fri_opening
-        .layers
-        .iter_mut()
-        .zip(&poseidon2_authenticated_values)
-    {
-        for (slot, value) in layer
-            .queries
-            .iter_mut()
-            .flat_map(|query| query.values.iter_mut())
-            .zip(values)
-        {
-            *slot = (*value).into();
-        }
-    }
+    .map_err(|error| stage("Poseidon2 FRI query canonicity", error))?;
     let poseidon2_pcs_circuit = build_pcs_deep_circuit(
         &preprocessing.pcs_profiles[1],
         PcsDeepWitness {
@@ -895,8 +870,7 @@ fn prepare_recursion_child(
         .copied()
         .map(|word| BaseField::from(word.as_u32()))
         .collect::<Vec<_>>();
-    let mut fri_opening =
-        FriMerkleOpeningSet::from_wire(&raw_queries, &child.stark().fri_layers[..]);
+    let fri_opening = FriMerkleOpeningSet::from_wire(&raw_queries, &child.stark().fri_layers[..]);
     let fri_routes = fri_routes(
         &preprocessing.query_position,
         verifier_id,
@@ -911,7 +885,7 @@ fn prepare_recursion_child(
         deep_randomness,
         &raw_queries,
     )?;
-    let mut authenticated_values = fri_opening
+    let authenticated_values = fri_opening
         .layers
         .iter()
         .map(|layer| {
@@ -923,24 +897,14 @@ fn prepare_recursion_child(
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    restore_authenticated_query_values(
+    verify_derived_query_values(
         &preprocessing.fri_profiles[2],
         &deep_answers,
-        &mut authenticated_values,
+        &authenticated_values,
         &fri_alphas,
         &raw_queries,
     )
     .map_err(|error| stage(stage_name, error))?;
-    for (layer, values) in fri_opening.layers.iter_mut().zip(&authenticated_values) {
-        for (slot, value) in layer
-            .queries
-            .iter_mut()
-            .flat_map(|query| query.values.iter_mut())
-            .zip(values)
-        {
-            *slot = (*value).into();
-        }
-    }
     let pcs_circuit = build_pcs_deep_circuit(
         &preprocessing.pcs_profiles[2],
         PcsDeepWitness {

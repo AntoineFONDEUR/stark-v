@@ -776,7 +776,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::segment(ProofKind::SegmentLeaf, SPAN_STATEMENT_CANONICAL_WORDS)]
+    #[case::segment(ProofKind::SegmentLeaf, 2 * SPAN_STATEMENT_CANONICAL_WORDS)]
     #[case::binary(ProofKind::BinaryNode, 2 * SPAN_STATEMENT_CANONICAL_WORDS)]
     #[case::empty(ProofKind::EmptyLeaf, 0)]
     fn proof_kind_activates_only_its_child_statement_words(
@@ -806,7 +806,10 @@ mod tests {
             &input_relations,
             &statement_relations,
         );
-        let input = input_statement_terms(&statement, SEGMENT_VERIFIER_ID, &input_relations);
+        // Both constituent verifier lanes consume the statement input words;
+        // only the VM lane re-emits scoped copies.
+        let input = input_statement_terms(&statement, SEGMENT_VERIFIER_ID, &input_relations)
+            + input_statement_terms(&statement, POSEIDON2_VERIFIER_ID, &input_relations);
         let segment =
             statement_scope_terms(&statement, SEGMENT_STATEMENT_SCOPE, &statement_relations)
                 .expect("fixture statement has canonical width");

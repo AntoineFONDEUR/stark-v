@@ -1430,6 +1430,43 @@ pub(crate) mod tests {
         LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Derives the joint interaction context the fixture prover committed to,
+    /// mirroring the universal witness assembler's two-lane seed derivation.
+    fn fixture_joint_context(
+        fixture: &RealFixture,
+        claim_digest: air::digest::VmPublicClaimDigest,
+    ) -> crate::transcript_program::JointInteractionContext {
+        let poseidon2_public_claim =
+            crate::transcript_program::VerifierPublicClaim::Poseidon2([M31Word::from(
+                u16::try_from(POSEIDON2_COMPONENT_LOG_SIZE)
+                    .expect("the fixed Poseidon2 log size fits one canonical word"),
+            )]);
+        let seeds = [
+            crate::transcript_program::derive_interaction_seed(
+                crate::transcript::RecordingTranscriptBackend::default(),
+                fixture.profile.vm_plan(),
+                fixture.profile.manifest().protocol_id(),
+                fixture.wire.statement(),
+                crate::transcript_program::VerifierPublicClaim::Vm(claim_digest),
+                fixture.wire.proof(),
+            )
+            .expect("the VM lane derives its interaction seed"),
+            crate::transcript_program::derive_interaction_seed(
+                crate::transcript::RecordingTranscriptBackend::default(),
+                fixture.profile.poseidon2_plan(),
+                fixture.profile.manifest().protocol_id(),
+                fixture.wire.statement(),
+                poseidon2_public_claim,
+                fixture.wire.poseidon2_proof(),
+            )
+            .expect("the Poseidon2 lane derives its interaction seed"),
+        ];
+        crate::transcript_program::JointInteractionContext {
+            seeds,
+            shared_relation_sum: Some(SecureField::from(fixture.wire.shared_relation_sum())),
+        }
+    }
+
     fn build_real_fixture() -> Box<RealFixture> {
         ensure_guest_built();
         let elf = std::fs::read(guest_bin_dir().join("commit_once"))
@@ -1593,13 +1630,18 @@ pub(crate) mod tests {
             fixture.profile.public_claim_shape(),
         )
         .expect("fixed claim digest is canonical");
-        let execution = crate::transcript_program::execute_fixed_transcript(
+        // The split-proof VM plan binds both constituent interaction seeds and
+        // the shared relation sum, so the fixed execution needs the same joint
+        // context the prover committed to.
+        let joint = fixture_joint_context(fixture, claim_digest);
+        let execution = crate::transcript_program::execute_fixed_transcript_with_joint(
             crate::transcript::RecordingTranscriptBackend::default(),
             fixture.profile.vm_plan(),
             fixture.profile.manifest().protocol_id(),
             fixture.wire.statement(),
             crate::transcript_program::VerifierPublicClaim::Vm(claim_digest),
             fixture.wire.proof(),
+            joint,
         )
         .expect("fixed transcript accepts its produced proof");
         let verifier_draws = execution
@@ -1644,6 +1686,12 @@ pub(crate) mod tests {
         channel
             .absorb_vm_public_claim(claim_digest)
             .expect("public claim follows the main root");
+        // The split-proof plan draws the VM interaction seed and binds both
+        // constituent seeds before the interaction PoW.
+        let joint = fixture_joint_context(fixture, claim_digest);
+        let vm_seed = channel.draw_secure_felt();
+        assert_eq!(vm_seed, joint.seeds[0]);
+        channel.mix_felts(&joint.seeds);
         let interaction_pow_valid = channel.verify_pow_nonce(
             prover::relations::INTERACTION_POW_BITS,
             fixture.wire.proof().interaction_pow,
@@ -1660,6 +1708,9 @@ pub(crate) mod tests {
                     .component_values(),
             )
             .expect("claimed sums precede the interaction root");
+        channel
+            .absorb_shared_relation_sum(SecureField::from(fixture.wire.shared_relation_sum()))
+            .expect("the shared relation sum precedes the interaction root");
         commitment_scheme.commit(
             fixture.proof.vm.stark_proof.commitments[2],
             &fixture.proof.vm.interaction_claim.log_sizes,

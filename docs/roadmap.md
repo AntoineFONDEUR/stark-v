@@ -1,5 +1,7 @@
 # Project execution ledger
 
+<!-- cspell:ignore leanvm -->
+
 This file is the canonical entry point for all unfinished project work. It is
 both the dependency-ordered implementation plan and the progress ledger. Design
 documents explain the target in more depth, but they do not own task status or
@@ -443,7 +445,16 @@ set.
   - Record per-family geometry deltas, keep only measured wins, then re-freeze
     the protocol and run the one-, two-, and padded-root conformance proofs
     once.
-- `[active] REL-001` Harden and measure the completed system.
+- `[done] REL-001` Harden and measure the completed system.
+  - The adversarial matrix, the complete 1,523-test release workspace suite
+    under the checked-in heavy-proofs serialization, and all repository hooks
+    pass with only the five audited root-conformance repetitions ignored.
+  - Measured on the frozen profile: the root proof is a constant 3,479,096 bytes
+    across one-, two-, and padded-three-segment executions; root verification
+    takes ~0.18 seconds; one segment leaf proves in ~390–420 seconds and one
+    binary node in ~364 seconds (~387 seconds for a two-node parallel wave);
+    peak proving memory stays at 17.9–33.9 GiB.
+  - Evidence: commits `dde3d8bf` and the REL-001 evidence entry below.
 
 ## Macro-only recursion migration
 
@@ -925,7 +936,7 @@ identity.
 
 ## Final hardening
 
-### `[active] REL-001` Security, performance, and release evidence
+### `[done] REL-001` Security, performance, and release evidence
 
 Dependencies: `FELT-003`.
 
@@ -936,15 +947,19 @@ Required work:
    paths, altered OODS values, incorrect FRI positions, non-zero relation sums,
    invalid padding, boundary discontinuities, precompile substitutions, journal
    forgeries, and root-statement substitution.
-2. `[pending]` Run focused release tests, previous failures, the complete
-   release workspace suite, and all repository hooks without ignored soundness
-   tests.
-3. `[pending]` Measure serialized root proof size, peak memory, leaf throughput,
-   per-level node proving time, and root verification time on each supported
-   profile.
-4. `[pending]` Update current-state documentation from checked-in results and
-   keep any unfinished design explicitly labeled.
-5. `[pending]` Commit and push the release evidence.
+2. `[done]` Run focused release tests, previous failures, the complete release
+   workspace suite, and all repository hooks without ignored soundness tests.
+   The first complete run surfaced eleven dormant split-proof drift failures;
+   all were fixed, the derived-FRI-slot repair became a canonical-wire
+   rejection, and the full 1,523-test workspace passed under the checked-in
+   heavy-proofs serialization.
+3. `[done]` Measure serialized root proof size, peak memory, leaf throughput,
+   per-level node proving time, and root verification time on the frozen
+   protocol profile via the `stark-v-bench recursion` pipeline benchmark.
+4. `[done]` Update current-state documentation from checked-in results and keep
+   any unfinished design explicitly labeled (`docs/leanvm-dsl-assessment.md` and
+   `docs/dsl-full-prover-path.md` are design studies, not implementations).
+5. `[done]` Commit and push the release evidence.
 
 Done when one expected complete-execution statement and one constant-size root
 proof verify the final supported execution, all planned capabilities above are
@@ -1993,6 +2008,44 @@ the recorded command without committing a machine-specific path.
 - `cargo clippy --release -p recursion --tests --no-deps -- -D warnings` and
   `prek run --files crates/recursion/src/relation_challenge_air.rs crates/recursion/src/segment_leaf.rs crates/recursion/src/pcs_deep_circuit.rs crates/recursion/src/fri_verifier_circuit.rs`
   passed.
+
+### `REL-001` — 2026-08-08
+
+- The first complete post-split release run surfaced eleven dormant drift
+  failures plus two stale fixture regressions around the journal relation; all
+  are fixed and pushed: the vm_leaf_binding closure fixture double-sinks the
+  segment challenge words and drops the unmatched Poseidon2 lanes (`546e3555`),
+  the empty-preprocessed-tree tests pin split-proof semantics (`1ddd069f`), the
+  protocol-ID conformance vector pins the split-proof manifest encoding
+  (`baf7db95`), and the remaining eleven — vm_pcs_layout 1,821-column geometry,
+  two-lane statement inputs, the binary nonce count, the profiled joint-seeding
+  replays, and non-canonical derived FRI query slots now rejected instead of
+  repaired — landed as `dde3d8bf`.
+- Host safety after three kernel panics from overlapping proof tests: a
+  checked-in `.config/nextest.toml` heavy-proofs group serializes the
+  proving-heavy recursion test modules (nextest upgraded 0.9.49 → 0.9.143), and
+  every heavy run executes under an external memory guard (36 GiB tree RSS / 16
+  GiB reserve / 1 GiB swap caps).
+- `cargo nextest run --release --workspace --test-threads 4 --no-fail-fast`: all
+  1,523 selected tests passed in 18,127 seconds with 22.18 GiB peak process-tree
+  RSS and zero swap; only the five audited root-conformance repetitions stayed
+  ignored. `prek run --all-files`: passed.
+- `stark-v-bench recursion` (new pipeline benchmark; tracing spans time each
+  tree stage) on the frozen profile, one exclusive guarded run per shape:
+  - one `commit_once` segment: prove 393.35 s (leaf stage 393.35 s), encode
+    0.008 s, verify 0.175 s, peak 17.93 GiB;
+  - two `mulhu_alias` segments (row-capacity split): leaves 420.76 s, root node
+    363.70 s, prove 784.48 s, verify 0.183 s, peak 30.31 GiB;
+  - three `mulhu_alias` segments (37-cycle split, padded to four): leaves 812.43
+    s, padding leaf 362.01 s, four-node level 386.88 s, root node 363.97 s,
+    prove 1,925.31 s, verify 0.178 s, peak 33.88 GiB.
+  - Every shape encoded to the same 3,479,096-byte root and passed
+    `verify_recursive_root`; VM preprocessing 5.61 s and recursion preprocessing
+    152.5 s are one-time per process.
+- Current-state docs updated; `docs/leanvm-dsl-assessment.md` and
+  `docs/dsl-full-prover-path.md` are added as explicitly-labeled design studies.
+- Commits `94a89010`…`dde3d8bf` plus this evidence entry pushed to
+  `origin/chore/scratchpad-cleanups`.
 
 ## Project finish line
 

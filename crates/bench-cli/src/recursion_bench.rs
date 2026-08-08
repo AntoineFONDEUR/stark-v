@@ -81,6 +81,11 @@ where
 {
     fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
         let span = ctx.span(id).expect("new span is registered");
+        // Only the recursion pipeline's own stage spans are timings; the
+        // proof kernel (stwo) emits thousands of inner spans per run.
+        if !span.metadata().target().starts_with("recursion") {
+            return;
+        }
         let mut fields = NumericFields::default();
         attrs.record(&mut fields);
         span.extensions_mut().insert(StageStart {
@@ -292,7 +297,11 @@ mod tests {
         let timings = SpanTimings::default();
         let subscriber = tracing_subscriber::registry().with(SpanTimingLayer::new(timings.clone()));
         tracing::subscriber::with_default(subscriber, || {
-            let _stage = tracing::info_span!("stage_under_test", nodes = 4_usize).entered();
+            // The layer keeps only recursion-crate spans, so the fixture span
+            // declares a matching target.
+            let _stage =
+                tracing::info_span!(target: "recursion::test", "stage_under_test", nodes = 4_usize)
+                    .entered();
         });
         let stages = timings.take();
         assert_eq!(

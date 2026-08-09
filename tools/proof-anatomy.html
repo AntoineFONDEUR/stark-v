@@ -1,0 +1,991 @@
+<!-- cspell:ignore striplabels leafnode childtable renderable FAMS -->
+<title>Root proof anatomy — 3,479,096 bytes</title>
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #fbfbf9;
+    --surface: #ffffff;
+    --ink: #16181d;
+    --ink-2: #5a5e6b;
+    --ink-3: #9094a3;
+    --line: #e4e4de;
+    --accent: #2a78d6;
+    --fam-statement: #008300;
+    --fam-commit: #2a78d6;
+    --fam-claimed: #eb6834;
+    --fam-sampled: #1baf7a;
+    --fam-queried: #eda100;
+    --fam-paths: #e87ba4;
+    --fam-fri: #4a3aa7;
+    --fam-tail: #e34948;
+    --tooltip-bg: #16181d;
+    --tooltip-ink: #f5f5f0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #141517;
+      --surface: #1c1d20;
+      --ink: #eceef2;
+      --ink-2: #a6aab8;
+      --ink-3: #6d7280;
+      --line: #2c2d31;
+      --accent: #3987e5;
+      --fam-statement: #2da44e;
+      --fam-commit: #3987e5;
+      --fam-claimed: #d95926;
+      --fam-sampled: #199e70;
+      --fam-queried: #c98500;
+      --fam-paths: #d55181;
+      --fam-fri: #9085e9;
+      --fam-tail: #e66767;
+      --tooltip-bg: #f5f5f0;
+      --tooltip-ink: #16181d;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #141517;
+    --surface: #1c1d20;
+    --ink: #eceef2;
+    --ink-2: #a6aab8;
+    --ink-3: #6d7280;
+    --line: #2c2d31;
+    --accent: #3987e5;
+    --fam-statement: #2da44e;
+    --fam-commit: #3987e5;
+    --fam-claimed: #d95926;
+    --fam-sampled: #199e70;
+    --fam-queried: #c98500;
+    --fam-paths: #d55181;
+    --fam-fri: #9085e9;
+    --fam-tail: #e66767;
+    --tooltip-bg: #f5f5f0;
+    --tooltip-ink: #16181d;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font:
+      14px/1.5 system-ui,
+      -apple-system,
+      "Segoe UI",
+      sans-serif;
+    margin: 0;
+    padding: 28px clamp(16px, 4vw, 48px) 64px;
+  }
+  .mono {
+    font-family:
+      ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .num {
+    font-variant-numeric: tabular-nums;
+  }
+
+  header {
+    max-width: 1200px;
+    margin: 0 auto 20px;
+  }
+  h1 {
+    font-family:
+      ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    margin: 0 0 2px;
+    text-wrap: balance;
+  }
+  h1 .total {
+    color: var(--accent);
+  }
+  .sub {
+    color: var(--ink-2);
+    margin: 0;
+    font-size: 13px;
+    max-width: 72ch;
+  }
+  .sub code {
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 12px;
+    color: var(--ink);
+  }
+
+  .wrap {
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+
+  /* headline strip: one bar, whole proof, family-colored */
+  .strip {
+    display: flex;
+    height: 34px;
+    border-radius: 5px;
+    overflow: hidden;
+    margin: 18px 0 6px;
+  }
+  .strip div {
+    min-width: 1px;
+  }
+  .strip div + div {
+    border-left: 2px solid var(--bg);
+  }
+  .striplabels {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 18px;
+    font-size: 12px;
+    color: var(--ink-2);
+    margin-bottom: 26px;
+  }
+  .striplabels span {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .striplabels i {
+    width: 10px;
+    height: 10px;
+    border-radius: 3px;
+    display: inline-block;
+  }
+  .striplabels b {
+    color: var(--ink);
+    font-weight: 600;
+  }
+
+  .toolbar {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+  }
+  .crumbs {
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    color: var(--ink-3);
+    overflow-x: auto;
+    white-space: nowrap;
+    padding-bottom: 2px;
+  }
+  .crumbs a {
+    color: var(--accent);
+    cursor: pointer;
+    text-decoration: none;
+  }
+  .crumbs a:hover,
+  .crumbs a:focus-visible {
+    text-decoration: underline;
+    outline: none;
+  }
+  .crumbs .sep {
+    margin: 0 6px;
+    color: var(--ink-3);
+  }
+  .crumbs .here {
+    color: var(--ink);
+    font-weight: 600;
+  }
+  .hint {
+    font-size: 12px;
+    color: var(--ink-3);
+  }
+
+  /* icicle */
+  #icicle {
+    position: relative;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface);
+    overflow: hidden;
+  }
+  .row {
+    position: relative;
+    height: 44px;
+    border-top: 1px solid var(--line);
+  }
+  .row:first-child {
+    border-top: none;
+  }
+  .seg {
+    position: absolute;
+    top: 5px;
+    bottom: 5px;
+    min-width: 2px;
+    border-radius: 4px;
+    overflow: hidden;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    padding: 0 7px;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 11.5px;
+    font-weight: 500;
+    color: #fff;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+    white-space: nowrap;
+    transition: filter 0.08s ease;
+  }
+  .seg:hover,
+  .seg:focus-visible {
+    filter: brightness(1.12);
+    outline: none;
+  }
+  .seg.leafnode {
+    cursor: default;
+  }
+  .seg .pct {
+    opacity: 0.75;
+    margin-left: 6px;
+    font-weight: 400;
+  }
+  .axis {
+    display: flex;
+    justify-content: space-between;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 11px;
+    color: var(--ink-3);
+    padding: 6px 2px 0;
+  }
+
+  /* details */
+  .detail {
+    margin-top: 18px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface);
+    padding: 14px 18px;
+  }
+  .detail h2 {
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 14px;
+    margin: 0 0 8px;
+  }
+  .kv {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 3px 18px;
+    font-size: 13px;
+  }
+  .kv dt {
+    color: var(--ink-2);
+  }
+  .kv dd {
+    margin: 0;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+  .desc {
+    color: var(--ink-2);
+    font-size: 13px;
+    margin-top: 10px;
+    max-width: 78ch;
+  }
+
+  .childtable {
+    margin-top: 14px;
+    overflow-x: auto;
+  }
+  table {
+    border-collapse: collapse;
+    font-size: 12.5px;
+    width: 100%;
+  }
+  th {
+    text-align: left;
+    color: var(--ink-2);
+    font-weight: 500;
+    padding: 4px 14px 4px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  th.r,
+  td.r {
+    text-align: right;
+  }
+  td {
+    padding: 4px 14px 4px 0;
+    border-bottom: 1px solid var(--line);
+    font-variant-numeric: tabular-nums;
+  }
+  td.name {
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+  }
+  td.name a {
+    color: var(--accent);
+    cursor: pointer;
+    text-decoration: none;
+  }
+  td.name a:hover {
+    text-decoration: underline;
+  }
+  td.swatch i {
+    width: 9px;
+    height: 9px;
+    border-radius: 2px;
+    display: inline-block;
+  }
+
+  /* tooltip */
+  #tip {
+    position: fixed;
+    z-index: 10;
+    pointer-events: none;
+    display: none;
+    background: var(--tooltip-bg);
+    color: var(--tooltip-ink);
+    border-radius: 6px;
+    padding: 8px 11px;
+    font-size: 12px;
+    line-height: 1.45;
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    max-width: 380px;
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.25);
+    font-variant-numeric: tabular-nums;
+  }
+  #tip .t {
+    font-weight: 600;
+  }
+  #tip .d {
+    opacity: 0.72;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .seg {
+      transition: none;
+    }
+  }
+</style>
+
+<header>
+  <h1>Root proof anatomy — <span class="total num">3,479,096 bytes</span></h1>
+  <p class="sub">
+    Every byte of the frozen-profile recursive root proof
+    (<code>RootProofBytes</code>,
+    <code>crates/recursion/src/wire.rs</code> encoding order). Fixed shape: 193
+    FRI queries, 4 commitment trees, 2,221 committed columns, 6 FRI layers,
+    depth-23 Merkle paths. Click a segment to zoom; hover for exact offsets.
+  </p>
+</header>
+
+<div class="wrap">
+  <div class="strip" id="strip"></div>
+  <div class="striplabels" id="striplabels"></div>
+
+  <div class="toolbar">
+    <nav class="crumbs" id="crumbs"></nav>
+    <span class="hint">click = zoom · click current root = zoom out</span>
+  </div>
+  <div id="icicle"></div>
+  <div class="axis"><span id="ax0"></span><span id="ax1"></span></div>
+
+  <div class="detail" id="detail"></div>
+</div>
+
+<div id="tip"></div>
+
+<script>
+  "use strict";
+  /* ---------- wire layout (byte-exact, mirrors crates/recursion/src/wire.rs) ---------- */
+  const U32 = 4,
+    U64 = 8,
+    WORD = 4,
+    DIGEST = 32,
+    QM31 = 16;
+  const QUERIES = 193,
+    TREES = 4,
+    COLUMNS = 2221,
+    COMPONENTS = 36,
+    SAMPLED = 2365,
+    FRI_LAYERS = 6,
+    FOLD = 16,
+    DEPTH = 23,
+    LAST_LAYER = 1;
+  const PATH_BYTES = U32 + DEPTH * DIGEST; // 740
+  const FRI_QUERY_BYTES = FOLD * QM31 + PATH_BYTES; // 996
+  const FRI_LAYER_BYTES = U32 + DIGEST + QUERIES * FRI_QUERY_BYTES; // 192,264
+
+  /* node: {name, size, desc, kids} — kids is an eager array or a lazy {size, make} spec */
+  const leaf = (name, size, desc) => ({ name, size, desc });
+  const grp = (name, kids, desc) => {
+    const list = Array.isArray(kids) ? kids : null;
+    const size = list ? list.reduce((s, k) => s + k.size, 0) : kids.size;
+    return { name, size, kids: list ? () => list : kids.make, desc };
+  };
+
+  function machineState(name, desc) {
+    return grp(
+      name,
+      [
+        leaf("pc", U32, "program counter, raw u32"),
+        leaf(
+          "registers x0…x31",
+          32 * U32,
+          "32 RV32 machine words, raw u32 each",
+        ),
+        leaf(
+          "rw-memory root",
+          DIGEST,
+          "read-write memory Merkle root, 8 M31 words",
+        ),
+        leaf("public IO state", DIGEST, "journal state digest, 8 M31 words"),
+      ],
+      desc,
+    );
+  }
+  function edgeClaim(name) {
+    return grp(
+      name,
+      [
+        leaf("tag", U32, "edge-claim kind tag"),
+        leaf("claim digest", DIGEST, "VM public-claim digest, 8 M31 words"),
+      ],
+      "boundary claim binding this span edge to a segment public claim",
+    );
+  }
+  function merklePath(name, desc) {
+    return grp(
+      name,
+      {
+        size: PATH_BYTES,
+        make: () => [
+          leaf(
+            "active depth",
+            U32,
+            "number of live siblings; the remaining slots are zero padding",
+          ),
+          ...Array.from({ length: DEPTH }, (_, i) =>
+            leaf(
+              `sibling ${i}`,
+              DIGEST,
+              `authentication-path sibling ${i} (8 M31 words); padding when i ≥ active depth`,
+            ),
+          ),
+        ],
+      },
+      desc,
+    );
+  }
+  function friQuery(q) {
+    return grp(
+      `query ${q}`,
+      {
+        size: FRI_QUERY_BYTES,
+        make: () => [
+          grp(
+            "coset values",
+            {
+              size: FOLD * QM31,
+              make: () =>
+                Array.from({ length: FOLD }, (_, i) =>
+                  leaf(
+                    `value ${i}`,
+                    QM31,
+                    "QM31 (4 M31 words); slots ≥ active fold width are padding; derived slots must match the fold chain (canonical wire)",
+                  ),
+                ),
+            },
+            "16 reserved QM31 slots per query; the active fold width uses a prefix",
+          ),
+          merklePath(
+            "authentication path",
+            "depth-tagged path into the FRI layer commitment",
+          ),
+        ],
+      },
+      "one queried coset: values + Merkle authentication",
+    );
+  }
+  /* chunk n identical items into ≤limit buckets for renderable zoom levels */
+  function chunked(n, limit, makeItem, itemSize, label) {
+    if (n <= limit) return Array.from({ length: n }, (_, i) => makeItem(i));
+    const buckets = [];
+    const per = Math.ceil(n / limit);
+    for (let s = 0; s < n; s += per) {
+      const e = Math.min(s + per, n);
+      buckets.push(
+        grp(
+          `${label} ${s}–${e - 1}`,
+          {
+            size: (e - s) * itemSize,
+            make: () =>
+              Array.from({ length: e - s }, (_, i) => makeItem(s + i)),
+          },
+          `${e - s} × ${label}`,
+        ),
+      );
+    }
+    return buckets;
+  }
+
+  const ROOT = grp(
+    "root proof",
+    [
+      grp(
+        "header + statement",
+        [
+          leaf("protocol version", U32, "wire protocol version word"),
+          leaf(
+            "proof kind",
+            U32,
+            "SegmentLeaf / EmptyLeaf / BinaryNode tag; a root is a binary node (or a lone leaf)",
+          ),
+          grp(
+            "span statement",
+            [
+              grp(
+                "job context",
+                [
+                  grp(
+                    "complete execution",
+                    [
+                      leaf(
+                        "protocol ID",
+                        DIGEST,
+                        "frozen protocol identifier (Poseidon2 digest of the canonical manifest)",
+                      ),
+                      leaf("program digest", DIGEST, "guest program root"),
+                      machineState(
+                        "initial machine state",
+                        "machine state at cycle 0",
+                      ),
+                      machineState(
+                        "final machine state",
+                        "machine state after the last cycle",
+                      ),
+                      leaf(
+                        "public input digest",
+                        DIGEST,
+                        "public input IO digest",
+                      ),
+                      leaf(
+                        "public output digest",
+                        DIGEST,
+                        "public output IO digest",
+                      ),
+                      leaf("total cycles", U64, "total executed cycle count"),
+                    ],
+                    "the complete-execution statement the application verifies against",
+                  ),
+                  leaf(
+                    "segment count",
+                    U32,
+                    "number of executed segments in the job",
+                  ),
+                ],
+                "job identity shared by every node of the recursion tree",
+              ),
+              grp(
+                "slot span",
+                [
+                  leaf("first slot", U64, "first covered leaf slot"),
+                  leaf(
+                    "height",
+                    U32,
+                    "tree height of this node (root height covers the full capacity)",
+                  ),
+                ],
+                "which leaf slots this proof covers",
+              ),
+              grp(
+                "span body",
+                [
+                  leaf("body tag", U32, "executed vs empty body"),
+                  grp(
+                    "executed span",
+                    [
+                      leaf("first segment", U32, ""),
+                      leaf("segment count", U32, ""),
+                      leaf("first cycle", U64, ""),
+                      leaf("cycle count", U64, ""),
+                      machineState(
+                        "entry state",
+                        "machine state entering the span",
+                      ),
+                      machineState(
+                        "exit state",
+                        "machine state leaving the span",
+                      ),
+                      edgeClaim("entry claim"),
+                      edgeClaim("exit claim"),
+                    ],
+                    "the executed slice: cycle window, boundary states, edge claims",
+                  ),
+                ],
+                "span payload (zero-padded when the body is empty)",
+              ),
+            ],
+            "public statement bound into the transcript",
+          ),
+        ],
+        "fam:statement",
+      ),
+      grp(
+        "commitments",
+        {
+          size: TREES * DIGEST,
+          make: () =>
+            ["preprocessed", "main trace", "interaction", "composition"].map(
+              (t) =>
+                leaf(
+                  `${t} root`,
+                  DIGEST,
+                  `${t} commitment-tree Merkle root, 8 M31 words`,
+                ),
+            ),
+        },
+        "fam:commit",
+      ),
+      grp(
+        "claimed sums",
+        {
+          size: COMPONENTS * QM31,
+          make: () =>
+            Array.from({ length: COMPONENTS }, (_, i) =>
+              leaf(
+                `component ${i}`,
+                QM31,
+                "per-component LogUp claimed sum, QM31",
+              ),
+            ),
+        },
+        "fam:claimed",
+      ),
+      grp(
+        "sampled values",
+        {
+          size: SAMPLED * QM31,
+          make: () =>
+            chunked(
+              SAMPLED,
+              128,
+              (i) => leaf(`sample ${i}`, QM31, "OODS mask sample, QM31"),
+              QM31,
+              "sample",
+            ),
+        },
+        "fam:sampled",
+      ),
+      grp(
+        "queried values",
+        {
+          size: COLUMNS * QUERIES * WORD,
+          make: () =>
+            chunked(
+              COLUMNS,
+              128,
+              (c) =>
+                grp(
+                  `column ${c}`,
+                  {
+                    size: QUERIES * WORD,
+                    make: () =>
+                      Array.from({ length: QUERIES }, (_, q) =>
+                        leaf(
+                          `query ${q}`,
+                          WORD,
+                          "committed column value at the queried position, M31 word",
+                        ),
+                      ),
+                  },
+                  "193 query openings of one committed column",
+                ),
+              QUERIES * WORD,
+              "column",
+            ),
+        },
+        "fam:queried",
+      ),
+      grp(
+        "trace paths",
+        {
+          size: TREES * QUERIES * PATH_BYTES,
+          make: () =>
+            ["preprocessed", "main trace", "interaction", "composition"].map(
+              (t, ti) =>
+                grp(
+                  `${t} tree`,
+                  {
+                    size: QUERIES * PATH_BYTES,
+                    make: () =>
+                      Array.from({ length: QUERIES }, (_, q) =>
+                        merklePath(
+                          `query ${q} path`,
+                          `decommitment path for query ${q} into the ${t} tree`,
+                        ),
+                      ),
+                  },
+                  `193 per-query authentication paths into the ${t} commitment`,
+                ),
+            ),
+        },
+        "fam:paths",
+      ),
+      grp(
+        "FRI layers",
+        {
+          size: FRI_LAYERS * FRI_LAYER_BYTES,
+          make: () =>
+            Array.from({ length: FRI_LAYERS }, (_, l) =>
+              grp(
+                `layer ${l}`,
+                {
+                  size: FRI_LAYER_BYTES,
+                  make: () => [
+                    leaf(
+                      "active fold width",
+                      U32,
+                      "live fold width for this layer (≤ 16 reserved slots)",
+                    ),
+                    leaf("layer commitment", DIGEST, "FRI layer Merkle root"),
+                    ...Array.from({ length: QUERIES }, (_, q) => friQuery(q)),
+                  ],
+                },
+                `FRI folding layer ${l}: commitment + 193 queried cosets`,
+              ),
+            ),
+        },
+        "fam:fri",
+      ),
+      grp(
+        "tail",
+        [
+          leaf(
+            "last-layer coefficient",
+            QM31,
+            "final FRI polynomial coefficient, QM31",
+          ),
+          leaf(
+            "interaction PoW nonce",
+            U64,
+            "proof-of-work nonce absorbed before relation draws",
+          ),
+          leaf("PCS PoW nonce", U64, "proof-of-work nonce for query sampling"),
+        ],
+        "fam:tail",
+      ),
+    ],
+    "the complete fixed-size universal recursion proof",
+  );
+
+  console.assert(
+    ROOT.size === 3479096,
+    "layout must sum to ROOT_PROOF_BYTE_SIZE",
+    ROOT.size,
+  );
+
+  /* ---------- families: color + description are inherited ---------- */
+  const FAMS = {
+    statement: { css: "var(--fam-statement)", label: "header + statement" },
+    commit: { css: "var(--fam-commit)", label: "commitments" },
+    claimed: { css: "var(--fam-claimed)", label: "claimed sums" },
+    sampled: { css: "var(--fam-sampled)", label: "sampled values" },
+    queried: { css: "var(--fam-queried)", label: "queried values" },
+    paths: { css: "var(--fam-paths)", label: "trace paths" },
+    fri: { css: "var(--fam-fri)", label: "FRI layers" },
+    tail: { css: "var(--fam-tail)", label: "last layer + PoW" },
+  };
+
+  /* materialize: assign offsets, family, parent, memoized children */
+  function children(node) {
+    if (node._children) return node._children;
+    if (!node.kids) return (node._children = []);
+    const list = node.kids();
+    let off = node.offset;
+    for (const c of list) {
+      c.offset = off;
+      off += c.size;
+      c.parent = node;
+      c.fam = c.fam || node.fam;
+      c.depth = node.depth + 1;
+    }
+    node._children = list;
+    return list;
+  }
+  ROOT.offset = 0;
+  ROOT.depth = 0;
+  ROOT.fam = null;
+  for (const top of children(ROOT)) {
+    if (typeof top.desc === "string" && top.desc.startsWith("fam:")) {
+      top.fam = top.desc.slice(4);
+      top.desc = "";
+    }
+  }
+  children(ROOT).find((t) => t.name === "header + statement").desc =
+    "protocol version, proof kind, and the full span statement";
+  children(ROOT).find((t) => t.name === "queried values").desc =
+    "2,221 committed columns × 193 query openings, tree-column-query major";
+  children(ROOT).find((t) => t.name === "FRI layers").desc =
+    "six folding layers, each carrying its commitment and 193 queried cosets";
+
+  const fmt = (n) => n.toLocaleString("en-US");
+  const pct = (n, d) =>
+    ((100 * n) / d).toFixed(n / d < 0.001 ? 3 : n / d < 0.01 ? 2 : 1) + "%";
+  const hex = (n) => "0x" + n.toString(16);
+
+  /* ---------- headline strip ---------- */
+  const strip = document.getElementById("strip");
+  const striplabels = document.getElementById("striplabels");
+  for (const t of children(ROOT)) {
+    const d = document.createElement("div");
+    d.style.flex = `${t.size} 0 0`;
+    d.style.background = FAMS[t.fam].css;
+    d.title = `${t.name} — ${fmt(t.size)} B (${pct(t.size, ROOT.size)})`;
+    d.addEventListener("click", () => zoomTo(t));
+    d.style.cursor = "pointer";
+    strip.appendChild(d);
+    const lab = document.createElement("span");
+    lab.innerHTML = `<i style="background:${FAMS[t.fam].css}"></i>${t.name} <b class="num">${pct(t.size, ROOT.size)}</b>`;
+    striplabels.appendChild(lab);
+  }
+
+  /* ---------- icicle ---------- */
+  const icicle = document.getElementById("icicle");
+  const crumbs = document.getElementById("crumbs");
+  const detail = document.getElementById("detail");
+  const tip = document.getElementById("tip");
+  const MAX_ROWS = 6,
+    MIN_PX = 1.25;
+  let current = ROOT;
+
+  function zoomTo(node) {
+    current = node;
+    render();
+    showDetail(node);
+  }
+
+  function render() {
+    icicle.innerHTML = "";
+    const width = icicle.clientWidth || 1100;
+    let level = [current];
+    for (let r = 0; r < MAX_ROWS && level.length; r++) {
+      const row = document.createElement("div");
+      row.className = "row";
+      const next = [];
+      for (const n of level) {
+        const w = (n.size / current.size) * width;
+        // The zoom root and its direct children always render (CSS floors them
+        // at 2px); deeper rows drop segments below the cutoff until zoomed.
+        if (w < MIN_PX && r > 1) continue;
+        const s = document.createElement("div");
+        s.className = "seg";
+        s.style.left = ((n.offset - current.offset) / current.size) * 100 + "%";
+        s.style.width = (n.size / current.size) * 100 + "%";
+        const fam = FAMS[n.fam] || { css: "var(--ink-3)" };
+        s.style.background = fam.css;
+        /* deeper rows step lighter so hierarchy reads without a second hue */
+        const fade = Math.min((n.depth - current.depth) * 0.09, 0.4);
+        if (fade > 0)
+          s.style.filter = `saturate(${1 - fade * 0.6}) brightness(${1 + fade * 0.55})`;
+        if (fade > 0.2) s.style.color = "rgba(0,0,0,.75)";
+        if (w > 60)
+          s.innerHTML = `<span>${n.name}</span><span class="pct num">${pct(n.size, current.size)}</span>`;
+        else if (w > 22) s.textContent = n.name;
+        const isLeaf = !n.kids;
+        if (isLeaf) s.classList.add("leafnode");
+        s.tabIndex = 0;
+        s.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          if (n === current) {
+            if (n.parent) zoomTo(n.parent);
+          } else if (!isLeaf) zoomTo(n);
+          else showDetail(n);
+        });
+        s.addEventListener("keydown", (ev) => {
+          if (ev.key === "Enter") s.click();
+        });
+        s.addEventListener("mousemove", (ev) => showTip(ev, n));
+        s.addEventListener("mouseleave", hideTip);
+        row.appendChild(s);
+        if (n.kids && (n.size / current.size) * width >= MIN_PX)
+          next.push(...children(n));
+      }
+      if (!row.children.length) break;
+      icicle.appendChild(row);
+      level = next;
+    }
+    /* breadcrumbs */
+    const chain = [];
+    for (let n = current; n; n = n.parent) chain.unshift(n);
+    crumbs.innerHTML = chain
+      .map((n, i) =>
+        i === chain.length - 1
+          ? `<span class="here">${n.name}</span>`
+          : `<a data-i="${i}">${n.name}</a>`,
+      )
+      .join('<span class="sep">›</span>');
+    crumbs
+      .querySelectorAll("a")
+      .forEach((a) =>
+        a.addEventListener("click", () => zoomTo(chain[+a.dataset.i])),
+      );
+    document.getElementById("ax0").textContent =
+      `offset ${fmt(current.offset)} (${hex(current.offset)})`;
+    document.getElementById("ax1").textContent =
+      `${fmt(current.offset + current.size)} (${hex(current.offset + current.size)})`;
+  }
+
+  function showTip(ev, n) {
+    tip.style.display = "block";
+    tip.innerHTML =
+      `<div class="t">${n.name}</div>` +
+      `<div>${fmt(n.size)} B · ${pct(n.size, ROOT.size)} of proof` +
+      (n.parent && n.parent !== ROOT
+        ? ` · ${pct(n.size, n.parent.size)} of ${n.parent.name}`
+        : "") +
+      `</div>` +
+      `<div>bytes ${fmt(n.offset)} – ${fmt(n.offset + n.size)} · ${hex(n.offset)}</div>` +
+      (n.desc ? `<div class="d">${n.desc}</div>` : "");
+    const x = Math.min(ev.clientX + 14, innerWidth - tip.offsetWidth - 10);
+    const y = Math.min(ev.clientY + 16, innerHeight - tip.offsetHeight - 10);
+    tip.style.left = x + "px";
+    tip.style.top = y + "px";
+  }
+  function hideTip() {
+    tip.style.display = "none";
+  }
+
+  function showDetail(n) {
+    const kids = n.kids ? children(n) : [];
+    let rows = "";
+    for (const c of kids.slice(0, 64)) {
+      const fam = FAMS[c.fam] || { css: "var(--ink-3)" };
+      rows += `<tr>
+      <td class="swatch"><i style="background:${fam.css}"></i></td>
+      <td class="name">${c.kids ? `<a data-off="${c.offset}">${c.name}</a>` : c.name}</td>
+      <td class="r">${fmt(c.offset)}</td>
+      <td class="r">${fmt(c.size)}</td>
+      <td class="r">${pct(c.size, n.size)}</td>
+    </tr>`;
+    }
+    detail.innerHTML = `<h2>${n.name}</h2>
+     <dl class="kv">
+       <dt>byte range</dt><dd>${fmt(n.offset)} – ${fmt(n.offset + n.size)} (${hex(n.offset)} – ${hex(n.offset + n.size)})</dd>
+       <dt>size</dt><dd>${fmt(n.size)} B · ${pct(n.size, ROOT.size)} of the proof</dd>
+       ${n.parent ? `<dt>parent</dt><dd>${n.parent.name} (${pct(n.size, n.parent.size)})</dd>` : ""}
+       ${kids.length ? `<dt>children</dt><dd>${fmt(kids.length)}${kids.length > 64 ? " (first 64 shown)" : ""}</dd>` : ""}
+     </dl>
+     ${n.desc ? `<p class="desc">${n.desc}</p>` : ""}
+     ${
+       rows
+         ? `<div class="childtable"><table>
+        <thead><tr><th></th><th>section</th><th class="r">offset</th><th class="r">bytes</th><th class="r">of parent</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>`
+         : ""
+     }`;
+    detail.querySelectorAll("a[data-off]").forEach((a) =>
+      a.addEventListener("click", () => {
+        const target = kids.find((c) => String(c.offset) === a.dataset.off);
+        if (target) zoomTo(target);
+      }),
+    );
+  }
+
+  addEventListener("resize", render);
+  render();
+  showDetail(ROOT);
+</script>

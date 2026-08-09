@@ -115,6 +115,10 @@ enum Command {
         /// Output path for metrics JSON (printed to stdout when omitted)
         #[arg(long)]
         metrics_out: Option<PathBuf>,
+
+        /// Output path for the serialized root proof bytes
+        #[arg(long)]
+        proof_out: Option<PathBuf>,
     },
 
     /// Measure sizes (ELF as preprocessing size)
@@ -178,6 +182,7 @@ fn main() {
             max_rows,
             max_cycles,
             metrics_out,
+            proof_out,
         } => {
             let timings = recursion_bench::SpanTimings::default();
             tracing_subscriber::registry()
@@ -198,6 +203,7 @@ fn main() {
                 },
                 max_cycles,
                 metrics_out.as_ref(),
+                proof_out.as_ref(),
                 &timings,
             );
             return;

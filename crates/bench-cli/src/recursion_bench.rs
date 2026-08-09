@@ -140,6 +140,7 @@ pub fn run_recursion_bench(
     segmentation: &Segmentation,
     max_cycles: u64,
     metrics_out: Option<&PathBuf>,
+    proof_out: Option<&PathBuf>,
     timings: &SpanTimings,
 ) {
     let elf_bytes = match fs::read(elf) {
@@ -227,15 +228,21 @@ pub fn run_recursion_bench(
 
     let (root_statement, proof) = tree.into_parts();
     let started = Instant::now();
-    let root_proof_bytes = match recursion::root::encode_recursive_root(&profile, &proof) {
-        Ok(bytes) => bytes.as_bytes().len(),
+    let encoded = match recursion::root::encode_recursive_root(&profile, &proof) {
+        Ok(bytes) => bytes,
         Err(e) => {
             error!("Root encoding failed: {e}");
             std::process::exit(1);
         }
     };
     let encode_seconds = started.elapsed().as_secs_f64();
+    let root_proof_bytes = encoded.as_bytes().len();
     info!("Encoded the root proof to {root_proof_bytes} bytes in {encode_seconds:.2}s");
+    if let Some(path) = proof_out {
+        fs::write(path, encoded.as_bytes()).expect("Failed to write root proof");
+        info!("Root proof saved to {path:?}");
+    }
+    drop(encoded);
 
     let started = Instant::now();
     let verified = match recursion::root::verify_recursive_root(

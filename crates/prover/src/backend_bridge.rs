@@ -13,11 +13,13 @@ pub(crate) fn checked_m31_from_raw(raw: u32) -> BaseField {
     BaseField::from_u32_unchecked(raw)
 }
 
-/// Copies a SIMD evaluation into CPU-owned storage without reducing M31 values.
+/// Copies a SIMD evaluation into a distinct CPU allocation without reducing M31 values.
 ///
 /// STWO permits the two raw representatives `0` and `P` for the zero field
 /// element. Commitments hash those representatives, so backend conversion must
-/// retain the exact words rather than canonicalizing them.
+/// retain the exact words rather than canonicalizing them. The distinct
+/// allocation also preserves the allocator layout contract of the source's
+/// packed SIMD storage.
 pub(crate) fn simd_circle_evaluation_to_cpu<EvalOrder>(
     evaluation: CircleEvaluation<SimdBackend, BaseField, EvalOrder>,
 ) -> CircleEvaluation<CpuBackend, BaseField, EvalOrder> {
@@ -63,7 +65,38 @@ mod tests {
         let converted = simd_circle_evaluation_to_cpu(evaluation);
 
         assert_eq!(converted.domain, domain);
-        assert_eq!(converted.values.as_ptr(), input_ptr);
+        assert_ne!(converted.values.as_ptr(), input_ptr);
+        assert_eq!(
+            converted
+                .values
+                .iter()
+                .map(|value| value.0)
+                .collect::<Vec<_>>(),
+            raw_values
+        );
+    }
+
+    #[test]
+    fn conversion_preserves_non_lane_multiple_order() {
+        let domain = CanonicCoset::new(5).circle_domain();
+        let raw_values = (0..domain.size())
+            .map(|index| match index {
+                0 => 0,
+                1 => P,
+                _ => index as u32,
+            })
+            .collect::<Vec<_>>();
+        let values: BaseColumn = raw_values
+            .iter()
+            .copied()
+            .map(BaseField::from_u32_unchecked)
+            .collect();
+        let evaluation =
+            CircleEvaluation::<SimdBackend, BaseField, BitReversedOrder>::new(domain, values);
+
+        let converted = simd_circle_evaluation_to_cpu(evaluation);
+
+        assert_eq!(converted.domain, domain);
         assert_eq!(
             converted
                 .values

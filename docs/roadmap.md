@@ -2047,6 +2047,26 @@ the recorded command without committing a machine-specific path.
 - Commits `94a89010`…`dde3d8bf` plus this evidence entry pushed to
   `origin/chore/scratchpad-cleanups`.
 
+### `REL-001 CI gate` — 2026-08-09
+
+- The hosted CI Test job had failed on every push of this branch: plain
+  `cargo test --release` runs the heavy-proofs recursion modules, which exceed a
+  4-vCPU/16-GiB GitHub runner, and the runner died mid-suite.
+- CI now runs `cargo nextest run --release --workspace --profile ci`. The
+  checked-in `ci` profile excludes the four heavy-proofs modules (local-only
+  under the guarded release procedure above) and reserves every worker slot for
+  `universal_witness::tests::`, whose peaks were measured at 9.2 GiB and 6.3 GiB
+  via `/usr/bin/time -l`, so two spikes never share the runner. A dedicated
+  `cargo test --release --doc --workspace` step keeps the 11 doctests nextest
+  does not run.
+- Local validation of the exact CI commands: 1,449 tests passed in 102.7 seconds
+  plus all doctests.
+- CI runs 31334131196 and 31334131208 on commit `6c3a74a3`: Build, Trunk Check,
+  and Test all green; the Test job ran 1,451 tests in 358.6 seconds (79 skipped:
+  74 heavy-proofs, 5 audited ignored repetitions) and all doctests.
+- `CONTRIBUTING.md` now points contributors at the `ci` profile and reserves the
+  serialized default profile for large hosts.
+
 ## Project finish line
 
 The project is complete only when all tasks are `[done]`, one application

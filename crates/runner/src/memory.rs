@@ -120,7 +120,7 @@ impl Memory {
         let prev_word = self.read_u32(aligned);
         self.write_u8(addr, val);
         let next_word = self.read_u32(aligned);
-        tracer.trace_mem_access(addr, prev_word, next_word)
+        tracer.trace_mem_access(aligned, prev_word, next_word)
     }
 
     /// Write a half-word with trace tracking.
@@ -132,7 +132,7 @@ impl Memory {
         let prev_word = self.read_u32(aligned);
         self.write_u16(addr, val);
         let next_word = self.read_u32(aligned);
-        tracer.trace_mem_access(addr, prev_word, next_word)
+        tracer.trace_mem_access(aligned, prev_word, next_word)
     }
 
     /// Write a word with trace tracking.

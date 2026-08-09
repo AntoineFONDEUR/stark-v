@@ -1,91 +1,133 @@
-//! Arena lowering: turn a recorded composition circuit into recursion-AIR
-//! witness rows and public claims (docs/recursion.md, M5).
+//! Arithmetic-circuit lowering into recursion AIR witness rows.
 //!
-//! Arithmetic nodes become rows of `qm31_mul`, `qm31_inv`, and `linear_ops`;
-//! inputs and constants become public `wire` emissions; the structure of
-//! every arithmetic node is a public `op_def` emission; and the accumulated
-//! output is publicly consumed. The verifier re-records the canonical arena
-//! by running the same inner `evaluate()` over the public input values —
-//! structure and values alike flow from the single source.
+//! Recorded arithmetic nodes become rows of `qm31_mul`, `qm31_inv`, and
+//! `linear_ops`. Inputs, constants, and outputs are connected to those rows by
+//! the typed relations owned by each verifier component.
 
-use stwo::core::fields::FieldExpOps;
-use stwo::core::fields::m31::M31;
+use stwo::core::ColumnVec;
+use stwo::core::fields::m31::BaseField;
 use stwo::core::fields::qm31::SecureField;
-use stwo_constraint_framework::Relation;
+use stwo::prover::backend::simd::SimdBackend;
+use stwo::prover::poly::BitReversedOrder;
+use stwo::prover::poly::circle::CircleEvaluation;
 
-use crate::prover::RecursionTraces;
+use crate::linear_ops::LinearOpsPreprocessed;
+use crate::qm31_inv::Qm31InvPreprocessed;
+use crate::qm31_mul::Qm31MulPreprocessed;
 use crate::recorder::{Arena, Op};
-use crate::relations::{RecursionRelations, op_kind};
+use crate::{LinearOpsTable, Qm31InvTable, Qm31MulTable};
 
-/// Public interface of a lowered circuit: input/constant values and the
-/// claimed output, all bound as wire claims.
-#[derive(Clone, Debug)]
-pub struct CircuitClaim {
-    pub circuit_id: u32,
-    /// (node_id, value) of every Input node, in arena order
-    /// (alpha, denom_inverse, then masks in evaluate order).
-    pub inputs: Vec<(u32, SecureField)>,
-    /// The inner component's log size (fixes the cumsum-shift constant).
-    pub inner_log_size: u32,
-    /// The inner component's claimed LogUp sum (same role).
-    pub inner_claimed_sum: SecureField,
-    /// The accumulated output node and its claimed value.
-    pub output: (u32, SecureField),
+/// One committed or preprocessed recursion component trace.
+pub type CircuitAirTrace = ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>;
+
+/// Witness tables shared by every lowered arithmetic circuit.
+#[derive(Default)]
+pub struct CircuitTraces {
+    pub qm31_mul: Qm31MulTable,
+    pub qm31_inv: Qm31InvTable,
+    pub linear_ops: LinearOpsTable,
+    pub qm31_mul_schedule: Vec<Qm31MulScheduleRow>,
+    pub qm31_inv_schedule: Vec<Qm31InvScheduleRow>,
+    pub linear_ops_schedule: Vec<LinearOpsScheduleRow>,
 }
 
-/// Re-record the canonical arena of an inner component from a claim's
-/// public input values. The structure is mask-independent (no
-/// data-dependent branching in `evaluate`), so the prover cannot present a
-/// different circuit than the inner component's.
-pub fn record_from_claim<E: stwo_constraint_framework::FrameworkEval>(
-    eval: &E,
-    claim: &CircuitClaim,
-) -> (std::rc::Rc<core::cell::RefCell<Arena>>, usize) {
-    use stwo_constraint_framework::InfoEvaluator;
+/// Lowered arithmetic witnesses paired with their verifier-owned schedules.
+pub struct CircuitAirTraces {
+    pub qm31_mul: CircuitAirTrace,
+    pub qm31_mul_preprocessed: CircuitAirTrace,
+    pub qm31_inv: CircuitAirTrace,
+    pub qm31_inv_preprocessed: CircuitAirTrace,
+    pub linear_ops: CircuitAirTrace,
+    pub linear_ops_preprocessed: CircuitAirTrace,
+}
 
-    let info = eval.evaluate(InfoEvaluator::empty());
-    let mut values = claim.inputs.iter().map(|(_, v)| *v);
-    let alpha = values.next().expect("alpha input");
-    let denom_inverse = values.next().expect("denom_inverse input");
-    let mask: Vec<Vec<Vec<SecureField>>> = info
-        .mask_offsets
-        .iter()
-        .map(|interaction| {
-            interaction
-                .iter()
-                .map(|offsets| {
-                    (0..offsets.len())
-                        .map(|_| values.next().expect("mask input"))
-                        .collect()
-                })
-                .collect()
+impl CircuitTraces {
+    /// Materialize committed traces and the matching fixed operation schedules.
+    pub fn into_air_traces(self) -> Result<CircuitAirTraces, &'static str> {
+        let Self {
+            qm31_mul,
+            qm31_inv,
+            linear_ops,
+            qm31_mul_schedule,
+            qm31_inv_schedule,
+            linear_ops_schedule,
+        } = self;
+
+        let qm31_mul = qm31_mul.into_witness();
+        let qm31_inv = qm31_inv.into_witness();
+        let linear_ops = linear_ops.into_witness();
+        let qm31_mul_log_size = qm31_mul
+            .first()
+            .ok_or("multiplication trace has no committed columns")?
+            .domain
+            .log_size();
+        let qm31_inv_log_size = qm31_inv
+            .first()
+            .ok_or("inversion trace has no committed columns")?
+            .domain
+            .log_size();
+        let linear_ops_log_size = linear_ops
+            .first()
+            .ok_or("linear-operation trace has no committed columns")?
+            .domain
+            .log_size();
+
+        Ok(CircuitAirTraces {
+            qm31_mul,
+            qm31_mul_preprocessed: Qm31MulPreprocessed::new(qm31_mul_log_size, qm31_mul_schedule)?
+                .gen_columns(),
+            qm31_inv,
+            qm31_inv_preprocessed: Qm31InvPreprocessed::new(qm31_inv_log_size, qm31_inv_schedule)?
+                .gen_columns(),
+            linear_ops,
+            linear_ops_preprocessed: LinearOpsPreprocessed::new(
+                linear_ops_log_size,
+                linear_ops_schedule,
+            )?
+            .gen_columns(),
         })
-        .collect();
-    assert!(values.next().is_none(), "extra input values in claim");
-
-    let recorder = crate::recorder::Recorder::new(
-        mask,
-        alpha,
-        denom_inverse,
-        claim.inner_log_size,
-        claim.inner_claimed_sum,
-    );
-    let recorder = eval.evaluate(recorder);
-    let output = match &recorder.accumulation {
-        crate::recorder::Rec::Node { id, .. } => *id,
-        crate::recorder::Rec::Const(_) => panic!("composition accumulated to a constant"),
-    };
-    (recorder.arena, output)
+    }
 }
 
-fn limbs(value: SecureField) -> [u32; 4] {
+/// Verifier-owned graph coordinates for one lowered multiplication node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Qm31MulScheduleRow {
+    pub circuit_id: u32,
+    pub node_id: u32,
+    pub lhs_id: u32,
+    pub rhs_id: u32,
+    pub uses: u32,
+}
+
+/// Verifier-owned graph coordinates for one lowered inversion node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Qm31InvScheduleRow {
+    pub circuit_id: u32,
+    pub node_id: u32,
+    pub lhs_id: u32,
+    pub uses: u32,
+}
+
+/// Verifier-owned graph coordinates for one lowered linear node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LinearOpsScheduleRow {
+    pub circuit_id: u32,
+    pub node_id: u32,
+    pub is_add: u32,
+    pub is_sub: u32,
+    pub is_neg: u32,
+    pub lhs_id: u32,
+    pub rhs_id: u32,
+    pub uses: u32,
+}
+
+pub(crate) fn limbs(value: SecureField) -> [u32; 4] {
     let array = value.to_m31_array();
     [array[0].0, array[1].0, array[2].0, array[3].0]
 }
 
-/// Use counts: how many times each node is consumed as an operand, plus one
-/// for the output node (publicly consumed).
-fn use_counts(arena: &Arena, output: usize) -> Vec<u32> {
+/// Operand multiplicities plus one public consumption for every output.
+pub(crate) fn use_counts_for_outputs(arena: &Arena, outputs: &[usize]) -> Vec<u32> {
     let mut uses = vec![0u32; arena.nodes.len()];
     for node in &arena.nodes {
         match node.op {
@@ -97,28 +139,25 @@ fn use_counts(arena: &Arena, output: usize) -> Vec<u32> {
             Op::Input | Op::Const => {}
         }
     }
-    uses[output] += 1;
+    for output in outputs {
+        uses[*output] += 1;
+    }
     uses
 }
 
-/// Lower a recorded arena into witness rows, returning the public claim.
-pub fn lower_arena(
-    traces: &mut RecursionTraces,
+/// Lowers every arithmetic node for a circuit with one or more public outputs.
+pub(crate) fn lower_arena_operations(
+    traces: &mut CircuitTraces,
     circuit_id: u32,
     arena: &Arena,
-    output: usize,
-    inner_log_size: u32,
-    inner_claimed_sum: SecureField,
-) -> CircuitClaim {
-    let uses = use_counts(arena, output);
-    let mut inputs = Vec::new();
-
+    outputs: &[usize],
+) {
+    let uses = use_counts_for_outputs(arena, outputs);
     for (id, node) in arena.nodes.iter().enumerate() {
         let node_id = id as u32;
         let out = limbs(node.value);
         match node.op {
-            Op::Input => inputs.push((node_id, node.value)),
-            Op::Const => {}
+            Op::Input | Op::Const => {}
             Op::Mul(a, b) => {
                 let av = limbs(arena.nodes[a].value);
                 let bv = limbs(arena.nodes[b].value);
@@ -126,6 +165,13 @@ pub fn lower_arena(
                     av[0], av[1], av[2], av[3], bv[0], bv[1], bv[2], bv[3], out[0], out[1], out[2],
                     out[3], circuit_id, node_id, a as u32, b as u32, uses[id], 1,
                 );
+                traces.qm31_mul_schedule.push(Qm31MulScheduleRow {
+                    circuit_id,
+                    node_id,
+                    lhs_id: a as u32,
+                    rhs_id: b as u32,
+                    uses: uses[id],
+                });
             }
             Op::Inverse(a) => {
                 let av = limbs(arena.nodes[a].value);
@@ -133,6 +179,12 @@ pub fn lower_arena(
                     av[0], av[1], av[2], av[3], out[0], out[1], out[2], out[3], circuit_id,
                     node_id, a as u32, uses[id], 1,
                 );
+                traces.qm31_inv_schedule.push(Qm31InvScheduleRow {
+                    circuit_id,
+                    node_id,
+                    lhs_id: a as u32,
+                    uses: uses[id],
+                });
             }
             Op::Add(a, b) | Op::Sub(a, b) => {
                 let av = limbs(arena.nodes[a].value);
@@ -147,6 +199,16 @@ pub fn lower_arena(
                     av[2], av[3], bv[0], bv[1], bv[2], bv[3], out[0], out[1], out[2], out[3],
                     uses[id],
                 );
+                traces.linear_ops_schedule.push(LinearOpsScheduleRow {
+                    circuit_id,
+                    node_id,
+                    is_add,
+                    is_sub,
+                    is_neg: 0,
+                    lhs_id: a as u32,
+                    rhs_id: b as u32,
+                    uses: uses[id],
+                });
             }
             Op::Neg(a) => {
                 let av = limbs(arena.nodes[a].value);
@@ -154,81 +216,17 @@ pub fn lower_arena(
                     circuit_id, node_id, 0, 0, 1, a as u32, 0, av[0], av[1], av[2], av[3], 0, 0, 0,
                     0, out[0], out[1], out[2], out[3], uses[id],
                 );
+                traces.linear_ops_schedule.push(LinearOpsScheduleRow {
+                    circuit_id,
+                    node_id,
+                    is_add: 0,
+                    is_sub: 0,
+                    is_neg: 1,
+                    lhs_id: a as u32,
+                    rhs_id: 0,
+                    uses: uses[id],
+                });
             }
         }
     }
-
-    CircuitClaim {
-        circuit_id,
-        inputs,
-        inner_log_size,
-        inner_claimed_sum,
-        output: (output as u32, arena.nodes[output].value),
-    }
-}
-
-/// The LogUp contribution of a circuit's public side, computed against the
-/// canonical arena the verifier re-records from the claim's input values.
-pub fn public_circuit_terms(
-    claim: &CircuitClaim,
-    arena: &Arena,
-    output: usize,
-    recursion_relations: &RecursionRelations,
-) -> SecureField {
-    use num_traits::Zero;
-
-    let uses = use_counts(arena, output);
-    let cid = M31::from(claim.circuit_id);
-    let mut total = SecureField::zero();
-
-    let wire_term = |node_id: u32, value: SecureField| -> SecureField {
-        let value = limbs(value);
-        let tuple = [
-            cid,
-            M31::from(node_id),
-            M31::from(value[0]),
-            M31::from(value[1]),
-            M31::from(value[2]),
-            M31::from(value[3]),
-        ];
-        let denom: SecureField = recursion_relations.wire.combine(&tuple);
-        denom.inverse()
-    };
-
-    for (id, node) in arena.nodes.iter().enumerate() {
-        let node_id = id as u32;
-        match node.op {
-            // Inputs and constants: emit their wire claims once per use.
-            Op::Input | Op::Const => {
-                if uses[id] > 0 {
-                    total +=
-                        wire_term(node_id, node.value) * SecureField::from(M31::from(uses[id]));
-                }
-            }
-            // Arithmetic nodes: emit their structure once.
-            op => {
-                let (kind, lhs, rhs) = match op {
-                    Op::Add(a, b) => (op_kind::ADD, a as u32, b as u32),
-                    Op::Sub(a, b) => (op_kind::SUB, a as u32, b as u32),
-                    Op::Mul(a, b) => (op_kind::MUL, a as u32, b as u32),
-                    Op::Neg(a) => (op_kind::NEG, a as u32, 0),
-                    Op::Inverse(a) => (op_kind::INVERSE, a as u32, 0),
-                    Op::Input | Op::Const => unreachable!(),
-                };
-                let tuple = [
-                    cid,
-                    M31::from(node_id),
-                    M31::from(kind),
-                    M31::from(lhs),
-                    M31::from(rhs),
-                ];
-                let denom: SecureField = recursion_relations.op_def.combine(&tuple);
-                total += denom.inverse();
-            }
-        }
-    }
-
-    // The output is consumed publicly (its one extra use).
-    total -= wire_term(claim.output.0, claim.output.1);
-    total
 }

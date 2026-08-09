@@ -7,48 +7,46 @@ words:
   - allocvec
   - andi
   - andn
+  - arities
   - auipc
+  - backpressure
   - BCHKS
   - bgeu
   - bitmask
   - bitmaski
   - bltu
   - booleanity
+  - bursty
   - bytemuck
+  - callees
   - cfgs
   - circom
-  - clément
   - clippy
+  - clément
+  - codegen
   - coeff
   - condvar
-  - codegen
+  - cpus
   - csrrw
   - cumsum
   - dashmap
   - decommit
   - decommitment
+  - decommitments
   - decommitted
   - dedup
-  - impls
-  - elems
-  - unkeyed
-  - arities
-  - lowerer
-  - Lowerer
-  - callees
-  - subexpression
-  - sbox
-  - decommitments
-  - peekable
   - denoms
+  - divrem
   - divu
   - docstrings
   - doctest
+  - doctests
   - doubleword
   - dtolnay
   - ebreak
   - ecall
   - ehdr
+  - elems
   - eprintln
   - evals
   - exfiltration
@@ -67,6 +65,7 @@ words:
   - idents
   - ilog2
   - immediates
+  - impls
   - injective
   - inplace
   - insn
@@ -78,6 +77,7 @@ words:
   - kakarot
   - keccak
   - kitem
+  - lateout
   - littleriscv
   - loadb
   - loadbu
@@ -85,6 +85,8 @@ words:
   - loadhu
   - loadw
   - logup
+  - lowerer
+  - Lowerer
   - madv
   - madvise
   - memsz
@@ -106,7 +108,9 @@ words:
   - muli
   - mult
   - multiset
+  - multisets
   - mults
+  - nextest
   - nocapture
   - nomem
   - norelax
@@ -116,6 +120,7 @@ words:
   - OODS
   - openvm
   - pairable
+  - peekable
   - popcount
   - precomputation
   - prek
@@ -130,12 +135,15 @@ words:
   - riscv
   - rngs
   - rodata
+  - roundtrips
+  - rsplit
   - rstest
   - rustc
   - rustflags
   - rustup
   - rzup
   - Sanso
+  - sbox
   - sdiv
   - secp
   - Seedable
@@ -158,12 +166,17 @@ words:
   - storeb
   - storeh
   - storew
+  - forgeable
   - strtab
   - stwo
+  - syscall
+  - syscalls
+  - subexpression
+  - subspan
   - subi
   - swatinem
   - syms
-  - syscalls
+  - taiki
   - thiserror
   - tikv
   - trac
@@ -172,6 +185,8 @@ words:
   - underflowed
   - ungated
   - unimp
+  - unkeyed
+  - unvalidated
   - usize
   - vaddr
   - virt

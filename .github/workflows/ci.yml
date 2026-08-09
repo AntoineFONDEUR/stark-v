@@ -36,6 +36,9 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    # The full suite plus margin; a hung proving test must not burn the
+    # default 6-hour budget.
+    timeout-minutes: 120
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -51,5 +54,18 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
 
-      - name: Run tests (release)
-        run: cargo test --release
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.143
+
+      # The `ci` profile (.config/nextest.toml) excludes the heavy-proofs
+      # recursion modules: each needs tens of GiB and hours of proving, beyond
+      # any GitHub-hosted runner. They run locally under the guarded release
+      # procedure recorded in docs/roadmap.md (REL-001).
+      - name: Run tests (release, heavy proofs excluded)
+        run: cargo nextest run --release --workspace --profile ci
+
+      # nextest does not run doctests; the workspace has a handful of fast ones.
+      - name: Run doctests (release)
+        run: cargo test --release --doc --workspace

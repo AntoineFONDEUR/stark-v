@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 clap = { workspace = true }
 prover = { workspace = true }
+recursion = { workspace = true }
 runner = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -18,5 +19,4 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [features]
-parallel = ["prover/parallel"]
-jemalloc = ["prover/jemalloc"]
+parallel = ["prover/parallel", "recursion/parallel"]

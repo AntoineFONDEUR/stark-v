@@ -6,37 +6,6 @@
     macro_metavar_expr_concat
 )]
 
-// Allocator configuration via features
-#[cfg(feature = "smalloc")]
-use smalloc::Smalloc;
-#[cfg(feature = "smalloc")]
-#[global_allocator]
-static GLOBAL: Smalloc = Smalloc::new();
-
-#[cfg(feature = "smalloc")]
-#[ctor::ctor]
-unsafe fn init_smalloc() {
-    GLOBAL.init();
-}
-
-#[cfg(feature = "peak-alloc")]
-use peak_alloc::PeakAlloc;
-#[cfg(feature = "peak-alloc")]
-#[global_allocator]
-pub static PEAK_ALLOC: PeakAlloc = PeakAlloc;
-
-#[cfg(feature = "jemalloc")]
-use tikv_jemallocator::Jemalloc;
-#[cfg(feature = "jemalloc")]
-#[global_allocator]
-static GLOBAL: Jemalloc = Jemalloc;
-
-#[cfg(feature = "mimalloc")]
-use mimalloc::MiMalloc;
-#[cfg(feature = "mimalloc")]
-#[global_allocator]
-static GLOBAL: MiMalloc = MiMalloc;
-
 /// Print all enabled features for debugging/benchmarking.
 pub fn print_enabled_features() {
     use tracing::info;
@@ -46,36 +15,29 @@ pub fn print_enabled_features() {
         "parallel",
         #[cfg(not(feature = "parallel"))]
         "non-parallel",
-        #[cfg(feature = "peak-alloc")]
-        "peak-alloc",
-        #[cfg(feature = "jemalloc")]
-        "jemalloc",
-        #[cfg(feature = "mimalloc")]
-        "mimalloc",
-        #[cfg(feature = "smalloc")]
-        "smalloc",
     ];
 
-    if features.is_empty() {
-        info!("Features: (none)");
-    } else {
-        info!("Features: {}", features.join(", "));
-    }
+    info!("Features: {}", features.join(", "));
 }
 
 pub mod components;
 pub mod errors;
 pub mod poseidon2_channel;
+pub mod poseidon2_precompile;
+pub mod precompile;
 pub mod preprocessed;
 pub mod prover;
 pub mod public_data;
-pub mod recursion;
 pub mod relations;
 pub mod verifier;
 
 pub use errors::VerificationError;
 pub use preprocessed::{Preprocessing, preprocess, preprocess_with_channel};
-pub use prover::{prove_rv32im, prove_rv32im_with_channel};
+pub use prover::{
+    NativeVmClaimTranscript, SegmentProofChannels, VmClaimTranscript, VmTranscriptProofResult,
+    VmTranscriptProvingError, prove_rv32im, prove_rv32im_with_channel,
+    prove_rv32im_with_channel_at_log_sizes, prove_rv32im_with_channel_at_log_sizes_and_transcript,
+};
 pub use public_data::PublicData;
 pub use verifier::{verify_rv32im, verify_rv32im_with_channel};
 
@@ -89,6 +51,7 @@ pub mod e2e;
 
 use serde::{Deserialize, Serialize};
 use stwo::core::channel::Channel;
+use stwo::core::pcs::quotients::CommitmentSchemeProofAux;
 use stwo::core::proof::StarkProof;
 use stwo::core::vcs_lifted::MerkleHasherLifted;
 
@@ -98,12 +61,15 @@ use crate::components::ClaimedSum;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InteractionClaim {
     pub claimed_sum: ClaimedSum,
+    /// Aggregate VM deficit discharged by the standalone Poseidon2 proof.
+    pub shared_relation_sum: stwo::core::fields::qm31::SecureField,
     pub log_sizes: Vec<u32>,
 }
 
 impl InteractionClaim {
     pub fn mix_into(&self, channel: &mut impl Channel) {
         self.claimed_sum.mix_into(channel);
+        channel.mix_felts(&[self.shared_relation_sum]);
         channel.mix_u64(self.log_sizes.len() as u64);
         for log_size in &self.log_sizes {
             channel.mix_u64(*log_size as u64);
@@ -111,12 +77,25 @@ impl InteractionClaim {
     }
 }
 
-/// RV32IM proof bundle.
+/// RV32IM constituent proof whose shared deficit requires a hash proof.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Proof<H: MerkleHasherLifted> {
     pub claim: components::Claim,
     pub interaction_claim: InteractionClaim,
     pub public_data: PublicData,
     pub stark_proof: StarkProof<H>,
-    pub interaction_pow: u64,
+    /// Expansion data used to materialize independent raw-query openings.
+    ///
+    /// The fixed-layout prover retains this material until recursion adapts the
+    /// proof. Ordinary proving and every serialized VM proof omit it.
+    #[serde(skip, default)]
+    pub stark_aux: Option<CommitmentSchemeProofAux<H>>,
+}
+
+/// Complete proof artifact for one VM segment and its Poseidon2 work.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SegmentProof<H: MerkleHasherLifted> {
+    pub vm: Proof<H>,
+    pub poseidon2: poseidon2_precompile::Poseidon2PrecompileProof<H>,
+    pub joint_interaction: precompile::JointInteractionProof,
 }

@@ -46,6 +46,10 @@ pub struct LoadedElf {
     pub input_start_addr: u32,
     /// Address of input data end (from __input_end linker symbol).
     pub input_end_addr: u32,
+    /// Address of the input length word (from __input_len linker symbol), if
+    /// the program exposes one. The host writes the actual input byte count
+    /// here so the guest need not treat the whole buffer as live.
+    pub input_len_addr: Option<u32>,
 }
 
 /// Load an ELF file and return the entry point, initial registers, and memory.
@@ -97,6 +101,7 @@ pub fn load_elf(bytes: &[u8]) -> Result<LoadedElf, ElfError> {
     let output_end_addr = find_symbol("__output_end").unwrap_or(0x001F_FC00);
     let input_start_addr = find_symbol("__input_start").unwrap_or(output_len_addr);
     let input_end_addr = find_symbol("__input_end").unwrap_or(input_start_addr);
+    let input_len_addr = find_symbol("__input_len");
     debug!(
         halt_flag = format_args!("0x{:08x}", halt_flag_addr),
         output_len = format_args!("0x{:08x}", output_len_addr),
@@ -162,5 +167,6 @@ pub fn load_elf(bytes: &[u8]) -> Result<LoadedElf, ElfError> {
         output_end_addr,
         input_start_addr,
         input_end_addr,
+        input_len_addr,
     })
 }

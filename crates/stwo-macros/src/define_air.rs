@@ -7,13 +7,16 @@ use syn::{Expr, Ident, Token, braced, parse_macro_input};
 
 use crate::relations::{RelationsInput, generate_relations, parse_relation_defs};
 use crate::trace_tables::{
-    TraceTablesDef, generate_trace_op_macro, generate_trace_tables, parse_opcode_defs,
+    ExternalTable, TraceTablesDef, generate_trace_op_macro, generate_trace_tables,
+    parse_opcode_defs,
 };
 
 /// Single source of truth for zkVM AIR metadata.
 struct AirInput {
     relations: RelationsInput,
     clock_gap: Option<ClockGapInput>,
+    /// External fn-DSL trace tables folded into the `Tracer` (e.g. poseidon2).
+    externals: Vec<ExternalTable>,
     opcodes: Vec<crate::trace_tables::OpcodeDef>,
 }
 
@@ -115,6 +118,7 @@ impl Parse for AirInput {
         let mut preprocessed = None;
         let mut clock_gap = None;
         let mut opcodes = None;
+        let mut externals: Vec<ExternalTable> = Vec::new();
 
         while !input.is_empty() {
             let label: Ident = input.parse()?;
@@ -155,11 +159,27 @@ impl Parse for AirInput {
                     }
                     clock_gap = Some(content.parse::<ClockGapInput>()?);
                 }
+                "external" => {
+                    if !externals.is_empty() {
+                        return Err(syn::Error::new(label.span(), "duplicate `external:` block"));
+                    }
+                    // `name: module::path` entries — fn-DSL tables folded into
+                    // the Tracer (e.g. `poseidon2: crate::poseidon2`).
+                    while !content.is_empty() {
+                        let field: Ident = content.parse()?;
+                        content.parse::<Token![:]>()?;
+                        let module: syn::Path = content.parse()?;
+                        externals.push(ExternalTable { field, module });
+                        if content.peek(Token![,]) {
+                            content.parse::<Token![,]>()?;
+                        }
+                    }
+                }
                 other => {
                     return Err(syn::Error::new(
                         label.span(),
                         format!(
-                            "unknown section `{other}`, expected `relations:`, `preprocessed:`, `clock_gap:`, or `trace:`"
+                            "unknown section `{other}`, expected `relations:`, `preprocessed:`, `external:`, `clock_gap:`, or `trace:`"
                         ),
                     ));
                 }
@@ -194,6 +214,7 @@ impl Parse for AirInput {
                 preprocessed,
             },
             clock_gap,
+            externals,
             opcodes,
         })
     }
@@ -203,6 +224,7 @@ pub fn define_air(input: TokenStream) -> TokenStream {
     let AirInput {
         relations,
         clock_gap,
+        externals,
         mut opcodes,
     } = parse_macro_input!(input as AirInput);
 
@@ -255,7 +277,17 @@ pub fn define_air(input: TokenStream) -> TokenStream {
     let trace_def = TraceTablesDef::from_trace(opcodes, &relations.preprocessed);
     let traced: Vec<_> = trace_def.opcodes.iter().filter(|op| !op.air_only).collect();
     let trace_op_macro = generate_trace_op_macro(&traced);
-    let trace_tokens = generate_trace_tables(&trace_def, quote!(crate::trace::ClockGapTable));
+    // Re-export each external fn-DSL table type into the `trace` module so the
+    // runner names it as `air::trace::<Table>` like any opcode table.
+    let external_table_reexports: Vec<_> = externals
+        .iter()
+        .map(|ext| {
+            let table_type = ext.table_type();
+            quote! { pub use #table_type; }
+        })
+        .collect();
+    let trace_tokens =
+        generate_trace_tables(&trace_def, &externals, quote!(crate::trace::ClockGapTable));
 
     quote! {
         #trace_op_macro
@@ -265,9 +297,8 @@ pub fn define_air(input: TokenStream) -> TokenStream {
 
             #![allow(non_camel_case_types)]
 
-            #[cfg(debug_assertions)]
-            pub const INTERACTION_POW_BITS: u32 = 1;
-            #[cfg(not(debug_assertions))]
+            // The interaction transcript is part of the proof protocol, so its
+            // grinding difficulty cannot depend on the compiler optimization profile.
             pub const INTERACTION_POW_BITS: u32 = 10;
 
             #relations_tokens
@@ -280,7 +311,7 @@ pub fn define_air(input: TokenStream) -> TokenStream {
             use simd::AlignedVec;
             use crate::trace::Access;
 
-            pub use crate::poseidon2::Poseidon2Table;
+            #(#external_table_reexports)*
 
             /// Maximum clock delta represented by one synthetic clock-gap row.
             pub const CLOCK_GAP_MAX_DELTA: u32 = #max_clock_delta;

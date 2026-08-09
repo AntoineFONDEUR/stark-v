@@ -7,18 +7,28 @@ description = "Recursive verifier AIR components for stark-v proofs"
 
 [dependencies]
 air.workspace = true
+debug-utils.workspace = true
+hashbrown.workspace = true
+itertools.workspace = true
 stwo.workspace = true
 stwo-constraint-framework.workspace = true
 stwo-macros.workspace = true
 simd.workspace = true
-debug-utils.workspace = true
-itertools.workspace = true
 num-traits.workspace = true
 prover.workspace = true
+rayon = { workspace = true, optional = true }
 runner.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 rand.workspace = true
+rstest.workspace = true
+syn.workspace = true
 
 [features]
-parallel = ["prover/parallel"]
+# One Rayon pool schedules independent tree jobs and proof-kernel work.
+parallel = [
+  "dep:rayon",
+  "prover/parallel",
+  "stwo-constraint-framework/parallel",
+]

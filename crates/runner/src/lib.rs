@@ -1,16 +1,22 @@
 #![feature(allocator_api)]
+//! Segmented RV32IM execution and proof-witness construction.
+
 mod commitment;
 mod cpu;
 mod elf;
 mod execute;
 mod io;
+mod machine;
 mod memory;
 mod program;
 #[macro_use]
 mod trace;
 mod ops;
+mod syscalls;
 
 use thiserror::Error;
+
+use air::poseidon2::Poseidon2Digest;
 
 /// Get or decode an instruction at the given PC, caching the result.
 pub(crate) fn get_or_decode(cache: &mut InstCache, mem: &Memory, pc: u32) -> Option<DecodedInst> {
@@ -25,13 +31,14 @@ pub(crate) fn get_or_decode(cache: &mut InstCache, mem: &Memory, pc: u32) -> Opt
 }
 
 pub use air::MAX_TREE_HEIGHT;
-pub use air::decode;
+pub use air::instructions;
 pub use air::poseidon2;
 pub use commitment::{CommitmentError, SegmentRole};
 pub use cpu::Cpu;
-pub use decode::{DecodedInst, InstCache, Opcode};
 pub use elf::{ElfError, load_elf};
 pub use execute::execute;
+pub use instructions::{DecodedInst, InstCache, Opcode};
+pub use machine::MachineState;
 pub use memory::Memory;
 pub use trace::{Access, Tracer};
 
@@ -44,14 +51,53 @@ pub enum RunError {
     #[error("Invalid instruction at PC=0x{pc:08x}")]
     InvalidInstruction { pc: u32 },
 
+    #[error("Unsupported syscall {id} at PC=0x{pc:08x}")]
+    UnsupportedSyscall { pc: u32, id: u32 },
+
     #[error("Exceeded maximum cycles ({max})")]
     MaxCyclesExceeded { cycles: u64, max: u64 },
 
     #[error("Input length {len} exceeds input capacity {capacity}")]
     InputTooLarge { len: usize, capacity: usize },
 
+    #[error("Finalized segment {segment_index} uses {rows} rows, exceeding max_rows {max_rows}")]
+    FinalizedSegmentCapacityExceeded {
+        segment_index: usize,
+        rows: usize,
+        max_rows: u32,
+    },
+
+    #[error("Memory fault at PC=0x{pc:08x}: {kind} address 0x{addr:08x}")]
+    MemoryFault {
+        pc: u32,
+        addr: u32,
+        kind: MemoryFaultKind,
+    },
+
     #[error("Commitment error: {0}")]
     Commitment(#[from] CommitmentError),
+}
+
+/// Why a memory access was rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryFaultKind {
+    /// A store targeting the read-only code (TEXT) region. The program table
+    /// commits instructions separately, so such a write cannot change what
+    /// executes — it is always a guest bug, caught here rather than silently
+    /// writing to a shadow location.
+    StoreIntoText,
+    /// A load or store touching the null page (address below the TEXT origin),
+    /// which no valid pointer addresses.
+    NullPage,
+}
+
+impl std::fmt::Display for MemoryFaultKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MemoryFaultKind::StoreIntoText => write!(f, "store into read-only code"),
+            MemoryFaultKind::NullPage => write!(f, "null-page"),
+        }
+    }
 }
 
 /// Word-aligned I/O word captured from memory.
@@ -74,6 +120,14 @@ pub struct RunResult {
     pub initial_regs: [u32; 32],
     /// Register values at end of execution.
     pub final_regs: [u32; 32],
+    /// Journal digest at this segment's entry boundary.
+    pub initial_public_io_state: Poseidon2Digest,
+    /// Journal digest at this segment's exit boundary.
+    pub final_public_io_state: Poseidon2Digest,
+    /// Number of COMMIT calls authenticated by this segment.
+    pub journal_count: u32,
+    /// Execution clock of this segment's last COMMIT, or zero when absent.
+    pub journal_last_clock: u32,
     /// Output bytes from guest (postcard-serialized data).
     pub output: Option<Vec<u8>>,
     /// Raw input bytes provided to the guest.
@@ -131,30 +185,32 @@ pub fn run_with_input(
         .expect("execution produces at least one segment"))
 }
 
-/// Run an ELF program to completion, splitting the execution trace into
-/// segments of at most `segment_cycles` cycles each.
+/// Run an ELF program to completion, closing the current segment whenever
+/// `should_close` returns true for the live tracer (checked before fetching
+/// the next instruction, so the boundary lands cleanly between instructions).
 ///
 /// Each segment gets its own tracer with the clock restarting at 0, so each
 /// can be proven independently; consecutive segments chain on
-/// `(final_pc, final_regs, final_rw_root) == (initial_pc, initial_regs, initial_rw_root)`.
+/// `(final_pc, final_regs, final_rw_root, final_public_io_state)` equals the
+/// next segment's corresponding initial state.
 /// Input is anchored in the first segment and outputs in the last (see
-/// [`SegmentRole`]). With `segment_cycles = None` the whole execution is a
-/// single segment, identical to [`run_with_input`].
-pub fn run_segments_with_input(
+/// [`SegmentRole`]).
+///
+/// Output anchoring consumes each output word's access within the LAST
+/// segment's trace, so when splitting is enabled (`should_close` is `Some`)
+/// every output-region write must land there: the first store into the
+/// output region forces a boundary just before it, and no segment closes
+/// afterwards. The mirror of "input is read within the first segment" is
+/// thus "output is written within the last segment" — guests must fit their
+/// output tail (first output store to halt) in one segment budget.
+/// `should_close = None` runs the whole execution as one segment.
+fn run_segments_impl<F: Fn(&Tracer) -> bool>(
     elf_bytes: &[u8],
     input: &[u8],
-    segment_cycles: Option<u32>,
+    should_close: Option<F>,
+    max_rows: Option<u32>,
     max_cycles: u64,
 ) -> Result<Vec<RunResult>, RunError> {
-    if let Some(n) = segment_cycles {
-        // Clock differences within a segment must stay range-checkable
-        // (RangeCheck20), and a zero-length segment cannot make progress.
-        assert!(
-            n > 0 && n < (1 << 20),
-            "segment_cycles must be in 1..2^20, got {n}"
-        );
-    }
-
     let loaded = load_elf(elf_bytes)?;
     let layout = commitment::MemoryLayout::from_loaded(&loaded);
 
@@ -167,6 +223,10 @@ pub fn run_segments_with_input(
         output_data: loaded.output_data_addr,
         output_end: loaded.output_end_addr,
     };
+    // The read-only code region (stores here are always guest bugs) and the
+    // TEXT origin (nothing valid lives below it — the null page).
+    let text_range = loaded.text_base..loaded.text_end;
+    let null_page_top = loaded.text_base;
     let mut mem = loaded.memory;
     let input_start = io_addrs.input_start;
     let input_end = io_addrs.input_end;
@@ -181,6 +241,11 @@ pub fn run_segments_with_input(
         let addr = input_start.wrapping_add(idx as u32);
         mem.write_u8(addr, *byte);
     }
+    // Publish the actual input length so the guest reads only live bytes
+    // instead of treating the whole buffer as input.
+    if let Some(addr) = loaded.input_len_addr {
+        mem.write_u32(addr, input.len() as u32);
+    }
     let mut cache: InstCache = InstCache::default();
     let mut tracer = Tracer::default();
 
@@ -188,6 +253,11 @@ pub fn run_segments_with_input(
     let mut completed_cycles: u64 = 0;
     let mut seg_initial_pc = cpu.pc;
     let mut seg_initial_regs = cpu.regs();
+    let mut seg_initial_public_io_state = cpu.public_io_state();
+
+    // Set once the guest first stores into the output region: from then on
+    // the run is in its output tail and the current segment is the last one.
+    let mut output_phase = false;
 
     let final_pc = loop {
         // Check halt flag before executing next instruction
@@ -195,14 +265,33 @@ pub fn run_segments_with_input(
             break cpu.pc;
         }
 
+        // Decoding is pure (no trace side effects), so the next instruction
+        // can steer the boundary: a first output-region store closes the
+        // current segment so the whole output tail lands in the final one.
+        let next_inst = get_or_decode(&mut cache, &mem, cpu.pc)
+            .ok_or(RunError::InvalidInstruction { pc: cpu.pc })?;
+        // Reject stores into read-only code and any access to the null page
+        // before it can silently corrupt a shadow location.
+        if let Some(fault) = memory_fault(&cpu, &next_inst, &text_range, null_page_top) {
+            return Err(fault);
+        }
+        let output_write = writes_output_region(&cpu, &next_inst, io_addrs);
+        let splitting = should_close.is_some();
+        let force_close = splitting && output_write && !output_phase && tracer.clock > 0;
+        let capacity_close =
+            should_close.as_ref().is_some_and(|close| close(&tracer)) && !output_phase;
+
         // Segment boundary: close the current tracer and start a fresh one.
-        // The next instruction belongs to the next segment.
-        if segment_cycles.is_some_and(|n| tracer.clock >= n) {
+        // The next instruction belongs to the next segment. After the output
+        // phase starts, no boundary is allowed — output words must be
+        // anchored by the last segment's trace.
+        if capacity_close || force_close {
             let role = SegmentRole {
                 is_first: segments.is_empty(),
                 is_last: false,
             };
             commitment::finalize_commitments_with_role(&mut tracer, &mem, &layout, role)?;
+            ensure_finalized_segment_capacity(&tracer, segments.len(), max_rows)?;
             let finished = std::mem::take(&mut tracer);
             completed_cycles += finished.clock as u64;
             let mut result = make_run_result(
@@ -211,6 +300,8 @@ pub fn run_segments_with_input(
                 cpu.pc,
                 seg_initial_regs,
                 cpu.regs(),
+                seg_initial_public_io_state,
+                cpu.public_io_state(),
                 input,
                 &mem,
                 io_addrs,
@@ -226,19 +317,20 @@ pub fn run_segments_with_input(
             segments.push(result);
             seg_initial_pc = cpu.pc;
             seg_initial_regs = cpu.regs();
+            seg_initial_public_io_state = cpu.public_io_state();
         }
+        output_phase |= output_write;
 
         let prev_pc = cpu.pc;
 
-        let inst = get_or_decode(&mut cache, &mem, cpu.pc)
-            .ok_or(RunError::InvalidInstruction { pc: cpu.pc })?;
+        let inst = next_inst;
         tracer.trace_instr_access(cpu.pc);
 
         // Early-exit on explicit self-loop sentinels (e.g., `jal x0, 0` used to halt tests).
         // Avoid tracing this noop instruction so the final trace doesn't contain a bogus row.
         let is_self_loop = match inst.opcode {
-            decode::Opcode::Jal if inst.rd == 0 && inst.imm == 0 => true,
-            decode::Opcode::Jalr if inst.rd == 0 => {
+            instructions::Opcode::Jal if inst.rd == 0 && inst.imm == 0 => true,
+            instructions::Opcode::Jalr if inst.rd == 0 => {
                 let target = cpu.reg(inst.rs1).wrapping_add(inst.imm as u32) & !1;
                 target == cpu.pc
             }
@@ -251,7 +343,7 @@ pub fn run_segments_with_input(
         // Update tracer clock before executing instruction
         tracer.clock += 1;
 
-        execute(&mut cpu, &mut mem, &inst, &mut tracer);
+        execute(&mut cpu, &mut mem, &inst, &mut tracer)?;
 
         // Halt on infinite loop (PC unchanged after execution) - backup detection
         if cpu.pc == prev_pc {
@@ -273,12 +365,15 @@ pub fn run_segments_with_input(
         is_last: true,
     };
     commitment::finalize_commitments_with_role(&mut tracer, &mem, &layout, role)?;
+    ensure_finalized_segment_capacity(&tracer, segments.len(), max_rows)?;
     let mut result = make_run_result(
         tracer,
         seg_initial_pc,
         final_pc,
         seg_initial_regs,
         cpu.regs(),
+        seg_initial_public_io_state,
+        cpu.public_io_state(),
         input,
         &mem,
         io_addrs,
@@ -288,6 +383,158 @@ pub fn run_segments_with_input(
     }
     segments.push(result);
     Ok(segments)
+}
+
+/// Run an ELF program, splitting into segments of at most `segment_cycles`
+/// cycles each. With `segment_cycles = None` the whole execution is a single
+/// segment, identical to [`run_with_input`].
+///
+/// A fixed cycle count is a coarse proxy for capacity: different opcode/lookup
+/// mixes fill the component tables at different rates, so prefer
+/// [`run_segments_by_capacity`] to pack each segment up to a row budget.
+pub fn run_segments_with_input(
+    elf_bytes: &[u8],
+    input: &[u8],
+    segment_cycles: Option<u32>,
+    max_cycles: u64,
+) -> Result<Vec<RunResult>, RunError> {
+    if let Some(n) = segment_cycles {
+        // Clock differences within a segment must stay range-checkable
+        // (RangeCheck20), and a zero-length segment cannot make progress.
+        assert!(
+            n > 0 && n < (1 << 20),
+            "segment_cycles must be in 1..2^20, got {n}"
+        );
+    }
+    run_segments_impl(
+        elf_bytes,
+        input,
+        segment_cycles.map(|n| move |tracer: &Tracer| tracer.clock >= n),
+        None,
+        max_cycles,
+    )
+}
+
+/// Run an ELF program, closing a segment as soon as any component table — or
+/// the distinct read/write address set that drives the finalization
+/// commitment tables — would reach `max_rows`, rather than after a fixed cycle
+/// count.
+///
+/// The prover pads every component to a power of two at least its row count,
+/// so the fullest table bounds the segment's proving size; closing on it packs
+/// each segment near the row budget regardless of the opcode/lookup mix. The
+/// clock (one row per cycle) is itself one of the monitored quantities, so the
+/// segment always closes by `clock == max_rows`, keeping clock differences
+/// range-checkable (`max_rows < 2^20`).
+/// Finalized tables are checked again because commitment construction can add
+/// rows that were absent when the live segment reached its boundary.
+pub fn run_segments_by_capacity(
+    elf_bytes: &[u8],
+    input: &[u8],
+    max_rows: u32,
+    max_cycles: u64,
+) -> Result<Vec<RunResult>, RunError> {
+    assert!(
+        max_rows > 0 && max_rows < (1 << 20),
+        "max_rows must be in 1..2^20, got {max_rows}"
+    );
+    let budget = max_rows as usize;
+    run_segments_impl(
+        elf_bytes,
+        input,
+        Some(move |tracer: &Tracer| {
+            tracer.clock as usize >= budget
+                || tracer.max_table_len() >= budget
+                // Distinct RW addresses drive the memory and poseidon2/merkle
+                // commitment tables built at finalization.
+                || tracer.mem_clock.len() >= budget
+        }),
+        Some(max_rows),
+        max_cycles,
+    )
+}
+
+/// Check completed tables because finalization adds rows absent from the live tracer.
+fn ensure_finalized_segment_capacity(
+    tracer: &Tracer,
+    segment_index: usize,
+    max_rows: Option<u32>,
+) -> Result<(), RunError> {
+    let Some(max_rows) = max_rows else {
+        return Ok(());
+    };
+    let rows = tracer.max_table_len();
+    if rows > max_rows as usize {
+        return Err(RunError::FinalizedSegmentCapacityExceeded {
+            segment_index,
+            rows,
+            max_rows,
+        });
+    }
+    Ok(())
+}
+
+/// Whether executing `inst` would store into the guest's output region (the
+/// word holding the output length, or the output data buffer). Pure: the
+/// effective address only depends on the current register file.
+fn writes_output_region(cpu: &Cpu, inst: &DecodedInst, io: IoAddrs) -> bool {
+    let width = match inst.opcode {
+        Opcode::Sb => 1,
+        Opcode::Sh => 2,
+        Opcode::Sw => 4,
+        _ => return false,
+    };
+    let addr = cpu.reg(inst.rs1).wrapping_add(inst.imm as u32);
+    let end = addr.wrapping_add(width);
+    let len_word = io.output_len & !3;
+    let overlaps = |lo: u32, hi: u32| addr < hi && end > lo;
+    overlaps(len_word, len_word.wrapping_add(4)) || overlaps(io.output_data, io.output_end)
+}
+
+/// The effective address and access width of a load/store, or `None` for a
+/// non-memory instruction. Pure: depends only on the register file.
+fn mem_access(cpu: &Cpu, inst: &DecodedInst) -> Option<(u32, u32, bool)> {
+    // (addr, width, is_store)
+    let (width, is_store) = match inst.opcode {
+        Opcode::Sb => (1, true),
+        Opcode::Sh => (2, true),
+        Opcode::Sw => (4, true),
+        Opcode::Lb | Opcode::Lbu => (1, false),
+        Opcode::Lh | Opcode::Lhu => (2, false),
+        Opcode::Lw => (4, false),
+        _ => return None,
+    };
+    let addr = cpu.reg(inst.rs1).wrapping_add(inst.imm as u32);
+    Some((addr, width, is_store))
+}
+
+/// Reject stores into the read-only code region and any access straddling the
+/// null page. Returns the fault to raise, or `None` if the access is allowed.
+fn memory_fault(
+    cpu: &Cpu,
+    inst: &DecodedInst,
+    text_range: &core::ops::Range<u32>,
+    null_page_top: u32,
+) -> Option<RunError> {
+    let (addr, width, is_store) = mem_access(cpu, inst)?;
+    let end = addr.wrapping_add(width);
+    let overlaps = |lo: u32, hi: u32| addr < hi && end > lo;
+
+    if addr < null_page_top {
+        return Some(RunError::MemoryFault {
+            pc: cpu.pc,
+            addr,
+            kind: MemoryFaultKind::NullPage,
+        });
+    }
+    if is_store && !text_range.is_empty() && overlaps(text_range.start, text_range.end) {
+        return Some(RunError::MemoryFault {
+            pc: cpu.pc,
+            addr,
+            kind: MemoryFaultKind::StoreIntoText,
+        });
+    }
+    None
 }
 
 /// IO-region addresses captured from the loaded ELF before its memory is
@@ -311,10 +558,15 @@ fn make_run_result(
     final_pc: u32,
     initial_regs: [u32; 32],
     final_regs: [u32; 32],
+    initial_public_io_state: Poseidon2Digest,
+    final_public_io_state: Poseidon2Digest,
     input: &[u8],
     mem: &Memory,
     io_addrs: IoAddrs,
 ) -> RunResult {
+    let journal_count =
+        u32::try_from(tracer.commit.len()).expect("COMMIT trace length exceeds u32");
+    let journal_last_clock = tracer.commit.clock.last().copied().unwrap_or(0);
     let output_len = mem.read_u32(io_addrs.output_len);
     let output = io::read_output(
         mem,
@@ -330,6 +582,10 @@ fn make_run_result(
         final_pc,
         initial_regs,
         final_regs,
+        initial_public_io_state,
+        final_public_io_state,
+        journal_count,
+        journal_last_clock,
         output,
         input: input.to_vec(),
         input_start: io_addrs.input_start,

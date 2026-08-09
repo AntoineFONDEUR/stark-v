@@ -7,12 +7,11 @@ use thiserror::Error;
 use crate::MAX_TREE_HEIGHT;
 use crate::Memory;
 use crate::ops::utils::M31_P;
-use crate::poseidon2::{POSEIDON2_DEFAULT_HASHES_DEPTH_30, poseidon2_traced};
+use crate::poseidon2::{
+    DIGEST_WORDS, Poseidon2Digest, poseidon2_default_hashes, poseidon2_traced_digest,
+};
 use crate::program::{ProgramRow, decode_program};
 use crate::trace::{MemoryTable, MerkleTable, Poseidon2Table, ProgramTable, Tracer};
-
-// The table has one default hash per Merkle depth, including the root and leaves.
-const _: [(); MAX_TREE_HEIGHT as usize] = [(); POSEIDON2_DEFAULT_HASHES_DEPTH_30.len()];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MemoryLayout {
@@ -136,12 +135,23 @@ pub enum CommitmentError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MerkleValue {
-    pub value: u32,
+    pub value: Poseidon2Digest,
     pub multiplicity: u32,
 }
 
 impl MerkleValue {
-    pub fn new(value: u32, multiplicity: u32) -> Self {
+    /// Represent a scalar program or memory byte as a domain-fixed Merkle leaf.
+    pub fn leaf(value: u32, multiplicity: u32) -> Self {
+        let mut digest = [0; DIGEST_WORDS];
+        digest[0] = value;
+        Self {
+            value: digest,
+            multiplicity,
+        }
+    }
+
+    /// Carry a digest produced by an internal Merkle node.
+    pub fn digest(value: Poseidon2Digest, multiplicity: u32) -> Self {
         Self {
             value,
             multiplicity,
@@ -156,6 +166,8 @@ pub struct NodeData {
     pub left: MerkleValue,
     pub right: MerkleValue,
     pub cur: MerkleValue,
+    /// The second half of the permutation output completes the atomic hash call.
+    pub output_tail: Poseidon2Digest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,7 +195,7 @@ fn insert_word_leaves(leaves: &mut FxHashMap<u32, MerkleValue>, addr: u32, word:
     for limb in 0..4u32 {
         leaves.insert(
             addr + limb,
-            MerkleValue::new(bytes[limb as usize] as u32, 1),
+            MerkleValue::leaf(bytes[limb as usize] as u32, 1),
         );
     }
 }
@@ -194,7 +206,7 @@ fn collect_program_leaves(program_rows: &[ProgramRow]) -> FxHashMap<u32, MerkleV
         for limb in 0..4u32 {
             leaves.insert(
                 row.addr + limb,
-                MerkleValue::new(row.values[limb as usize], 1),
+                MerkleValue::leaf(row.values[limb as usize], 1),
             );
         }
     }
@@ -204,14 +216,13 @@ fn collect_program_leaves(program_rows: &[ProgramRow]) -> FxHashMap<u32, MerkleV
 pub fn build_partial_merkle_tree(
     leaves: &FxHashMap<u32, MerkleValue>,
     poseidon2: &mut Poseidon2Table,
-) -> (Vec<NodeData>, u32) {
+) -> (Vec<NodeData>, Poseidon2Digest) {
     let leaf_depth = MAX_TREE_HEIGHT - 1;
+    let defaults = poseidon2_default_hashes();
     if leaves.is_empty() {
-        let root = POSEIDON2_DEFAULT_HASHES_DEPTH_30[0];
-        return (vec![], root);
+        return (vec![], defaults[0]);
     }
 
-    let defaults = &POSEIDON2_DEFAULT_HASHES_DEPTH_30;
     let mut nodes = Vec::new();
     let mut current: FxHashMap<u32, MerkleValue> = leaves.clone();
 
@@ -236,14 +247,15 @@ pub fn build_partial_merkle_tree(
             let left = current
                 .get(&left_index)
                 .copied()
-                .unwrap_or_else(|| MerkleValue::new(defaults[depth as usize], 0));
+                .unwrap_or_else(|| MerkleValue::digest(defaults[depth as usize], 0));
             let right = current
                 .get(&right_index)
                 .copied()
-                .unwrap_or_else(|| MerkleValue::new(defaults[depth as usize], 0));
+                .unwrap_or_else(|| MerkleValue::digest(defaults[depth as usize], 0));
 
-            let out = poseidon2_traced(poseidon2, left.value, right.value);
-            let cur = MerkleValue::new(out[0], 1);
+            let output = poseidon2_traced_digest(poseidon2, left.value, right.value);
+            let cur = MerkleValue::digest(core::array::from_fn(|word| output[word]), 1);
+            let output_tail = core::array::from_fn(|word| output[DIGEST_WORDS + word]);
 
             nodes.push(NodeData {
                 index: left_index,
@@ -251,6 +263,7 @@ pub fn build_partial_merkle_tree(
                 left,
                 right,
                 cur,
+                output_tail,
             });
 
             next.insert(left_index >> 1, cur);
@@ -261,7 +274,10 @@ pub fn build_partial_merkle_tree(
         current = next;
     }
 
-    let root = current.get(&0).map(|v| v.value).unwrap_or(0);
+    let root = current
+        .get(&0)
+        .expect("a non-empty tree produces a root")
+        .value;
     (nodes, root)
 }
 
@@ -329,8 +345,8 @@ fn collect_memory_commitment(
 fn push_memory_rows(
     table: &mut MemoryTable,
     entries: &[MemoryCommitmentEntry],
-    rw_initial_root: u32,
-    rw_final_root: u32,
+    rw_initial_root: Poseidon2Digest,
+    rw_final_root: Poseidon2Digest,
 ) {
     for entry in entries {
         if entry.include_initial {
@@ -343,7 +359,14 @@ fn push_memory_rows(
                 bytes[2] as u32,
                 bytes[3] as u32,
                 1,
-                rw_initial_root,
+                rw_initial_root[0],
+                rw_initial_root[1],
+                rw_initial_root[2],
+                rw_initial_root[3],
+                rw_initial_root[4],
+                rw_initial_root[5],
+                rw_initial_root[6],
+                rw_initial_root[7],
             );
         }
 
@@ -357,7 +380,14 @@ fn push_memory_rows(
                 bytes[2] as u32,
                 bytes[3] as u32,
                 M31_P - 1,
-                rw_final_root,
+                rw_final_root[0],
+                rw_final_root[1],
+                rw_final_root[2],
+                rw_final_root[3],
+                rw_final_root[4],
+                rw_final_root[5],
+                rw_final_root[6],
+                rw_final_root[7],
             );
         }
     }
@@ -367,7 +397,7 @@ fn push_program_rows(
     table: &mut ProgramTable,
     program_rows: &[ProgramRow],
     program_reads: &FxHashMap<u32, u32>,
-    program_root: u32,
+    program_root: Poseidon2Digest,
 ) {
     for row in program_rows {
         let read_count = program_reads.get(&row.addr).copied().unwrap_or(0);
@@ -378,23 +408,66 @@ fn push_program_rows(
             row.values[2],
             row.values[3],
             read_count,
-            program_root,
+            program_root[0],
+            program_root[1],
+            program_root[2],
+            program_root[3],
+            program_root[4],
+            program_root[5],
+            program_root[6],
+            program_root[7],
         );
     }
 }
 
-fn push_merkle_nodes(nodes: Vec<NodeData>, root: u32, table: &mut MerkleTable) {
+fn push_merkle_nodes(nodes: Vec<NodeData>, root: Poseidon2Digest, table: &mut MerkleTable) {
     for node in nodes {
         table.push(
             node.index,
             node.depth,
-            node.left.value,
-            node.right.value,
-            node.cur.value,
+            node.left.value[0],
+            node.left.value[1],
+            node.left.value[2],
+            node.left.value[3],
+            node.left.value[4],
+            node.left.value[5],
+            node.left.value[6],
+            node.left.value[7],
+            node.right.value[0],
+            node.right.value[1],
+            node.right.value[2],
+            node.right.value[3],
+            node.right.value[4],
+            node.right.value[5],
+            node.right.value[6],
+            node.right.value[7],
+            node.cur.value[0],
+            node.cur.value[1],
+            node.cur.value[2],
+            node.cur.value[3],
+            node.cur.value[4],
+            node.cur.value[5],
+            node.cur.value[6],
+            node.cur.value[7],
+            node.output_tail[0],
+            node.output_tail[1],
+            node.output_tail[2],
+            node.output_tail[3],
+            node.output_tail[4],
+            node.output_tail[5],
+            node.output_tail[6],
+            node.output_tail[7],
             node.left.multiplicity,
             node.right.multiplicity,
             node.cur.multiplicity,
-            root,
+            root[0],
+            root[1],
+            root[2],
+            root[3],
+            root[4],
+            root[5],
+            root[6],
+            root[7],
         );
     }
 }
@@ -432,7 +505,8 @@ pub(crate) fn finalize_commitments_with_role(
     tracer.program = ProgramTable::new();
     tracer.memory = MemoryTable::new();
     tracer.merkle = MerkleTable::new();
-    tracer.poseidon2 = Poseidon2Table::new();
+    // Execution-time journal permutations share this constituent table with
+    // commitment hashing, so finalization appends rather than resets it.
 
     // Create program leaves
     let program_rows = decode_program(memory, layout)?;
@@ -487,7 +561,8 @@ pub(crate) fn finalize_commitments(
 mod tests {
     use super::*;
     use crate::Memory;
-    use crate::{InstCache, RunError, RunResult, decode, execute, io, load_elf};
+    use crate::poseidon2::{poseidon2_hash, poseidon2_hash_digest};
+    use crate::{InstCache, RunError, RunResult, execute, instructions, io, load_elf};
 
     fn run_with_tracer_for_test(
         elf_bytes: &[u8],
@@ -500,6 +575,7 @@ mod tests {
         let mut cpu = crate::Cpu::new(loaded.entry, loaded.sp, loaded.gp);
         let initial_pc = cpu.pc;
         let initial_regs = cpu.regs();
+        let initial_public_io_state = cpu.public_io_state();
         let mut mem = loaded.memory;
         let mut cache: InstCache = InstCache::default();
 
@@ -525,6 +601,11 @@ mod tests {
                     final_pc: cpu.pc,
                     initial_regs,
                     final_regs: cpu.regs(),
+                    initial_public_io_state,
+                    final_public_io_state: cpu.public_io_state(),
+                    journal_count: u32::try_from(tracer.commit.len())
+                        .expect("COMMIT trace length exceeds u32"),
+                    journal_last_clock: tracer.commit.clock.last().copied().unwrap_or(0),
                     output,
                     input: Vec::new(),
                     input_start: loaded.input_start_addr,
@@ -544,8 +625,8 @@ mod tests {
             tracer.trace_instr_access(cpu.pc);
 
             let is_self_loop = match inst.opcode {
-                decode::Opcode::Jal if inst.rd == 0 && inst.imm == 0 => true,
-                decode::Opcode::Jalr if inst.rd == 0 => {
+                instructions::Opcode::Jal if inst.rd == 0 && inst.imm == 0 => true,
+                instructions::Opcode::Jalr if inst.rd == 0 => {
                     let target = cpu.reg(inst.rs1).wrapping_add(inst.imm as u32) & !1;
                     target == cpu.pc
                 }
@@ -572,6 +653,11 @@ mod tests {
                     final_pc: cpu.pc,
                     initial_regs,
                     final_regs: cpu.regs(),
+                    initial_public_io_state,
+                    final_public_io_state: cpu.public_io_state(),
+                    journal_count: u32::try_from(tracer.commit.len())
+                        .expect("COMMIT trace length exceeds u32"),
+                    journal_last_clock: tracer.commit.clock.last().copied().unwrap_or(0),
                     output,
                     input: Vec::new(),
                     input_start: loaded.input_start_addr,
@@ -586,7 +672,7 @@ mod tests {
             }
 
             tracer.clock += 1;
-            execute(&mut cpu, &mut mem, &inst, &mut tracer);
+            execute(&mut cpu, &mut mem, &inst, &mut tracer)?;
 
             if cpu.pc == prev_pc {
                 let output_len = mem.read_u32(loaded.output_len_addr);
@@ -609,6 +695,11 @@ mod tests {
                     final_pc: prev_pc,
                     initial_regs,
                     final_regs: cpu.regs(),
+                    initial_public_io_state,
+                    final_public_io_state: cpu.public_io_state(),
+                    journal_count: u32::try_from(tracer.commit.len())
+                        .expect("COMMIT trace length exceeds u32"),
+                    journal_last_clock: tracer.commit.clock.last().copied().unwrap_or(0),
                     output,
                     input: Vec::new(),
                     input_start: loaded.input_start_addr,
@@ -648,6 +739,50 @@ mod tests {
                 word: 0xFFFF_FFFF
             }
         );
+    }
+
+    #[test]
+    fn single_leaf_root_matches_full_width_path_recomputation() {
+        let leaf = MerkleValue::leaf(7, 1);
+        let mut leaves = FxHashMap::default();
+        leaves.insert(0, leaf);
+        let mut table = Poseidon2Table::new();
+        let (_, actual) = build_partial_merkle_tree(&leaves, &mut table);
+
+        let defaults = poseidon2_default_hashes();
+        let mut expected = leaf.value;
+        for depth in (1..MAX_TREE_HEIGHT).rev() {
+            expected = poseidon2_hash_digest(expected, defaults[depth as usize]);
+        }
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn merkle_node_preserves_the_permutation_output_tail() {
+        let leaf = MerkleValue::leaf(7, 1);
+        let mut leaves = FxHashMap::default();
+        leaves.insert(0, leaf);
+        let mut table = Poseidon2Table::new();
+        let (nodes, _) = build_partial_merkle_tree(&leaves, &mut table);
+
+        let output = poseidon2_hash(
+            leaf.value,
+            poseidon2_default_hashes()[(MAX_TREE_HEIGHT - 1) as usize],
+        );
+        let expected = core::array::from_fn(|word| output[DIGEST_WORDS + word]);
+
+        assert_eq!(nodes[0].output_tail, expected);
+    }
+
+    #[test]
+    fn merkle_hash_rows_use_atomic_poseidon_io_mode() {
+        let mut leaves = FxHashMap::default();
+        leaves.insert(0, MerkleValue::leaf(7, 1));
+        let mut table = Poseidon2Table::new();
+        let _ = build_partial_merkle_tree(&leaves, &mut table);
+
+        assert!(table.io.iter().all(|&flag| flag == 1));
     }
 
     #[test]

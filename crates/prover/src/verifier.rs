@@ -9,24 +9,32 @@ use stwo_constraint_framework::TraceLocationAllocator;
 
 use crate::Preprocessing;
 use crate::Proof;
+use crate::SegmentProof;
 use crate::components::Components;
 use crate::errors::VerificationError;
-use crate::relations::{INTERACTION_POW_BITS, Relations};
+use crate::poseidon2_precompile::replay_poseidon2_precompile;
+use crate::precompile::{bind_joint_interaction, verify_joint_interaction_in_channel};
+use crate::relations::Relations;
 
-/// Replay the claim phase of the Fiat-Shamir transcript: mix public data,
-/// commit the preprocessed/main/interaction trees, check the interaction
-/// proof of work, and draw the LogUp relations.
-///
-/// Returns the channel and commitment scheme advanced to the state right
-/// before `stwo::core::verifier::verify` takes over (composition commitment
-/// and OODS draws). Shared by host verification and the recursion transcript
-/// replay (`crate::recursion`), so the protocol prefix has a single
-/// implementation.
-pub(crate) fn replay_claim_phase<MC: MerkleChannel>(
+/// Replays the VM transcript through its main commitment.
+fn replay_vm_main<MC: MerkleChannel>(
     proof: &Proof<MC::H>,
     config: PcsConfig,
     preprocessing: &Preprocessing<MC::H>,
-) -> Result<(MC::C, CommitmentSchemeVerifier<MC>, Relations), VerificationError> {
+) -> Result<(MC::C, CommitmentSchemeVerifier<MC>), VerificationError> {
+    // Preprocessing defines trusted lookup columns, so its commitment must not come from the proof.
+    let proof_preprocessing_root = proof
+        .stark_proof
+        .commitments
+        .first()
+        .ok_or(VerificationError::MissingProofPreprocessingCommitment)?;
+    let verifier_preprocessing_root = preprocessing
+        .commitment_root()
+        .ok_or(VerificationError::MissingVerifierPreprocessingCommitment)?;
+    if *proof_preprocessing_root != verifier_preprocessing_root {
+        return Err(VerificationError::PreprocessingCommitmentMismatch);
+    }
+
     let mut channel = MC::C::default();
     let mut commitment_scheme = CommitmentSchemeVerifier::<MC>::new(config);
 
@@ -34,48 +42,27 @@ pub(crate) fn replay_claim_phase<MC: MerkleChannel>(
     proof.public_data.mix_into(&mut channel);
 
     // Preprocessed trace — use pre-computed log sizes from preprocessing.
-    let mut commitment_index = 0usize;
-    {
-        let commitments = &proof.stark_proof.commitments;
-        commitment_scheme.commit(
-            commitments[commitment_index],
-            &preprocessing.log_sizes,
-            &mut channel,
-        );
-        commitment_index += 1;
-
-        // Main execution trace.
-        let main_log_sizes = proof.claim.main_trace_log_sizes();
-        commitment_scheme.commit(commitments[commitment_index], &main_log_sizes, &mut channel);
-        commitment_index += 1;
-    }
+    let commitments = &proof.stark_proof.commitments;
+    let preprocessing_root = commitments
+        .first()
+        .ok_or(VerificationError::MissingProofPreprocessingCommitment)?;
+    let main_root = commitments.get(1).ok_or_else(|| {
+        stwo::core::verifier::VerificationError::InvalidStructure(
+            "VM proof has no main commitment".to_string(),
+        )
+    })?;
+    commitment_scheme.commit(*preprocessing_root, &preprocessing.log_sizes, &mut channel);
+    commitment_scheme.commit(
+        *main_root,
+        &proof.claim.main_trace_log_sizes(),
+        &mut channel,
+    );
     proof.claim.mix_into(&mut channel);
-
-    // Interaction proof of work.
-    if !channel.verify_pow_nonce(INTERACTION_POW_BITS, proof.interaction_pow) {
-        return Err(VerificationError::InteractionProofOfWork);
-    }
-    channel.mix_u64(proof.interaction_pow);
-
-    // Draw lookup elements.
-    let relations = Relations::draw(&mut channel);
-
-    // Mix interaction claim and commit interaction trace.
-    proof.interaction_claim.mix_into(&mut channel);
-    if !proof.interaction_claim.log_sizes.is_empty() {
-        let commitments = &proof.stark_proof.commitments;
-        commitment_scheme.commit(
-            commitments[commitment_index],
-            &proof.interaction_claim.log_sizes,
-            &mut channel,
-        );
-    }
-
-    Ok((channel, commitment_scheme, relations))
+    Ok((channel, commitment_scheme))
 }
 
 pub fn verify_rv32im(
-    proof: Proof<Blake2sMerkleHasher>,
+    proof: SegmentProof<Blake2sMerkleHasher>,
     config: PcsConfig,
     preprocessing: &Preprocessing,
 ) -> Result<(), VerificationError> {
@@ -84,18 +71,46 @@ pub fn verify_rv32im(
 
 /// Verify an RV32IM proof with any Merkle channel.
 pub fn verify_rv32im_with_channel<MC: MerkleChannel>(
-    proof: Proof<MC::H>,
+    proof: SegmentProof<MC::H>,
     config: PcsConfig,
     preprocessing: &Preprocessing<MC::H>,
 ) -> Result<(), VerificationError> {
-    let (mut channel, mut commitment_scheme, relations) =
-        replay_claim_phase::<MC>(&proof, config, preprocessing)?;
+    let SegmentProof {
+        vm,
+        poseidon2,
+        joint_interaction,
+    } = proof;
+    let (mut vm_channel, mut vm_commitment_scheme) =
+        replay_vm_main::<MC>(&vm, config, preprocessing)?;
+    let vm_seed = vm_channel.draw_secure_felt();
+    let (poseidon2_seed, mut poseidon2_verifier) =
+        replay_poseidon2_precompile::<MC>(poseidon2, config)?;
+    let seeds = [vm_seed, poseidon2_seed];
+    verify_joint_interaction_in_channel(&mut vm_channel, seeds, joint_interaction, true)?;
+    let relations = Relations::draw(&mut vm_channel);
+    bind_joint_interaction(&mut poseidon2_verifier.channel, seeds, joint_interaction);
 
-    // Verify LogUp sum (components + public data).
-    let total_sum =
-        proof.interaction_claim.claimed_sum.total() + proof.public_data.logup_sum(&relations);
-    if !total_sum.is_zero() {
-        return Err(VerificationError::InvalidLogupSum);
+    let shared_relation_sum =
+        vm.interaction_claim.claimed_sum.total() + vm.public_data.logup_sum(&relations);
+    if shared_relation_sum != vm.interaction_claim.shared_relation_sum {
+        return Err(VerificationError::InvalidSharedRelationClaim);
+    }
+    if !(shared_relation_sum + poseidon2_verifier.claimed_sum()).is_zero() {
+        return Err(VerificationError::SharedRelationMismatch);
+    }
+
+    vm.interaction_claim.mix_into(&mut vm_channel);
+    if !vm.interaction_claim.log_sizes.is_empty() {
+        let interaction_root = vm.stark_proof.commitments.get(2).ok_or_else(|| {
+            stwo::core::verifier::VerificationError::InvalidStructure(
+                "VM proof has no interaction commitment".to_string(),
+            )
+        })?;
+        vm_commitment_scheme.commit(
+            *interaction_root,
+            &vm.interaction_claim.log_sizes,
+            &mut vm_channel,
+        );
     }
 
     // Verify STARK proof.
@@ -103,17 +118,20 @@ pub fn verify_rv32im_with_channel<MC: MerkleChannel>(
     let mut location_allocator =
         TraceLocationAllocator::new_with_preprocessed_columns(&preprocessed_ids);
     let components = Components::new(
-        &proof.claim,
+        &vm.claim,
         &mut location_allocator,
-        relations,
-        &proof.interaction_claim.claimed_sum,
+        relations.clone(),
+        &vm.interaction_claim.claimed_sum,
     );
 
     verify(
         &components.verifiers(),
-        &mut channel,
-        &mut commitment_scheme,
-        proof.stark_proof,
+        &mut vm_channel,
+        &mut vm_commitment_scheme,
+        vm.stark_proof,
     )
-    .map_err(VerificationError::from)
+    .map_err(VerificationError::from)?;
+    poseidon2_verifier
+        .verify_bound(seeds, relations)
+        .map_err(VerificationError::from)
 }

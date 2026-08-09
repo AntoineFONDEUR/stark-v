@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "crates/air",
   "crates/bench-cli",
+  "crates/continuation",
   "crates/debug-utils",
   "crates/prover",
   "crates/recursion",
@@ -33,22 +34,18 @@ stwo-types = { path = "external/stwo/crates/stwo-types", default-features = fals
 blake2 = { version = "0.10.6", default-features = false }
 blake3 = { version = "1.5.0", default-features = false }
 bytemuck = { version = "1.14.3", default-features = false }
-ctor = { version = "0.2" }
 divan = "0.1.21"
 educe = "0.5.0"
 hashbrown = { version = ">=0.15.2", features = ["serde"] }
 hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
 itertools = "0.13.0"
-mimalloc = { version = "*", features = ["v3"] }
 num-traits = "0.2.19"
-peak_alloc = { version = "0.2" }
 rayon = "1.10.0"
 serde_json = "1.0.132"
-smalloc = { package = "smmalloc", version = "7.0.1", git = "https://github.com/zooko/smalloc" }
 std-shims = { path = "external/stwo/crates/std-shims", default-features = false }
 test-log = { version = "0.2.15", features = ["trace"] }
-tikv-jemallocator = "0.6.1"
 rand = { version = "0.8.5", default-features = false, features = ["small_rng"] }
+rstest = "0.26.1"
 
 # CLI
 clap = { version = "4.5", features = ["derive"] }
@@ -84,6 +81,7 @@ syn = { version = "2.0", features = ["full", "visit-mut"] }
 # Internal crates
 air = { path = "crates/air" }
 debug-utils = { path = "crates/debug-utils" }
+continuation = { path = "crates/continuation" }
 guest-lib = { path = "guest/guest-lib" }
 prover = { path = "crates/prover" }
 recursion = { path = "crates/recursion" }

@@ -22,4 +22,5 @@ stwo-macros.workspace = true
 guest-lib = { path = "../../guest/guest-lib" }
 postcard.workspace = true
 prover = { path = "../prover" }
+rstest.workspace = true
 serde.workspace = true

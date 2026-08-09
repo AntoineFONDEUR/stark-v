@@ -27,11 +27,10 @@ fn to_pascal_case(s: &str) -> String {
 struct ComponentEntry {
     name: Ident,
     module: Path,
-    /// Bare entries get their whole component module (air + witness)
-    /// generated from the table's `define_trace_tables!` declaration;
-    /// `name: module` entries point at a hand-written module (the escape
-    /// hatch for AIRs the table DSL cannot express, e.g. the unrolled
-    /// Poseidon2 permutation rounds).
+    /// Bare entries get their whole component module (AIR + witness)
+    /// generated from the table's `define_air!` declaration.
+    /// `name: module` entries reuse a component generated through the AIR DSL
+    /// in its owning crate.
     generated: bool,
 }
 
@@ -67,6 +66,7 @@ struct ComponentList {
 
 struct ComponentsInput {
     trace: Vec<ComponentEntry>,
+    detached: Vec<Ident>,
     lookup: Vec<Ident>,
 }
 
@@ -109,7 +109,17 @@ impl Parse for ComponentsInput {
 
         input.parse::<Token![,]>()?;
 
-        let lookup_label: Ident = input.parse()?;
+        let next_label: Ident = input.parse()?;
+        let (detached, lookup_label) = if next_label == "detached" {
+            input.parse::<Token![:]>()?;
+            let detached_content;
+            braced!(detached_content in input);
+            let IdentList { idents } = detached_content.parse()?;
+            input.parse::<Token![,]>()?;
+            (idents, input.parse()?)
+        } else {
+            (Vec::new(), next_label)
+        };
         if lookup_label != "lookup" {
             return Err(syn::Error::new_spanned(
                 lookup_label,
@@ -122,15 +132,23 @@ impl Parse for ComponentsInput {
         let IdentList { idents: lookup } = lookup_content.parse()?;
         let _ = input.parse::<Token![,]>();
 
-        Ok(Self { trace, lookup })
+        Ok(Self {
+            trace,
+            detached,
+            lookup,
+        })
     }
 }
 
 pub fn components(input: TokenStream) -> TokenStream {
-    let ComponentsInput { trace, lookup } = syn::parse_macro_input!(input as ComponentsInput);
+    let ComponentsInput {
+        trace,
+        detached,
+        lookup,
+    } = syn::parse_macro_input!(input as ComponentsInput);
     let lookup_components = render_lookup_components(&lookup);
     let trace_components = render_trace_components(&trace);
-    let components = render_components(trace, lookup);
+    let components = render_components(trace, detached, lookup);
     quote! {
         pub mod lookups {
             #lookup_components
@@ -152,6 +170,7 @@ fn render_trace_components(entries: &[ComponentEntry]) -> TokenStream2 {
         let name = &entry.name;
         let columns_type = format_ident!("{}Columns", to_pascal_case(&name.to_string()));
         let lookups_macro = format_ident!("{}_lookups", name);
+        let dynamic_lookups_macro = format_ident!("{}_dynamic_lookups", name);
         let interaction_macro = format_ident!("{}_interaction", name);
         let register_macro = format_ident!("{}_register_multiplicities", name);
         let doc = format!(
@@ -161,6 +180,9 @@ fn render_trace_components(entries: &[ComponentEntry]) -> TokenStream2 {
             #[doc = #doc]
             pub mod #name {
                 pub mod air {
+                    use air::relation_eval::{
+                        DynamicRelationEvalAtRow, DynamicRelationFrameworkEval,
+                    };
                     use stwo_constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval};
 
                     use crate::relations::Relations;
@@ -189,6 +211,20 @@ fn render_trace_components(entries: &[ComponentEntry]) -> TokenStream2 {
                                 eval.add_constraint(constraint);
                             }
                             air::#lookups_macro!(eval, cols, self.relations);
+                            eval
+                        }
+                    }
+
+                    impl DynamicRelationFrameworkEval for Eval {
+                        fn evaluate_dynamic_relations<E: DynamicRelationEvalAtRow>(
+                            &self,
+                            mut eval: E,
+                        ) -> E {
+                            let cols = #columns_type::from_eval(&mut eval);
+                            for constraint in cols.constraints() {
+                                eval.add_constraint(constraint);
+                            }
+                            air::#dynamic_lookups_macro!(eval, cols);
                             eval
                         }
                     }
@@ -264,10 +300,29 @@ fn render_trace_components(entries: &[ComponentEntry]) -> TokenStream2 {
             }
         }
     });
-    quote! { #(#modules)* }
+    // Override entries (`name: module`) don't generate a module; alias the
+    // pointed-at module as `#name` so `crate::components::#name::{air,witness}`
+    // resolves uniformly (used by the e2e test harness and trace orchestration).
+    let aliases = entries
+        .iter()
+        .filter(|entry| !entry.generated)
+        .map(|entry| {
+            let name = &entry.name;
+            let module = &entry.module;
+            quote! { pub use #module as #name; }
+        });
+
+    quote! {
+        #(#modules)*
+        #(#aliases)*
+    }
 }
 
-fn render_components(opcodes: Vec<ComponentEntry>, lookups: Vec<Ident>) -> TokenStream2 {
+fn render_components(
+    opcodes: Vec<ComponentEntry>,
+    detached: Vec<Ident>,
+    lookups: Vec<Ident>,
+) -> TokenStream2 {
     // Generate Traces struct fields
     let traces_fields = opcodes.iter().map(|component| {
         let op = &component.name;
@@ -284,6 +339,11 @@ fn render_components(opcodes: Vec<ComponentEntry>, lookups: Vec<Ident>) -> Token
         let op = &component.name;
         quote! {
             #op: _,
+        }
+    });
+    let detached_trace_table_coverage_fields = detached.iter().map(|table| {
+        quote! {
+            #table: _,
         }
     });
 
@@ -417,6 +477,31 @@ fn render_components(opcodes: Vec<ComponentEntry>, lookups: Vec<Ident>) -> Token
         }
     });
 
+    // Component-level claims are encoded once in the manifest. Keep their
+    // positional representation generated from the same order used by
+    // `Components::new`, `verifiers`, and the composition visitor.
+    let component_count = opcodes.len() + lookups.len();
+    let component_names = opcodes
+        .iter()
+        .map(|component| &component.name)
+        .chain(lookups.iter());
+    let claim_from_component_log_sizes = opcodes.iter().enumerate().map(|(index, component)| {
+        let op = &component.name;
+        quote! { #op: log_sizes[#index], }
+    });
+    let lookup_claim_from_component_log_sizes =
+        lookups.iter().enumerate().map(|(lookup_index, lookup)| {
+            let index = opcodes.len() + lookup_index;
+            quote! { #lookup: log_sizes[#index], }
+        });
+    let claim_component_log_sizes = opcodes.iter().map(|component| {
+        let op = &component.name;
+        quote! { self.#op, }
+    });
+    let lookup_claim_component_log_sizes = lookups.iter().map(|lookup| {
+        quote! { self.#lookup, }
+    });
+
     // Generate ClaimedSum fields
     let claimed_sum_fields = opcodes.iter().map(|component| {
         let op = &component.name;
@@ -448,6 +533,22 @@ fn render_components(opcodes: Vec<ComponentEntry>, lookups: Vec<Ident>) -> Token
         quote! {
             channel.mix_felts(&[self.#lookup]);
         }
+    });
+    let claimed_sum_from_component_values = opcodes.iter().enumerate().map(|(index, component)| {
+        let op = &component.name;
+        quote! { #op: values[#index], }
+    });
+    let lookup_claimed_sum_from_component_values =
+        lookups.iter().enumerate().map(|(lookup_index, lookup)| {
+            let index = opcodes.len() + lookup_index;
+            quote! { #lookup: values[#index], }
+        });
+    let claimed_sum_component_values = opcodes.iter().map(|component| {
+        let op = &component.name;
+        quote! { self.#op, }
+    });
+    let lookup_claimed_sum_component_values = lookups.iter().map(|lookup| {
+        quote! { self.#lookup, }
     });
 
     // Generate Components struct fields
@@ -496,6 +597,47 @@ fn render_components(opcodes: Vec<ComponentEntry>, lookups: Vec<Ident>) -> Token
     let lookup_gen_trace_fields = lookups.iter().map(|lookup| {
         quote! { #lookup: counters.#lookup.into_trace(), }
     });
+    let fixed_trace_locals: Vec<_> = opcodes
+        .iter()
+        .enumerate()
+        .map(|(index, component)| {
+            let op = &component.name;
+            let op_str = op.to_string();
+            quote! {
+                let rows = tracer.#op.len();
+                let #op = tracer.#op
+                    .into_witness_with_log_size(log_sizes[#index])
+                    .ok_or(FixedTraceError::ComponentCapacityExceeded {
+                        component: #op_str,
+                        rows,
+                        log_size: log_sizes[#index],
+                    })?;
+            }
+        })
+        .collect();
+    let fixed_lookup_locals: Vec<_> = lookups
+        .iter()
+        .enumerate()
+        .map(|(lookup_index, lookup)| {
+            let index = opcodes.len() + lookup_index;
+            let lookup_str = lookup.to_string();
+            quote! {
+                let #lookup = counters.#lookup.into_trace();
+                let actual = #lookup
+                    .first()
+                    .map(|column| column.domain.log_size())
+                    .unwrap_or(0);
+                if actual != log_sizes[#index] {
+                    return Err(FixedTraceError::LookupLogSizeMismatch {
+                        component: #lookup_str,
+                        expected: log_sizes[#index],
+                        actual,
+                    });
+                }
+            }
+        })
+        .collect();
+    let fixed_lookup_fields = lookups.iter().map(|lookup| quote! { #lookup, });
     let gen_trace_function = quote! {
         pub fn gen_trace(
             tracer: air::trace::Tracer,
@@ -508,6 +650,22 @@ fn render_components(opcodes: Vec<ComponentEntry>, lookups: Vec<Ident>) -> Token
                 #(#gen_trace_fields)*
                 #(#lookup_gen_trace_fields)*
             }
+        }
+
+        /// Generates execution traces at one verifier-owned component layout.
+        pub fn gen_trace_at_log_sizes(
+            tracer: air::trace::Tracer,
+            log_sizes: [u32; COMPONENT_COUNT],
+        ) -> Result<Traces, FixedTraceError> {
+            let mut counters = crate::relations::Counters::new();
+            #(#fixed_trace_locals)*
+            #(#register_multiplicities_body)*
+            #(#fixed_lookup_locals)*
+
+            Ok(Traces {
+                #(#gen_trace_fields)*
+                #(#fixed_lookup_fields)*
+            })
         }
     };
 
@@ -598,6 +756,13 @@ fn render_components(opcodes: Vec<ComponentEntry>, lookups: Vec<Ident>) -> Token
         quote! { visitor.visit(&self.#op, claimed_sum.#op); }
     });
     let lookup_visit_body = lookups.iter().map(|lookup| {
+        quote! { visitor.visit(&self.#lookup, claimed_sum.#lookup); }
+    });
+    let dynamic_visit_body = opcodes.iter().map(|component| {
+        let op = &component.name;
+        quote! { visitor.visit(&self.#op, claimed_sum.#op); }
+    });
+    let dynamic_lookup_visit_body = lookups.iter().map(|lookup| {
         quote! { visitor.visit(&self.#lookup, claimed_sum.#lookup); }
     });
     let lookup_verifiers = lookups.iter().map(|lookup| {
@@ -742,6 +907,7 @@ fn render_components(opcodes: Vec<ComponentEntry>, lookups: Vec<Ident>) -> Token
                 mem_initial: _,
                 program_reads: _,
                 #(#trace_table_coverage_fields)*
+                #(#detached_trace_table_coverage_fields)*
             } = tracer;
         }
 
@@ -793,6 +959,44 @@ fn render_components(opcodes: Vec<ComponentEntry>, lookups: Vec<Ident>) -> Token
             #(#lookup_claim_fields)*
         }
 
+        /// Component order used by claims, claimed sums, and composition evaluation.
+        pub const COMPONENT_COUNT: usize = #component_count;
+        pub const COMPONENT_NAMES: [&str; COMPONENT_COUNT] = [
+            #(stringify!(#component_names),)*
+        ];
+
+        /// A segment cannot enter a fixed proof profile with different table geometry.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum FixedTraceError {
+            ComponentCapacityExceeded {
+                component: &'static str,
+                rows: usize,
+                log_size: u32,
+            },
+            LookupLogSizeMismatch {
+                component: &'static str,
+                expected: u32,
+                actual: u32,
+            },
+        }
+
+        impl core::fmt::Display for FixedTraceError {
+            fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                match self {
+                    Self::ComponentCapacityExceeded { component, rows, log_size } => write!(
+                        formatter,
+                        "component {component} has {rows} rows, exceeding fixed log size {log_size}",
+                    ),
+                    Self::LookupLogSizeMismatch { component, expected, actual } => write!(
+                        formatter,
+                        "lookup component {component} has log size {actual}, expected {expected}",
+                    ),
+                }
+            }
+        }
+
+        impl std::error::Error for FixedTraceError {}
+
         impl From<&Traces> for Claim {
             fn from(traces: &Traces) -> Self {
                 Self {
@@ -803,6 +1007,20 @@ fn render_components(opcodes: Vec<ComponentEntry>, lookups: Vec<Ident>) -> Token
         }
 
         impl Claim {
+            pub fn from_component_log_sizes(log_sizes: [u32; COMPONENT_COUNT]) -> Self {
+                Self {
+                    #(#claim_from_component_log_sizes)*
+                    #(#lookup_claim_from_component_log_sizes)*
+                }
+            }
+
+            pub fn component_log_sizes(&self) -> [u32; COMPONENT_COUNT] {
+                [
+                    #(#claim_component_log_sizes)*
+                    #(#lookup_claim_component_log_sizes)*
+                ]
+            }
+
             pub fn mix_into(&self, channel: &mut impl stwo::core::channel::Channel) {
                 #(#claim_mix_into_body)*
                 #(#lookup_claim_mix_into_body)*
@@ -830,6 +1048,14 @@ fn render_components(opcodes: Vec<ComponentEntry>, lookups: Vec<Ident>) -> Token
             );
         }
 
+        /// Typed visitor for components that expose verifier-supplied relation coefficients.
+        pub trait DynamicRelationComponentVisitor {
+            fn visit<E>(&mut self, component: &stwo_constraint_framework::FrameworkComponent<E>, claimed_sum: QM31)
+            where
+                E: stwo_constraint_framework::FrameworkEval
+                    + air::relation_eval::DynamicRelationFrameworkEval;
+        }
+
         #[derive(Clone, Debug, Serialize, Deserialize)]
         pub struct ClaimedSum {
             #(#claimed_sum_fields)*
@@ -837,6 +1063,20 @@ fn render_components(opcodes: Vec<ComponentEntry>, lookups: Vec<Ident>) -> Token
         }
 
         impl ClaimedSum {
+            pub fn from_component_values(values: [QM31; COMPONENT_COUNT]) -> Self {
+                Self {
+                    #(#claimed_sum_from_component_values)*
+                    #(#lookup_claimed_sum_from_component_values)*
+                }
+            }
+
+            pub fn component_values(&self) -> [QM31; COMPONENT_COUNT] {
+                [
+                    #(#claimed_sum_component_values)*
+                    #(#lookup_claimed_sum_component_values)*
+                ]
+            }
+
             pub fn sum(&self) -> QM31 {
                 use num_traits::Zero;
                 let mut total = QM31::zero();
@@ -913,6 +1153,16 @@ fn render_components(opcodes: Vec<ComponentEntry>, lookups: Vec<Ident>) -> Token
                 #(#lookup_visit_body)*
             }
 
+            /// Visit every component through its dynamic-relation evaluator in composition order.
+            pub fn visit_dynamic_relation_components<V: DynamicRelationComponentVisitor>(
+                &self,
+                claimed_sum: &ClaimedSum,
+                visitor: &mut V,
+            ) {
+                #(#dynamic_visit_body)*
+                #(#dynamic_lookup_visit_body)*
+            }
+
             pub fn relation_entries(
                 &self,
                 trace: &stwo::core::pcs::TreeVec<Vec<&Vec<BaseField>>>,
@@ -957,6 +1207,9 @@ fn render_lookup_components(tables: &[Ident]) -> TokenStream2 {
                 //! Lookup multiplicity component for a preprocessed table.
 
                 pub mod air {
+                    use air::relation_eval::{
+                        DynamicRelationEvalAtRow, DynamicRelationFrameworkEval,
+                    };
                     use stwo_constraint_framework::{
                         EvalAtRow, FrameworkComponent, FrameworkEval, RelationEntry,
                     };
@@ -994,6 +1247,29 @@ fn render_lookup_components(tables: &[Ident]) -> TokenStream2 {
                                 -E::EF::from(multiplicity),
                                 &preprocessed_cols,
                             ));
+
+                            eval.finalize_logup_in_pairs();
+                            eval
+                        }
+                    }
+
+                    impl DynamicRelationFrameworkEval for Eval {
+                        fn evaluate_dynamic_relations<E: DynamicRelationEvalAtRow>(
+                            &self,
+                            mut eval: E,
+                        ) -> E {
+                            let multiplicity = eval.next_trace_mask();
+                            let column_ids = crate::preprocessed::#table::Table::column_ids();
+                            let preprocessed_cols: Vec<E::F> = column_ids
+                                .iter()
+                                .map(|id| eval.get_preprocessed_column(id.clone()))
+                                .collect();
+
+                            eval.add_to_named_relation(
+                                stringify!(#table),
+                                -E::EF::from(multiplicity),
+                                &preprocessed_cols,
+                            );
 
                             eval.finalize_logup_in_pairs();
                             eval

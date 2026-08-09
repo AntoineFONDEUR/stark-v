@@ -23,6 +23,25 @@
 //! the system. The witness side is the same program run concretely: the
 //! generated `call_<fn>` executes the lowered cells over `BaseField`
 //! values, recursively activates callees, and pushes the rows.
+//!
+//! With `vm_access: { state: Trait, tracer: Type },`, `read_reg`,
+//! `write_reg`, `read_mem`, `write_mem`, `read_word`, and `write_word`
+//! statements resolve architectural state on the witness path while generating
+//! the standard memory-access and clock-range relations in the same lowered
+//! frame. The word forms take an explicit address space. Memory operations
+//! address aligned 32-bit words; byte and half-word lane semantics stay in felt
+//! code.
+//! `split_m31(value)` commits the canonical four-byte representation of a felt
+//! and binds it through the standard range relations. `bitand`, `bitor`, and
+//! `bitxor` commit one byte result and bind it through the bitwise relation.
+//! `binary_u32(lhs, rhs, active, add, sub, and, or, xor)` commits one shared
+//! word result and binds the selected arithmetic or bitwise operation in the
+//! same frame. Its selectors are boolean and sum to the explicit activity
+//! value.
+//! `add_u32` and `sub_u32` commit wrapping word results plus their terminal
+//! carry or borrow and constrain the byte chain in the same frame.
+//! `divrem_u32` commits quotient, remainder, and exceptional-case witnesses;
+//! the felt body binds them through word identities and range relations.
 
 use std::collections::HashMap;
 
@@ -31,11 +50,11 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::{ToTokens, format_ident, quote};
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
-use syn::{Expr, Ident, Token, braced, bracketed, parenthesized, parse_macro_input};
+use syn::{Expr, Ident, LitStr, Path, Token, braced, bracketed, parenthesized, parse_macro_input};
 
 use crate::trace_tables::{
-    LookupsDef, OpcodeDef, column_struct_name, const_eval, generate_prover_columns, generate_table,
-    table_name,
+    LookupsDef, OpcodeDef, column_struct_name, const_eval, count_opcode_flags,
+    generate_prover_columns, generate_table, table_name,
 };
 
 fn to_pascal_case(s: &str) -> String {
@@ -74,6 +93,68 @@ enum FnStmt {
         end: usize,
         body: Vec<FnStmt>,
     },
+    /// `emit r(args);` / `consume r(args);` — a row's contribution to an
+    /// externally declared relation `r` (declared `relation r(arity);` at
+    /// the top of the macro). `emit` adds `+mult / combine(args)`, `consume`
+    /// adds `-mult / ...`, where `mult` defaults to `enabler` but may be
+    /// overridden by `emit(expr) r(args)` / `consume(expr) r(args)` for
+    /// flag-gated lookups (e.g. `consume(is_bitwise) bitwise(...)`). The
+    /// relation balances across the whole proof, like the per-function io
+    /// activation tuples.
+    Relation {
+        relation: Ident,
+        args: Vec<Expr>,
+        emit: bool,
+        /// Multiplicity expression; `None` means `enabler`.
+        mult: Option<Expr>,
+    },
+    /// `hint name = expr;` — a prover-chosen committed column, free in the
+    /// AIR (the body constrains it with `assert`s), filled by evaluating
+    /// `expr` concretely. Opcodes use this for witness columns that are not
+    /// in-row derivations (carries, sign decompositions, inverse markers).
+    Hint { name: Ident, expr: Expr },
+    /// `constrain expr;` — asserts `expr == 0` **without** the implicit
+    /// enabler gate that `assert` adds. For constraints already gated by an
+    /// opcode flag (e.g. `flag * carry * (1 - carry)`), where multiplying by
+    /// enabler too would breach the degree budget; the flag zeroes the
+    /// constraint on padding rows.
+    Constrain { expr: Expr },
+    /// A register or aligned-memory access resolved by the witness VM while
+    /// compiling to the standard memory and clock-range relations.
+    Access(Box<AccessStmt>),
+}
+
+struct AccessStmt {
+    kind: AccessKind,
+    name: Ident,
+    clock: Expr,
+    addr_space: Option<Expr>,
+    addr: Expr,
+    next: Option<Expr>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AccessKind {
+    ReadReg,
+    WriteReg,
+    ReadMem,
+    WriteMem,
+    ReadWord,
+    WriteWord,
+}
+
+impl AccessKind {
+    fn is_write(self) -> bool {
+        matches!(self, Self::WriteReg | Self::WriteMem | Self::WriteWord)
+    }
+
+    fn is_register(self) -> bool {
+        matches!(self, Self::ReadReg | Self::WriteReg)
+    }
+
+    fn is_dynamic(self) -> bool {
+        matches!(self, Self::ReadWord | Self::WriteWord)
+    }
 }
 
 struct AirFn {
@@ -96,6 +177,38 @@ struct AirFnsInput {
     /// When set with `embedded`, also emit the narrow/wide/io LogUp component
     /// adapter wired to `crate::relations::Relations`.
     embedded_component: bool,
+    /// Whether the generated component enforces booleanity of its committed
+    /// enabler column. Trusted schedules can disable this when an explicit
+    /// equality binds the enabler to a boolean preprocessed row mask.
+    embedded_enabler_boolean: bool,
+    /// Relation bundle used by a generated embedded component. The default is
+    /// the zkVM prover bundle; recursion supplies a bundle containing the exact
+    /// shared relation instances used by its universal registry.
+    embedded_relations: Path,
+    /// Number of adjacent LogUp fractions combined in one interaction column
+    /// for generated embedded components.
+    logup_batch: usize,
+    /// Number of trailing relation entries kept in singleton LogUp columns.
+    /// This preserves pair batching for linear relations without multiplying
+    /// higher-degree denominators together.
+    logup_unbatched_tail: usize,
+    /// Whether the embedded component also exposes named-relation evaluation
+    /// for compilation into another AIR.
+    embedded_dynamic_component: bool,
+    /// Trusted preprocessed columns used instead of committed trace columns by
+    /// a generated embedded component. Each name identifies a function
+    /// parameter and each string is its framework preprocessed-column ID.
+    embedded_preprocessed: Vec<(Ident, LitStr)>,
+    /// Per-proof field constants supplied to both the generated AIR and its
+    /// interaction witness. These parameters are not committed columns.
+    embedded_params: Vec<Ident>,
+    /// Optional witness VM integration used by generated access statements.
+    vm_access: Option<(Path, Path)>,
+    /// Externally declared relations `relation name(arity);`, referenced by
+    /// `emit`/`consume` in bodies. Each becomes a `relation!` type and an
+    /// `AirFnRelations` field, so two function systems can share one
+    /// relation by drawing it once and passing it in.
+    relations: Vec<(Ident, usize)>,
     fns: Vec<AirFn>,
 }
 
@@ -109,12 +222,7 @@ impl Parse for AirFnsInput {
         let lit: syn::LitInt = input.parse()?;
         let max_degree: usize = lit.base10_parse()?;
         if !(2..=3).contains(&max_degree) {
-            // The component shells use max_constraint_log_degree_bound =
-            // log_size + 1, which admits constraint degree 3.
-            return Err(syn::Error::new(
-                lit.span(),
-                "max_degree must be 2 or 3 (the component degree bound admits 3)",
-            ));
+            return Err(syn::Error::new(lit.span(), "max_degree must be 2 or 3"));
         }
         input.parse::<Token![,]>()?;
 
@@ -149,6 +257,182 @@ impl Parse for AirFnsInput {
             false
         };
 
+        let embedded_enabler_boolean = if input
+            .cursor()
+            .ident()
+            .is_some_and(|(ident, _)| ident == "embedded_enabler_boolean")
+        {
+            input.parse::<Ident>()?;
+            input.parse::<Token![:]>()?;
+            let lit: syn::LitBool = input.parse()?;
+            input.parse::<Token![,]>()?;
+            lit.value
+        } else {
+            true
+        };
+
+        let embedded_relations = if input
+            .cursor()
+            .ident()
+            .is_some_and(|(ident, _)| ident == "embedded_relations")
+        {
+            input.parse::<Ident>()?;
+            input.parse::<Token![:]>()?;
+            let path = input.parse::<Path>()?;
+            input.parse::<Token![,]>()?;
+            path
+        } else {
+            syn::parse_quote!(crate::relations::Relations)
+        };
+
+        let logup_batch = if input
+            .cursor()
+            .ident()
+            .is_some_and(|(ident, _)| ident == "logup_batch")
+        {
+            input.parse::<Ident>()?;
+            input.parse::<Token![:]>()?;
+            let lit = input.parse::<syn::LitInt>()?;
+            input.parse::<Token![,]>()?;
+            let batch = lit.base10_parse::<usize>()?;
+            if !matches!(batch, 1 | 2) {
+                return Err(syn::Error::new(
+                    lit.span(),
+                    "logup_batch must be 1 or 2 under the supported degree bound",
+                ));
+            }
+            batch
+        } else {
+            1
+        };
+
+        let logup_unbatched_tail = if input
+            .cursor()
+            .ident()
+            .is_some_and(|(ident, _)| ident == "logup_unbatched_tail")
+        {
+            input.parse::<Ident>()?;
+            input.parse::<Token![:]>()?;
+            let lit = input.parse::<syn::LitInt>()?;
+            input.parse::<Token![,]>()?;
+            let tail = lit.base10_parse::<usize>()?;
+            if logup_batch == 1 && tail != 0 {
+                return Err(syn::Error::new(
+                    lit.span(),
+                    "logup_unbatched_tail requires logup_batch: 2",
+                ));
+            }
+            tail
+        } else {
+            0
+        };
+
+        let embedded_dynamic_component = if input
+            .cursor()
+            .ident()
+            .is_some_and(|(ident, _)| ident == "embedded_dynamic_component")
+        {
+            input.parse::<Ident>()?;
+            input.parse::<Token![:]>()?;
+            let lit = input.parse::<syn::LitBool>()?;
+            input.parse::<Token![,]>()?;
+            lit.value
+        } else {
+            false
+        };
+
+        let embedded_preprocessed = if input
+            .cursor()
+            .ident()
+            .is_some_and(|(ident, _)| ident == "embedded_preprocessed")
+        {
+            input.parse::<Ident>()?;
+            input.parse::<Token![:]>()?;
+            let columns_content;
+            braced!(columns_content in input);
+            let mut columns = Vec::new();
+            while !columns_content.is_empty() {
+                let name: Ident = columns_content.parse()?;
+                columns_content.parse::<Token![:]>()?;
+                let id: LitStr = columns_content.parse()?;
+                columns.push((name, id));
+                if columns_content.peek(Token![,]) {
+                    columns_content.parse::<Token![,]>()?;
+                }
+            }
+            input.parse::<Token![,]>()?;
+            columns
+        } else {
+            Vec::new()
+        };
+
+        let embedded_params = if input
+            .cursor()
+            .ident()
+            .is_some_and(|(ident, _)| ident == "embedded_params")
+        {
+            input.parse::<Ident>()?;
+            input.parse::<Token![:]>()?;
+            let params_content;
+            bracketed!(params_content in input);
+            let params: Punctuated<Ident, Token![,]> =
+                params_content.parse_terminated(Ident::parse, Token![,])?;
+            input.parse::<Token![,]>()?;
+            params.into_iter().collect()
+        } else {
+            Vec::new()
+        };
+
+        let vm_access = if input
+            .cursor()
+            .ident()
+            .is_some_and(|(ident, _)| ident == "vm_access")
+        {
+            input.parse::<Ident>()?;
+            input.parse::<Token![:]>()?;
+            let access_content;
+            braced!(access_content in input);
+            let state_key: Ident = access_content.parse()?;
+            if state_key != "state" {
+                return Err(syn::Error::new(state_key.span(), "expected `state: path`"));
+            }
+            access_content.parse::<Token![:]>()?;
+            let state = access_content.parse::<Path>()?;
+            access_content.parse::<Token![,]>()?;
+            let tracer_key: Ident = access_content.parse()?;
+            if tracer_key != "tracer" {
+                return Err(syn::Error::new(
+                    tracer_key.span(),
+                    "expected `tracer: path`",
+                ));
+            }
+            access_content.parse::<Token![:]>()?;
+            let tracer = access_content.parse::<Path>()?;
+            if access_content.peek(Token![,]) {
+                access_content.parse::<Token![,]>()?;
+            }
+            input.parse::<Token![,]>()?;
+            Some((state, tracer))
+        } else {
+            None
+        };
+
+        // Externally declared relations: `relation name(arity);`.
+        let mut relations = Vec::new();
+        while input
+            .cursor()
+            .ident()
+            .is_some_and(|(ident, _)| ident == "relation")
+        {
+            input.parse::<Ident>()?;
+            let name: Ident = input.parse()?;
+            let arity_content;
+            parenthesized!(arity_content in input);
+            let arity: syn::LitInt = arity_content.parse()?;
+            input.parse::<Token![;]>()?;
+            relations.push((name, arity.base10_parse()?));
+        }
+
         let mut fns = Vec::new();
         while !input.is_empty() {
             fns.push(parse_fn(input)?);
@@ -157,6 +441,15 @@ impl Parse for AirFnsInput {
             max_degree,
             embedded,
             embedded_component,
+            embedded_enabler_boolean,
+            embedded_relations,
+            logup_batch,
+            logup_unbatched_tail,
+            embedded_dynamic_component,
+            embedded_preprocessed,
+            embedded_params,
+            vm_access,
+            relations,
             fns,
         })
     }
@@ -297,6 +590,103 @@ fn parse_block(
                 lhs: *binary.left,
                 rhs: *binary.right,
             });
+        } else if input.peek(Ident) && input.cursor().ident().is_some_and(|(i, _)| i == "hint") {
+            input.parse::<Ident>()?;
+            let name: Ident = input.parse()?;
+            input.parse::<Token![=]>()?;
+            let expr: Expr = input.parse()?;
+            input.parse::<Token![;]>()?;
+            body.push(FnStmt::Hint { name, expr });
+        } else if input.peek(Ident)
+            && input
+                .cursor()
+                .ident()
+                .is_some_and(|(i, _)| i == "constrain")
+        {
+            input.parse::<Ident>()?;
+            let expr: Expr = input.parse()?;
+            input.parse::<Token![;]>()?;
+            body.push(FnStmt::Constrain { expr });
+        } else if input.peek(Ident)
+            && input
+                .cursor()
+                .ident()
+                .is_some_and(|(i, _)| i == "emit" || i == "consume")
+        {
+            let keyword: Ident = input.parse()?;
+            let emit = keyword == "emit";
+            // Optional multiplicity: `emit(expr) r(args)` / `consume(expr) r(args)`.
+            let mult = if input.peek(syn::token::Paren) {
+                let mult_content;
+                parenthesized!(mult_content in input);
+                Some(mult_content.parse::<Expr>()?)
+            } else {
+                None
+            };
+            let relation: Ident = input.parse()?;
+            let args_content;
+            parenthesized!(args_content in input);
+            let args: Punctuated<Expr, Token![,]> =
+                args_content.parse_terminated(Expr::parse, Token![,])?;
+            input.parse::<Token![;]>()?;
+            body.push(FnStmt::Relation {
+                relation,
+                args: args.into_iter().collect(),
+                emit,
+                mult,
+            });
+        } else if input.peek(Ident)
+            && input.cursor().ident().is_some_and(|(ident, _)| {
+                matches!(
+                    ident.to_string().as_str(),
+                    "read_reg"
+                        | "write_reg"
+                        | "read_mem"
+                        | "write_mem"
+                        | "read_word"
+                        | "write_word"
+                )
+            })
+        {
+            let keyword: Ident = input.parse()?;
+            let kind = match keyword.to_string().as_str() {
+                "read_reg" => AccessKind::ReadReg,
+                "write_reg" => AccessKind::WriteReg,
+                "read_mem" => AccessKind::ReadMem,
+                "write_mem" => AccessKind::WriteMem,
+                "read_word" => AccessKind::ReadWord,
+                "write_word" => AccessKind::WriteWord,
+                _ => unreachable!("matched access keyword"),
+            };
+            let name: Ident = input.parse()?;
+            let args_content;
+            parenthesized!(args_content in input);
+            let args: Vec<Expr> = args_content
+                .parse_terminated(Expr::parse, Token![,])?
+                .into_iter()
+                .collect();
+            input.parse::<Token![;]>()?;
+            let expected = usize::from(kind.is_dynamic()) + if kind.is_write() { 3 } else { 2 };
+            if args.len() != expected {
+                let signature = if kind.is_dynamic() {
+                    "clock, address space, address[, next limbs]"
+                } else {
+                    "clock, address[, next limbs]"
+                };
+                return Err(syn::Error::new_spanned(
+                    keyword,
+                    format!("access takes {expected} arguments: {signature}"),
+                ));
+            }
+            let address_index = usize::from(kind.is_dynamic()) + 1;
+            body.push(FnStmt::Access(Box::new(AccessStmt {
+                kind,
+                name,
+                clock: args[0].clone(),
+                addr_space: kind.is_dynamic().then(|| args[1].clone()),
+                addr: args[address_index].clone(),
+                next: args.get(address_index + 1).cloned(),
+            })));
         } else if allow_return && input.peek(Token![return]) {
             input.parse::<Token![return]>()?;
             let exprs: Vec<Expr> = if input.peek(syn::token::Paren) {
@@ -319,7 +709,7 @@ fn parse_block(
         } else {
             return Err(syn::Error::new(
                 input.span(),
-                "expected `let`, `assert`, `for`, or `return`",
+                "expected a felt-function statement or `return`",
             ));
         }
     }
@@ -378,6 +768,38 @@ fn substitute_stmt(stmt: &FnStmt, var: &Ident, value: usize) -> FnStmt {
                 .map(|s| substitute_stmt(s, var, value))
                 .collect(),
         },
+        FnStmt::Relation {
+            relation,
+            args,
+            emit,
+            mult,
+        } => FnStmt::Relation {
+            relation: relation.clone(),
+            args: args.iter().map(|a| substitute(a, var, value)).collect(),
+            emit: *emit,
+            mult: mult.as_ref().map(|m| substitute(m, var, value)),
+        },
+        FnStmt::Hint { name, expr } => FnStmt::Hint {
+            name: name.clone(),
+            expr: substitute(expr, var, value),
+        },
+        FnStmt::Constrain { expr } => FnStmt::Constrain {
+            expr: substitute(expr, var, value),
+        },
+        FnStmt::Access(access) => FnStmt::Access(Box::new(AccessStmt {
+            kind: access.kind,
+            name: access.name.clone(),
+            clock: substitute(&access.clock, var, value),
+            addr_space: access
+                .addr_space
+                .as_ref()
+                .map(|expr| substitute(expr, var, value)),
+            addr: substitute(&access.addr, var, value),
+            next: access
+                .next
+                .as_ref()
+                .map(|expr| substitute(expr, var, value)),
+        })),
     }
 }
 
@@ -450,6 +872,85 @@ enum FillStep {
         callee: Ident,
         args: Vec<Ident>,
     },
+    /// Bind a felt to its canonical little-endian byte representation.
+    SplitM31 { value: Expr, limbs: [Ident; 4] },
+    /// Evaluate a byte-level operation whose result is lookup-constrained.
+    Bitwise {
+        kind: BitwiseKind,
+        lhs: Ident,
+        rhs: Ident,
+        output: Ident,
+    },
+    /// Evaluate wrapping 32-bit arithmetic over canonical byte limbs.
+    WordArithmetic {
+        kind: WordArithmeticKind,
+        lhs: [Ident; 4],
+        rhs: [Ident; 4],
+        output: [Ident; 4],
+        carries: [Ident; 4],
+    },
+    /// Evaluate one selected binary word operation into a shared result.
+    SelectedBinaryWord {
+        lhs: [Ident; 4],
+        rhs: [Ident; 4],
+        selectors: [Ident; 5],
+        output: [Ident; 4],
+    },
+    /// Evaluate RV32 signed or unsigned quotient and remainder witnesses.
+    DivRemWord {
+        lhs: [Ident; 4],
+        rhs: [Ident; 4],
+        signed: Ident,
+        quotient: [Ident; 4],
+        remainder: [Ident; 4],
+        zero_divisor: Ident,
+        zero_remainder: Ident,
+        overflow: Ident,
+        divisor_sum_inverse: Ident,
+        remainder_sum_inverse: Ident,
+    },
+    /// Bind the prior word before a write computes its requested next limbs.
+    AccessPrepare {
+        kind: AccessKind,
+        addr_space: Option<Ident>,
+        addr: Ident,
+        prev: [Ident; 4],
+    },
+    /// Apply or observe one architectural access and bind its remaining cells.
+    AccessCommit {
+        kind: AccessKind,
+        addr_space: Option<Ident>,
+        clock: Ident,
+        addr: Ident,
+        prev: [Ident; 4],
+        clock_prev: Ident,
+        next: [Ident; 4],
+        desired: Option<[Ident; 4]>,
+        addr_inverse: Option<Ident>,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum BitwiseKind {
+    And,
+    Or,
+    Xor,
+}
+
+#[derive(Clone, Copy)]
+enum WordArithmeticKind {
+    Add,
+    Sub,
+}
+
+impl BitwiseKind {
+    const fn relation_id(self) -> u32 {
+        match self {
+            Self::And => 0,
+            Self::Or => 1,
+            Self::Xor => 2,
+        }
+    }
 }
 
 struct Lowerer<'a> {
@@ -464,15 +965,26 @@ struct Lowerer<'a> {
     /// Inline (derived) cells: (name, lowered expr), in creation order.
     derived: Vec<(Ident, Expr)>,
     constraints: Vec<Expr>,
+    /// Ungated constraints from `constrain` (added without the enabler gate).
+    raw_constraints: Vec<Expr>,
+    /// Selector cells whose booleanity is owned by an intrinsic.
+    intrinsic_boolean_cells: std::collections::HashSet<String>,
     fill: Vec<FillStep>,
     /// Activations made: (callee, flattened arg cells, flattened ret cells).
     calls: Vec<(Ident, Vec<Ident>, Vec<Ident>)>,
+    /// External relation contributions: (relation, arg cells, emit, mult cell;
+    /// mult `None` means enabler).
+    relation_entries: Vec<(Ident, Vec<Ident>, bool, Option<Ident>)>,
     /// Common-subexpression cache for materialized cells.
     cse: HashMap<String, Ident>,
     /// Flattened signatures of table-backed functions lowered so far.
     arities: &'a HashMap<String, (usize, usize)>,
+    /// Arities of externally declared relations.
+    relation_arities: &'a HashMap<String, usize>,
     inline_fns: &'a HashMap<String, AirFn>,
     fn_name: Ident,
+    vm_access_enabled: bool,
+    materialize_relation_args: bool,
 }
 
 impl Lowerer<'_> {
@@ -667,6 +1179,21 @@ impl Lowerer<'_> {
                     return Ok((expr.clone(), 0));
                 }
                 if let Expr::Path(func) = call.func.as_ref()
+                    && func.path.is_ident("inv")
+                    && call.args.len() == 1
+                {
+                    // inv(c): multiplicative inverse of a constant, folded to
+                    // a field-constant literal at expansion (Fermat). Degree 0.
+                    let value = crate::trace_tables::const_eval(&call.args[0])?;
+                    if value == 0 {
+                        return Err(syn::Error::new_spanned(call, "cannot invert zero"));
+                    }
+                    let inverse =
+                        crate::trace_tables::m31_pow(value, crate::trace_tables::M31_PRIME - 2)
+                            as u32;
+                    return Ok((syn::parse_quote!(#inverse), 0));
+                }
+                if let Expr::Path(func) = call.func.as_ref()
                     && func.path.is_ident("sum")
                     && call.args.len() == 3
                 {
@@ -795,6 +1322,516 @@ impl Lowerer<'_> {
                     let cell = self.register_derived(&base, lowered, degree);
                     elements[position] = Value::Scalar { cell, degree };
                     return Ok(vec![Value::Array(elements)]);
+                }
+                "split_m31" => {
+                    if names.len() != 1 || call.args.len() != 1 {
+                        return Err(syn::Error::new_spanned(
+                            call,
+                            "split_m31 takes one felt and binds one four-limb array",
+                        ));
+                    }
+                    for (relation, arity) in
+                        [("range_check_8_8", 2usize), ("range_check_m31", 2usize)]
+                    {
+                        if self.relation_arities.get(relation) != Some(&arity) {
+                            return Err(syn::Error::new_spanned(
+                                call,
+                                format!("split_m31 requires `relation {relation}({arity});`"),
+                            ));
+                        }
+                    }
+                    let (value, _) = self.lower(&call.args[0], scope, budget)?;
+                    let limbs = std::array::from_fn(|position| {
+                        let base = format_ident!("{}_{}", names[0], position);
+                        let cell = self.register_column(&base);
+                        self.extra_columns.push(cell.clone());
+                        cell
+                    });
+                    let [limb_0, limb_1, limb_2, limb_3] = limbs.clone();
+                    self.constraints.push(syn::parse_quote!(
+                        #limb_0 + 256 * #limb_1 + 65536 * #limb_2
+                            + 16777216 * #limb_3 - (#value)
+                    ));
+                    self.relation_entries.push((
+                        format_ident!("range_check_8_8"),
+                        vec![limb_1.clone(), limb_2.clone()],
+                        false,
+                        None,
+                    ));
+                    self.relation_entries.push((
+                        format_ident!("range_check_m31"),
+                        vec![limb_0.clone(), limb_3.clone()],
+                        false,
+                        None,
+                    ));
+                    self.fill.push(FillStep::SplitM31 {
+                        value,
+                        limbs: limbs.clone(),
+                    });
+                    let elements = limbs
+                        .into_iter()
+                        .map(|cell| Value::Scalar { cell, degree: 1 })
+                        .collect();
+                    return Ok(vec![Value::Array(elements)]);
+                }
+                "binary_u32" => {
+                    if names.len() != 1 || call.args.len() != 8 {
+                        return Err(syn::Error::new_spanned(
+                            call,
+                            "binary_u32 takes two four-limb words, an activity value, then add, sub, and, or, and xor selectors",
+                        ));
+                    }
+                    for (relation, arity) in [("range_check_8_8", 2usize), ("bitwise", 4usize)] {
+                        if self.relation_arities.get(relation) != Some(&arity) {
+                            return Err(syn::Error::new_spanned(
+                                call,
+                                format!("binary_u32 requires `relation {relation}({arity});`"),
+                            ));
+                        }
+                    }
+                    let lhs = expect_word(&call.args[0], scope)?;
+                    let rhs = expect_word(&call.args[1], scope)?;
+                    let active_name = expect_ident(&call.args[2])?;
+                    let Some(active_value) = scope.get(&active_name.to_string()) else {
+                        return Err(syn::Error::new_spanned(
+                            &call.args[2],
+                            "unknown binary_u32 activity value",
+                        ));
+                    };
+                    let (active, active_degree) = active_value.scalar()?;
+                    if active_degree > 1 {
+                        return Err(syn::Error::new_spanned(
+                            &call.args[2],
+                            "binary_u32 activity must be a degree-one scalar",
+                        ));
+                    }
+                    if *active != "enabler" {
+                        let enabler = format_ident!("enabler");
+                        self.raw_constraints
+                            .push(syn::parse_quote!(#active - #enabler));
+                    }
+                    if self.intrinsic_boolean_cells.insert(active.to_string()) {
+                        self.raw_constraints
+                            .push(syn::parse_quote!(#active * (1 - #active)));
+                    }
+                    let mut selected_flags = std::collections::HashSet::new();
+                    let selectors = call
+                        .args
+                        .iter()
+                        .skip(3)
+                        .enumerate()
+                        .map(|(position, selector)| {
+                            if matches!(const_eval(selector), Ok(0)) {
+                                return Ok(self.register_derived(
+                                    &format_ident!("{}_selector_{}", names[0], position),
+                                    syn::parse_quote!(0),
+                                    0,
+                                ));
+                            }
+                            let ident = expect_ident(selector)?;
+                            let name = ident.to_string();
+                            if !selected_flags.insert(name.clone()) {
+                                return Err(syn::Error::new_spanned(
+                                    selector,
+                                    "binary_u32 cannot reuse a selector",
+                                ));
+                            }
+                            let Some(value) = scope.get(&name) else {
+                                return Err(syn::Error::new_spanned(
+                                    selector,
+                                    "unknown binary_u32 selector",
+                                ));
+                            };
+                            let (cell, degree) = value.scalar()?;
+                            if degree > 1 {
+                                return Err(syn::Error::new_spanned(
+                                    selector,
+                                    "binary_u32 selectors must be degree-one scalars or zero",
+                                ));
+                            }
+                            if self.intrinsic_boolean_cells.insert(cell.to_string()) {
+                                self.raw_constraints
+                                    .push(syn::parse_quote!(#cell * (1 - #cell)));
+                            }
+                            Ok(cell.clone())
+                        })
+                        .collect::<syn::Result<Vec<_>>>()?;
+                    let selectors: [Ident; 5] =
+                        selectors.try_into().expect("binary_u32 has five selectors");
+                    let [
+                        add_selector,
+                        sub_selector,
+                        and_selector,
+                        or_selector,
+                        xor_selector,
+                    ] = &selectors;
+                    self.raw_constraints.push(syn::parse_quote!(
+                        #add_selector
+                            + #sub_selector
+                            + #and_selector
+                            + #or_selector
+                            + #xor_selector
+                            - #active
+                    ));
+                    let output = std::array::from_fn(|position| {
+                        let base = format_ident!("{}_{}", names[0], position);
+                        let cell = self.register_column(&base);
+                        self.extra_columns.push(cell.clone());
+                        cell
+                    });
+                    self.fill.push(FillStep::SelectedBinaryWord {
+                        lhs: lhs.clone(),
+                        rhs: rhs.clone(),
+                        selectors: selectors.clone(),
+                        output: output.clone(),
+                    });
+
+                    let inverse_256 =
+                        crate::trace_tables::m31_pow(256, crate::trace_tables::M31_PRIME - 2)
+                            as u32;
+                    let mut add_carry: Option<Ident> = None;
+                    let mut sub_borrow: Option<Ident> = None;
+                    for position in 0..4 {
+                        let lhs_limb = &lhs[position];
+                        let rhs_limb = &rhs[position];
+                        let output_limb = &output[position];
+                        let add_in: Expr = add_carry.as_ref().map_or_else(
+                            || syn::parse_quote!(0),
+                            |prior| syn::parse_quote!(#prior),
+                        );
+                        let carry = self.register_derived(
+                            &format_ident!("{}_add_carry_{}", names[0], position),
+                            syn::parse_quote!(
+                                (#lhs_limb + #rhs_limb + #add_in - #output_limb) * #inverse_256
+                            ),
+                            1,
+                        );
+                        self.raw_constraints.push(syn::parse_quote!(
+                            #add_selector * #carry * (1 - #carry)
+                        ));
+                        add_carry = Some(carry);
+
+                        let sub_in: Expr = sub_borrow.as_ref().map_or_else(
+                            || syn::parse_quote!(0),
+                            |prior| syn::parse_quote!(#prior),
+                        );
+                        let borrow = self.register_derived(
+                            &format_ident!("{}_sub_borrow_{}", names[0], position),
+                            syn::parse_quote!(
+                                (#output_limb + #rhs_limb - #lhs_limb + #sub_in) * #inverse_256
+                            ),
+                            1,
+                        );
+                        self.raw_constraints.push(syn::parse_quote!(
+                            #sub_selector * #borrow * (1 - #borrow)
+                        ));
+                        sub_borrow = Some(borrow);
+                    }
+
+                    let range_relation = format_ident!("range_check_8_8");
+                    self.relation_entries.push((
+                        range_relation.clone(),
+                        vec![output[0].clone(), output[1].clone()],
+                        false,
+                        None,
+                    ));
+                    self.relation_entries.push((
+                        range_relation,
+                        vec![output[2].clone(), output[3].clone()],
+                        false,
+                        None,
+                    ));
+                    let bitwise_active = self.register_derived(
+                        &format_ident!("{}_bitwise_active", names[0]),
+                        syn::parse_quote!(#and_selector + #or_selector + #xor_selector),
+                        1,
+                    );
+                    let bitwise_id = self.register_derived(
+                        &format_ident!("{}_bitwise_id", names[0]),
+                        syn::parse_quote!(#or_selector + 2 * #xor_selector),
+                        1,
+                    );
+                    for position in 0..4 {
+                        self.relation_entries.push((
+                            format_ident!("bitwise"),
+                            vec![
+                                lhs[position].clone(),
+                                rhs[position].clone(),
+                                output[position].clone(),
+                                bitwise_id.clone(),
+                            ],
+                            false,
+                            Some(bitwise_active.clone()),
+                        ));
+                    }
+                    let elements = output
+                        .into_iter()
+                        .map(|cell| Value::Scalar { cell, degree: 1 })
+                        .collect();
+                    return Ok(vec![Value::Array(elements)]);
+                }
+                "bitand" | "bitor" | "bitxor" => {
+                    if names.len() != 1 || !(2..=3).contains(&call.args.len()) {
+                        return Err(syn::Error::new_spanned(
+                            call,
+                            format!(
+                                "{callee} takes two byte felts, an optional lookup multiplicity, and binds one result"
+                            ),
+                        ));
+                    }
+                    if self.relation_arities.get("bitwise") != Some(&4) {
+                        return Err(syn::Error::new_spanned(
+                            call,
+                            format!("{callee} requires `relation bitwise(4);`"),
+                        ));
+                    }
+                    let kind = match callee.to_string().as_str() {
+                        "bitand" => BitwiseKind::And,
+                        "bitor" => BitwiseKind::Or,
+                        "bitxor" => BitwiseKind::Xor,
+                        _ => unreachable!("matched bitwise intrinsic"),
+                    };
+                    let mut inputs = Vec::with_capacity(2);
+                    for (position, arg) in call.args.iter().take(2).enumerate() {
+                        let (lowered, degree) = self.lower(arg, scope, budget)?;
+                        // Degree-one inputs keep batched bitwise denominators within the AIR bound.
+                        let cell = if self.materialize_relation_args && degree > 1 {
+                            let Expr::Path(path) = self.materialize(lowered) else {
+                                unreachable!("materialize returns a cell path");
+                            };
+                            path.path.require_ident()?.clone()
+                        } else {
+                            match &lowered {
+                                Expr::Path(path) => path.path.require_ident()?.clone(),
+                                _ => self.register_derived(
+                                    &format_ident!("{}_input_{}", names[0], position),
+                                    lowered,
+                                    degree,
+                                ),
+                            }
+                        };
+                        inputs.push(cell);
+                    }
+                    let [lhs, rhs]: [Ident; 2] = inputs.try_into().expect("two bitwise inputs");
+                    let output = self.register_column(&names[0]);
+                    self.extra_columns.push(output.clone());
+                    let relation_id = kind.relation_id();
+                    let relation_id_cell = self.register_derived(
+                        &format_ident!("{}_op", names[0]),
+                        syn::parse_quote!(#relation_id),
+                        0,
+                    );
+                    let relation = format_ident!("bitwise");
+                    let mult_cell = self.lower_relation_multiplicity(
+                        &relation,
+                        call.args.get(2),
+                        scope,
+                        budget,
+                    )?;
+                    self.relation_entries.push((
+                        relation,
+                        vec![lhs.clone(), rhs.clone(), output.clone(), relation_id_cell],
+                        false,
+                        mult_cell,
+                    ));
+                    self.fill.push(FillStep::Bitwise {
+                        kind,
+                        lhs,
+                        rhs,
+                        output: output.clone(),
+                    });
+                    return Ok(vec![Value::Scalar {
+                        cell: output,
+                        degree: 1,
+                    }]);
+                }
+                "add_u32" | "sub_u32" => {
+                    if names.len() != 2 || !(2..=3).contains(&call.args.len()) {
+                        return Err(syn::Error::new_spanned(
+                            call,
+                            format!(
+                                "{callee} takes two four-limb words, an optional range-check multiplicity, and binds `(result, carry_or_borrow)`"
+                            ),
+                        ));
+                    }
+                    if self.relation_arities.get("range_check_8_8") != Some(&2) {
+                        return Err(syn::Error::new_spanned(
+                            call,
+                            format!("{callee} requires `relation range_check_8_8(2);`"),
+                        ));
+                    }
+                    let lhs = expect_word(&call.args[0], scope)?;
+                    let rhs = expect_word(&call.args[1], scope)?;
+                    let output = std::array::from_fn(|position| {
+                        let base = format_ident!("{}_{}", names[0], position);
+                        let cell = self.register_column(&base);
+                        self.extra_columns.push(cell.clone());
+                        cell
+                    });
+                    let carries = std::array::from_fn(|position| {
+                        let base = format_ident!("{}_chain_{}", names[0], position);
+                        let cell = self.register_column(&base);
+                        self.extra_columns.push(cell.clone());
+                        cell
+                    });
+                    let kind = if callee == "add_u32" {
+                        WordArithmeticKind::Add
+                    } else {
+                        WordArithmeticKind::Sub
+                    };
+                    for position in 0..4 {
+                        let lhs_limb = &lhs[position];
+                        let rhs_limb = &rhs[position];
+                        let output_limb = &output[position];
+                        let carry = &carries[position];
+                        let carry_in: Expr = if position == 0 {
+                            syn::parse_quote!(0)
+                        } else {
+                            let prior = &carries[position - 1];
+                            syn::parse_quote!(#prior)
+                        };
+                        let equation = match kind {
+                            WordArithmeticKind::Add => syn::parse_quote!(
+                                #lhs_limb + #rhs_limb + #carry_in
+                                    - #output_limb - 256 * #carry
+                            ),
+                            WordArithmeticKind::Sub => syn::parse_quote!(
+                                #lhs_limb + 256 * #carry
+                                    - #rhs_limb - #carry_in - #output_limb
+                            ),
+                        };
+                        self.constraints.push(equation);
+                        self.constraints
+                            .push(syn::parse_quote!(#carry * (1 - #carry)));
+                    }
+                    let relation = format_ident!("range_check_8_8");
+                    let mult_cell = self.lower_relation_multiplicity(
+                        &relation,
+                        call.args.get(2),
+                        scope,
+                        budget,
+                    )?;
+                    self.relation_entries.push((
+                        relation.clone(),
+                        vec![output[0].clone(), output[1].clone()],
+                        false,
+                        mult_cell.clone(),
+                    ));
+                    self.relation_entries.push((
+                        relation,
+                        vec![output[2].clone(), output[3].clone()],
+                        false,
+                        mult_cell,
+                    ));
+                    self.fill.push(FillStep::WordArithmetic {
+                        kind,
+                        lhs: lhs.clone(),
+                        rhs: rhs.clone(),
+                        output: output.clone(),
+                        carries: carries.clone(),
+                    });
+                    let result = Value::Array(
+                        output
+                            .into_iter()
+                            .map(|cell| Value::Scalar { cell, degree: 1 })
+                            .collect(),
+                    );
+                    let terminal = Value::Scalar {
+                        cell: carries[3].clone(),
+                        degree: 1,
+                    };
+                    return Ok(vec![result, terminal]);
+                }
+                "divrem_u32" => {
+                    if names.len() != 7 || call.args.len() != 3 {
+                        return Err(syn::Error::new_spanned(
+                            call,
+                            "divrem_u32 takes two four-limb words and a signed selector, and binds `(quotient, remainder, zero_divisor, zero_remainder, overflow, divisor_sum_inverse, remainder_sum_inverse)`",
+                        ));
+                    }
+                    let lhs = expect_word(&call.args[0], scope)?;
+                    let rhs = expect_word(&call.args[1], scope)?;
+                    let (signed_expr, signed_degree) = self.lower(&call.args[2], scope, budget)?;
+                    let signed = match &signed_expr {
+                        Expr::Path(path) => path.path.require_ident()?.clone(),
+                        _ => self.register_derived(
+                            &format_ident!("{}_signed", names[0]),
+                            signed_expr,
+                            signed_degree,
+                        ),
+                    };
+                    let quotient = std::array::from_fn(|position| {
+                        let base = format_ident!("{}_{}", names[0], position);
+                        let cell = self.register_column(&base);
+                        self.extra_columns.push(cell.clone());
+                        cell
+                    });
+                    let remainder = std::array::from_fn(|position| {
+                        let base = format_ident!("{}_{}", names[1], position);
+                        let cell = self.register_column(&base);
+                        self.extra_columns.push(cell.clone());
+                        cell
+                    });
+                    let scalar_outputs = names[2..]
+                        .iter()
+                        .map(|name| {
+                            let cell = self.register_column(name);
+                            self.extra_columns.push(cell.clone());
+                            cell
+                        })
+                        .collect::<Vec<_>>();
+                    let [
+                        zero_divisor,
+                        zero_remainder,
+                        overflow,
+                        divisor_sum_inverse,
+                        remainder_sum_inverse,
+                    ]: [Ident; 5] = scalar_outputs
+                        .try_into()
+                        .expect("five scalar division outputs");
+                    self.fill.push(FillStep::DivRemWord {
+                        lhs: lhs.clone(),
+                        rhs: rhs.clone(),
+                        signed,
+                        quotient: quotient.clone(),
+                        remainder: remainder.clone(),
+                        zero_divisor: zero_divisor.clone(),
+                        zero_remainder: zero_remainder.clone(),
+                        overflow: overflow.clone(),
+                        divisor_sum_inverse: divisor_sum_inverse.clone(),
+                        remainder_sum_inverse: remainder_sum_inverse.clone(),
+                    });
+                    let word_value = |word: [Ident; 4]| {
+                        Value::Array(
+                            word.into_iter()
+                                .map(|cell| Value::Scalar { cell, degree: 1 })
+                                .collect(),
+                        )
+                    };
+                    return Ok(vec![
+                        word_value(quotient),
+                        word_value(remainder),
+                        Value::Scalar {
+                            cell: zero_divisor,
+                            degree: 1,
+                        },
+                        Value::Scalar {
+                            cell: zero_remainder,
+                            degree: 1,
+                        },
+                        Value::Scalar {
+                            cell: overflow,
+                            degree: 1,
+                        },
+                        Value::Scalar {
+                            cell: divisor_sum_inverse,
+                            degree: 1,
+                        },
+                        Value::Scalar {
+                            cell: remainder_sum_inverse,
+                            degree: 1,
+                        },
+                    ]);
                 }
                 "constant" | "sum" | "pow2" | "inv" => {}
                 _ => {
@@ -946,6 +1983,487 @@ impl Lowerer<'_> {
         Ok(rets)
     }
 
+    fn add_assert(
+        &mut self,
+        lhs: Expr,
+        rhs: Expr,
+        scope: &HashMap<String, Value>,
+    ) -> syn::Result<()> {
+        let difference: Expr = syn::parse_quote!((#lhs) - (#rhs));
+        let (lowered, _) = self.lower(&difference, scope, self.max_degree - 1)?;
+        self.constraints.push(lowered);
+        Ok(())
+    }
+
+    fn add_relation_entry(
+        &mut self,
+        relation: Ident,
+        args: &[Expr],
+        emit: bool,
+        mult: Option<&Expr>,
+        scope: &HashMap<String, Value>,
+        budget: usize,
+    ) -> syn::Result<()> {
+        let Some(&arity) = self.relation_arities.get(&relation.to_string()) else {
+            return Err(syn::Error::new_spanned(
+                &relation,
+                format!(
+                    "unknown relation `{relation}` (declare it with `relation {relation}(arity);`)"
+                ),
+            ));
+        };
+        let to_cell = |lowerer: &mut Self, expr: &Expr, base: Ident| -> syn::Result<Ident> {
+            let (lowered, degree) = lowerer.lower(expr, scope, budget)?;
+            // Degree-one tuple cells keep batched LogUp denominators within the AIR bound.
+            if lowerer.materialize_relation_args && degree > 1 {
+                let Expr::Path(path) = lowerer.materialize(lowered) else {
+                    unreachable!("materialize returns a cell path");
+                };
+                return Ok(path.path.require_ident()?.clone());
+            }
+            if let Expr::Path(path) = &lowered
+                && let Some(ident) = path.path.get_ident()
+            {
+                return Ok(ident.clone());
+            }
+            Ok(lowerer.register_derived(&base, lowered, degree))
+        };
+        let mult_cell = self.lower_relation_multiplicity(&relation, mult, scope, budget)?;
+        let mut arg_cells = Vec::new();
+        for arg in args {
+            if let Ok(ident) = expect_ident(arg)
+                && let Some(value @ Value::Array(_)) = scope.get(&ident.to_string())
+            {
+                for (cell, degree) in value.flatten() {
+                    if self.materialize_relation_args && degree > 1 {
+                        let Expr::Path(path) = self.materialize(syn::parse_quote!(#cell)) else {
+                            unreachable!("materialize returns a cell path");
+                        };
+                        arg_cells.push(path.path.require_ident()?.clone());
+                    } else {
+                        arg_cells.push(cell);
+                    }
+                }
+                continue;
+            }
+            let base = format_ident!("{}_e{}", relation, self.relation_entries.len());
+            arg_cells.push(to_cell(self, arg, base)?);
+        }
+        if arg_cells.len() != arity {
+            return Err(syn::Error::new_spanned(
+                relation,
+                format!("relation has arity {arity}, got {} felts", arg_cells.len()),
+            ));
+        }
+        self.relation_entries
+            .push((relation, arg_cells, emit, mult_cell));
+        Ok(())
+    }
+
+    fn lower_relation_multiplicity(
+        &mut self,
+        relation: &Ident,
+        mult: Option<&Expr>,
+        scope: &HashMap<String, Value>,
+        budget: usize,
+    ) -> syn::Result<Option<Ident>> {
+        let Some(expr) = mult else {
+            return Ok(None);
+        };
+        let (lowered, degree) = self.lower(expr, scope, budget)?;
+        if let Expr::Path(path) = &lowered {
+            return Ok(Some(path.path.require_ident()?.clone()));
+        }
+        let base = format_ident!("{}_mult{}", relation, self.relation_entries.len());
+        Ok(Some(self.register_derived(&base, lowered, degree)))
+    }
+
+    fn register_access_columns(
+        &mut self,
+        name: &Ident,
+        scope: &mut HashMap<String, Value>,
+    ) -> syn::Result<([Ident; 4], Ident, [Ident; 4])> {
+        for suffix in ["prev", "clock_prev", "next"] {
+            let binding = format!("{name}_{suffix}");
+            if scope.contains_key(&binding) {
+                return Err(syn::Error::new(
+                    name.span(),
+                    format!("access binding `{binding}` is already defined"),
+                ));
+            }
+        }
+        let mut prev = Vec::with_capacity(4);
+        for index in 0usize..4 {
+            let base = format_ident!("{}_prev_{}", name, index);
+            let cell = self.register_column(&base);
+            self.extra_columns.push(cell.clone());
+            prev.push(cell);
+        }
+        let prev: [Ident; 4] = prev.try_into().expect("four prior limbs");
+        let clock_prev_base = format_ident!("{}_clock_prev", name);
+        let clock_prev = self.register_column(&clock_prev_base);
+        self.extra_columns.push(clock_prev.clone());
+        let mut next = Vec::with_capacity(4);
+        for index in 0usize..4 {
+            let base = format_ident!("{}_next_{}", name, index);
+            let cell = self.register_column(&base);
+            self.extra_columns.push(cell.clone());
+            next.push(cell);
+        }
+        let next: [Ident; 4] = next.try_into().expect("four next limbs");
+        scope.insert(
+            format!("{name}_prev"),
+            Value::Array(
+                prev.iter()
+                    .cloned()
+                    .map(|cell| Value::Scalar { cell, degree: 1 })
+                    .collect(),
+            ),
+        );
+        scope.insert(
+            format!("{name}_clock_prev"),
+            Value::Scalar {
+                cell: clock_prev.clone(),
+                degree: 1,
+            },
+        );
+        scope.insert(
+            format!("{name}_next"),
+            Value::Array(
+                next.iter()
+                    .cloned()
+                    .map(|cell| Value::Scalar { cell, degree: 1 })
+                    .collect(),
+            ),
+        );
+        for cell in prev.iter().chain(next.iter()) {
+            scope.insert(
+                cell.to_string(),
+                Value::Scalar {
+                    cell: cell.clone(),
+                    degree: 1,
+                },
+            );
+        }
+        Ok((prev, clock_prev, next))
+    }
+
+    fn lower_access(
+        &mut self,
+        access: &AccessStmt,
+        scope: &mut HashMap<String, Value>,
+        budget: usize,
+    ) -> syn::Result<()> {
+        let AccessStmt {
+            kind,
+            name,
+            clock,
+            addr_space,
+            addr,
+            next: requested_next,
+        } = access;
+        let kind = *kind;
+        if !self.vm_access_enabled {
+            return Err(syn::Error::new(
+                name.span(),
+                "access statements require `vm_access: { state: ..., tracer: ... },`",
+            ));
+        }
+        for (relation, arity) in [("memory_access", 7usize), ("range_check_20", 1usize)] {
+            if self.relation_arities.get(relation) != Some(&arity) {
+                return Err(syn::Error::new(
+                    name.span(),
+                    format!("access statements require `relation {relation}({arity});`"),
+                ));
+            }
+        }
+        let (clock_expr, clock_degree) = self.lower(clock, scope, budget)?;
+        let clock_cell = match &clock_expr {
+            Expr::Path(path) => path.path.require_ident()?.clone(),
+            _ => self.register_derived(&format_ident!("{}_clock", name), clock_expr, clock_degree),
+        };
+        scope
+            .entry(clock_cell.to_string())
+            .or_insert_with(|| Value::Scalar {
+                cell: clock_cell.clone(),
+                degree: clock_degree,
+            });
+        let addr_space_cell = match addr_space {
+            Some(addr_space) => {
+                let (expr, degree) = self.lower(addr_space, scope, budget)?;
+                let cell = match &expr {
+                    Expr::Path(path) => path.path.require_ident()?.clone(),
+                    _ => self.register_derived(&format_ident!("{}_addr_space", name), expr, degree),
+                };
+                scope
+                    .entry(cell.to_string())
+                    .or_insert_with(|| Value::Scalar {
+                        cell: cell.clone(),
+                        degree,
+                    });
+                self.add_assert(
+                    syn::parse_quote!(#cell * (1 - #cell)),
+                    syn::parse_quote!(0),
+                    scope,
+                )?;
+                Some(cell)
+            }
+            None => None,
+        };
+        let (addr_expr, addr_degree) = self.lower(addr, scope, budget)?;
+        let addr_cell = match &addr_expr {
+            Expr::Path(path) => path.path.require_ident()?.clone(),
+            _ => self.register_derived(&format_ident!("{}_addr", name), addr_expr, addr_degree),
+        };
+        let addr_binding = format!("{name}_addr");
+        if let Some(existing) = scope.get(&addr_binding) {
+            let (existing, _) = existing.scalar()?;
+            if existing != &addr_cell {
+                return Err(syn::Error::new(
+                    name.span(),
+                    format!("access binding `{addr_binding}` is already defined"),
+                ));
+            }
+        } else {
+            scope.insert(
+                addr_binding,
+                Value::Scalar {
+                    cell: addr_cell.clone(),
+                    degree: addr_degree,
+                },
+            );
+        }
+        let (prev, clock_prev, next) = self.register_access_columns(name, scope)?;
+
+        if kind.is_write() {
+            self.fill.push(FillStep::AccessPrepare {
+                kind,
+                addr_space: addr_space_cell.clone(),
+                addr: addr_cell.clone(),
+                prev: prev.clone(),
+            });
+        }
+
+        let desired: Option<[Ident; 4]> = match requested_next.as_ref() {
+            None => None,
+            Some(Expr::Path(path))
+                if path.path.get_ident().is_some_and(|ident| {
+                    matches!(scope.get(&ident.to_string()), Some(Value::Array(values)) if values.len() == 4)
+                }) =>
+            {
+                let ident = path.path.require_ident()?;
+                let Some(Value::Array(values)) = scope.get(&ident.to_string()) else {
+                    unreachable!("guarded four-limb array")
+                };
+                Some(
+                    values
+                        .iter()
+                        .map(|value| value.scalar().map(|(cell, _)| cell.clone()))
+                        .collect::<syn::Result<Vec<_>>>()?
+                        .try_into()
+                        .expect("four desired limbs"),
+                )
+            }
+            Some(Expr::Array(array)) if array.elems.len() == 4 => {
+                let mut cells = Vec::with_capacity(4);
+                for (index, expr) in array.elems.iter().enumerate() {
+                    let (lowered, degree) = self.lower(expr, scope, budget)?;
+                    let cell = match &lowered {
+                        Expr::Path(path) => path.path.require_ident()?.clone(),
+                        _ => self.register_derived(
+                            &format_ident!("{}_desired_{}", name, index),
+                            lowered,
+                            degree,
+                        ),
+                    };
+                    cells.push(cell);
+                }
+                Some(cells.try_into().expect("four desired limbs"))
+            }
+            Some(expr) => {
+                return Err(syn::Error::new_spanned(
+                    expr,
+                    "write access requires a four-limb array",
+                ));
+            }
+        };
+
+        let addr_inverse = if kind == AccessKind::WriteReg || kind == AccessKind::WriteWord {
+            let base = format_ident!("{}_addr_inverse", name);
+            let cell = self.register_column(&base);
+            self.extra_columns.push(cell.clone());
+            scope.insert(
+                base.to_string(),
+                Value::Scalar {
+                    cell: cell.clone(),
+                    degree: 1,
+                },
+            );
+            Some(cell)
+        } else {
+            None
+        };
+        if let Some(desired) = &desired {
+            for cell in desired {
+                let degree = *self
+                    .cells
+                    .get(&cell.to_string())
+                    .expect("desired cell degree");
+                scope
+                    .entry(cell.to_string())
+                    .or_insert_with(|| Value::Scalar {
+                        cell: cell.clone(),
+                        degree,
+                    });
+            }
+        }
+
+        self.fill.push(FillStep::AccessCommit {
+            kind,
+            addr_space: addr_space_cell.clone(),
+            clock: clock_cell.clone(),
+            addr: addr_cell.clone(),
+            prev: prev.clone(),
+            clock_prev: clock_prev.clone(),
+            next: next.clone(),
+            desired: desired.clone(),
+            addr_inverse: addr_inverse.clone(),
+        });
+
+        let prev_name = format_ident!("{}_prev", name);
+        let next_name = format_ident!("{}_next", name);
+        let clock_prev_name = format_ident!("{}_clock_prev", name);
+        let addr_space: Expr = match &addr_space_cell {
+            Some(cell) => syn::parse_quote!(#cell),
+            None if kind.is_register() => syn::parse_quote!(0),
+            None => syn::parse_quote!(1),
+        };
+        self.add_relation_entry(
+            format_ident!("memory_access"),
+            &[
+                syn::parse_quote!(#addr_space),
+                syn::parse_quote!(#addr_cell),
+                syn::parse_quote!(#clock_prev_name),
+                syn::parse_quote!(#prev_name),
+            ],
+            false,
+            None,
+            scope,
+            budget,
+        )?;
+        self.add_relation_entry(
+            format_ident!("memory_access"),
+            &[
+                syn::parse_quote!(#addr_space),
+                syn::parse_quote!(#addr_cell),
+                syn::parse_quote!(#clock_cell),
+                syn::parse_quote!(#next_name),
+            ],
+            true,
+            None,
+            scope,
+            budget,
+        )?;
+        let clock_diff: Expr = syn::parse_quote!(#clock_cell - #clock_prev_name);
+        self.add_relation_entry(
+            format_ident!("range_check_20"),
+            &[clock_diff],
+            false,
+            None,
+            scope,
+            budget,
+        )?;
+
+        if kind.is_write() {
+            let desired = desired.as_ref().expect("write has desired limbs");
+            if kind == AccessKind::WriteWord {
+                let addr_space = addr_space_cell
+                    .as_ref()
+                    .expect("dynamic access address space");
+                let inverse = addr_inverse.as_ref().expect("dynamic write inverse");
+                let is_nonzero_expr: Expr = syn::parse_quote!(#addr_cell * #inverse);
+                let (is_nonzero_expr, _) = self.lower(&is_nonzero_expr, scope, budget)?;
+                let is_nonzero_expr = self.materialize(is_nonzero_expr);
+                let Expr::Path(is_nonzero_path) = is_nonzero_expr else {
+                    unreachable!("materialized expressions are cells")
+                };
+                let is_nonzero = is_nonzero_path.path.require_ident()?.clone();
+                scope.insert(
+                    is_nonzero.to_string(),
+                    Value::Scalar {
+                        cell: is_nonzero.clone(),
+                        degree: 1,
+                    },
+                );
+                self.add_assert(
+                    syn::parse_quote!(#addr_cell),
+                    syn::parse_quote!(#addr_cell * #is_nonzero),
+                    scope,
+                )?;
+                let write_enabled_expr: Expr =
+                    syn::parse_quote!(#addr_space + (1 - #addr_space) * #is_nonzero);
+                let (write_enabled_expr, _) = self.lower(&write_enabled_expr, scope, budget)?;
+                let write_enabled_expr = self.materialize(write_enabled_expr);
+                let Expr::Path(write_enabled_path) = write_enabled_expr else {
+                    unreachable!("materialized expressions are cells")
+                };
+                let write_enabled = write_enabled_path.path.require_ident()?.clone();
+                scope.insert(
+                    write_enabled.to_string(),
+                    Value::Scalar {
+                        cell: write_enabled.clone(),
+                        degree: 1,
+                    },
+                );
+                for (next, desired) in next.iter().zip(desired) {
+                    self.add_assert(
+                        syn::parse_quote!(#next),
+                        syn::parse_quote!(#write_enabled * #desired),
+                        scope,
+                    )?;
+                }
+            } else if kind.is_register() {
+                let inverse = addr_inverse.as_ref().expect("register write inverse");
+                let is_nonzero_expr: Expr = syn::parse_quote!(#addr_cell * #inverse);
+                let (is_nonzero_expr, degree) = self.lower(&is_nonzero_expr, scope, budget)?;
+                let is_nonzero = self.register_derived(
+                    &format_ident!("{}_is_nonzero", name),
+                    is_nonzero_expr,
+                    degree,
+                );
+                scope.insert(
+                    is_nonzero.to_string(),
+                    Value::Scalar {
+                        cell: is_nonzero.clone(),
+                        degree,
+                    },
+                );
+                self.add_assert(
+                    syn::parse_quote!(#addr_cell),
+                    syn::parse_quote!(#addr_cell * #is_nonzero),
+                    scope,
+                )?;
+                for (next, desired) in next.iter().zip(desired) {
+                    self.add_assert(
+                        syn::parse_quote!(#next),
+                        syn::parse_quote!(#is_nonzero * #desired),
+                        scope,
+                    )?;
+                }
+            } else {
+                for (next, desired) in next.iter().zip(desired) {
+                    self.add_assert(syn::parse_quote!(#next), syn::parse_quote!(#desired), scope)?;
+                }
+            }
+        } else {
+            for (prev, next) in prev.iter().zip(&next) {
+                self.add_assert(syn::parse_quote!(#prev), syn::parse_quote!(#next), scope)?;
+            }
+        }
+
+        Ok(())
+    }
+
     fn lower_block(
         &mut self,
         body: &[FnStmt],
@@ -968,11 +2486,7 @@ impl Lowerer<'_> {
                     }
                 }
                 FnStmt::Assert { lhs, rhs } => {
-                    // The enabler gate on emitted constraints costs one
-                    // degree: asserts share the cell budget.
-                    let difference: Expr = syn::parse_quote!((#lhs) - (#rhs));
-                    let (lowered, _) = self.lower(&difference, scope, self.max_degree - 1)?;
-                    self.constraints.push(lowered);
+                    self.add_assert(lhs.clone(), rhs.clone(), scope)?;
                 }
                 FnStmt::For {
                     var,
@@ -987,6 +2501,43 @@ impl Lowerer<'_> {
                             .collect();
                         self.lower_block(&unrolled, scope, budget)?;
                     }
+                }
+                FnStmt::Relation {
+                    relation,
+                    args,
+                    emit,
+                    mult,
+                } => {
+                    self.add_relation_entry(
+                        relation.clone(),
+                        args,
+                        *emit,
+                        mult.as_ref(),
+                        scope,
+                        budget,
+                    )?;
+                }
+                FnStmt::Hint { name, expr } => {
+                    // A committed column (free in the AIR), filled by
+                    // evaluating `expr` concretely. The body constrains it.
+                    let (lowered, _) = self.lower(expr, scope, budget)?;
+                    let cell = self.register_column(name);
+                    self.extra_columns.push(cell.clone());
+                    self.fill.push(FillStep::Expr {
+                        cell: cell.clone(),
+                        expr: lowered,
+                    });
+                    scope.insert(name.to_string(), Value::Scalar { cell, degree: 1 });
+                }
+                FnStmt::Constrain { expr } => {
+                    // Ungated: the full degree budget is available (no enabler
+                    // factor). The constraint must vanish on padding by its
+                    // own structure (e.g. an opcode-flag factor).
+                    let (lowered, _) = self.lower(expr, scope, self.max_degree)?;
+                    self.raw_constraints.push(lowered);
+                }
+                FnStmt::Access(access) => {
+                    self.lower_access(access, scope, budget)?;
                 }
             }
         }
@@ -1020,6 +2571,28 @@ fn expect_ident(expr: &Expr) -> syn::Result<Ident> {
         return Ok(ident.clone());
     }
     Err(syn::Error::new_spanned(expr, "expected a plain name"))
+}
+
+fn expect_word(expr: &Expr, scope: &HashMap<String, Value>) -> syn::Result<[Ident; 4]> {
+    let ident = expect_ident(expr)?;
+    let Some(Value::Array(elements)) = scope.get(&ident.to_string()) else {
+        return Err(syn::Error::new_spanned(
+            expr,
+            "word arithmetic takes named four-limb arrays",
+        ));
+    };
+    if elements.len() != 4 {
+        return Err(syn::Error::new_spanned(
+            expr,
+            "word arithmetic takes named four-limb arrays",
+        ));
+    }
+    elements
+        .iter()
+        .map(|value| value.scalar().map(|(cell, _)| cell.clone()))
+        .collect::<syn::Result<Vec<_>>>()?
+        .try_into()
+        .map_err(|_| syn::Error::new_spanned(expr, "word arithmetic takes four limbs"))
 }
 
 fn expect_range(expr: &Expr) -> syn::Result<(usize, usize)> {
@@ -1081,6 +2654,30 @@ fn clone_body(body: &[FnStmt]) -> Vec<FnStmt> {
                 end: *end,
                 body: clone_body(body),
             },
+            FnStmt::Relation {
+                relation,
+                args,
+                emit,
+                mult,
+            } => FnStmt::Relation {
+                relation: relation.clone(),
+                args: args.clone(),
+                emit: *emit,
+                mult: mult.clone(),
+            },
+            FnStmt::Hint { name, expr } => FnStmt::Hint {
+                name: name.clone(),
+                expr: expr.clone(),
+            },
+            FnStmt::Constrain { expr } => FnStmt::Constrain { expr: expr.clone() },
+            FnStmt::Access(access) => FnStmt::Access(Box::new(AccessStmt {
+                kind: access.kind,
+                name: access.name.clone(),
+                clock: access.clock.clone(),
+                addr_space: access.addr_space.clone(),
+                addr: access.addr.clone(),
+                next: access.next.clone(),
+            })),
         })
         .collect()
 }
@@ -1099,18 +2696,32 @@ struct LoweredFn {
     derived: Vec<(Ident, Expr)>,
     /// Materialization equalities and asserts, over cells.
     constraints: Vec<Expr>,
+    /// Ungated `constrain` constraints (no enabler gate).
+    raw_constraints: Vec<Expr>,
+    /// Cells already constrained boolean by a lowering intrinsic.
+    intrinsic_boolean_cells: std::collections::HashSet<String>,
     /// Activations made: (callee, arg cells, ret cells).
     calls: Vec<(Ident, Vec<Ident>, Vec<Ident>)>,
+    /// External relation contributions: (relation, arg cells, emit, mult cell).
+    relation_entries: Vec<(Ident, Vec<Ident>, bool, Option<Ident>)>,
     fill: Vec<FillStep>,
     ret_cells: Vec<Ident>,
+}
+
+struct LowerFnOptions<'a> {
+    materialize_rets: bool,
+    fixed_params: &'a std::collections::HashSet<String>,
+    vm_access_enabled: bool,
+    materialize_relation_args: bool,
 }
 
 fn lower_fn(
     function: &AirFn,
     max_degree: usize,
     arities: &HashMap<String, (usize, usize)>,
+    relation_arities: &HashMap<String, usize>,
     inline_fns: &HashMap<String, AirFn>,
-    materialize_rets: bool,
+    options: LowerFnOptions<'_>,
 ) -> syn::Result<LoweredFn> {
     // Lookup-tuple elements appear in LogUp denominators whose singleton
     // constraint multiplies by one cumsum mask: budget max_degree - 1.
@@ -1122,24 +2733,50 @@ fn lower_fn(
         extra_columns: Vec::new(),
         derived: Vec::new(),
         constraints: Vec::new(),
+        raw_constraints: Vec::new(),
+        intrinsic_boolean_cells: std::collections::HashSet::new(),
         fill: Vec::new(),
         calls: Vec::new(),
+        relation_entries: Vec::new(),
         cse: HashMap::new(),
         arities,
+        relation_arities,
         inline_fns,
         fn_name: function.name.clone(),
+        vm_access_enabled: options.vm_access_enabled,
+        materialize_relation_args: options.materialize_relation_args,
     };
+
+    // Every table has one generated activity column. Making it a built-in
+    // frame value lets a function gate optional relation multiplicities and
+    // constrain auxiliary flags to real rows without duplicating that column
+    // in its parameter list.
+    let mut scope: HashMap<String, Value> = HashMap::new();
+    let enabler = format_ident!("enabler");
+    scope.insert(
+        enabler.to_string(),
+        Value::Scalar {
+            cell: enabler,
+            degree: 1,
+        },
+    );
 
     // Parameters are committed columns: scalars directly, arrays flattened
     // as `name_k`.
-    let mut scope: HashMap<String, Value> = HashMap::new();
     let mut arg_columns: Vec<Ident> = Vec::new();
     for param in &function.params {
+        if param.name == "enabler" {
+            return Err(syn::Error::new(
+                param.name.span(),
+                "`enabler` is a built-in row-activity value",
+            ));
+        }
         let value = match param.size {
             None => {
                 let cell = lowerer.register_column(&param.name);
                 arg_columns.push(cell.clone());
-                Value::Scalar { cell, degree: 1 }
+                let degree = usize::from(!options.fixed_params.contains(&param.name.to_string()));
+                Value::Scalar { cell, degree }
             }
             Some(size) => {
                 let elements = (0..size)
@@ -1164,7 +2801,7 @@ fn lower_fn(
         for (cell, degree) in value.flatten() {
             // Embedded hosts pair activation entries, so the tuple must be
             // degree 1: commit every returned cell.
-            if materialize_rets && degree > 1 {
+            if options.materialize_rets && degree > 1 {
                 let expr: Expr = syn::parse_quote!(#cell);
                 let Expr::Path(materialized) = lowerer.materialize(expr) else {
                     unreachable!("materialize returns a cell path");
@@ -1201,7 +2838,10 @@ fn lower_fn(
         table,
         derived: lowerer.derived,
         constraints: lowerer.constraints,
+        raw_constraints: lowerer.raw_constraints,
+        intrinsic_boolean_cells: lowerer.intrinsic_boolean_cells,
         calls: lowerer.calls,
+        relation_entries: lowerer.relation_entries,
         fill: lowerer.fill,
         ret_cells,
     })
@@ -1269,6 +2909,7 @@ fn air_expr(
     expr: &Expr,
     columns: &std::collections::HashSet<String>,
     cells: &HashMap<String, usize>,
+    enabler: &TokenStream2,
 ) -> syn::Result<TokenStream2> {
     if let Ok(value) = const_eval(expr) {
         let value = value as u32;
@@ -1279,7 +2920,9 @@ fn air_expr(
     match expr {
         Expr::Path(path) => {
             let ident = path.path.require_ident()?;
-            if columns.contains(&ident.to_string()) {
+            if ident == "enabler" {
+                Ok(enabler.clone())
+            } else if columns.contains(&ident.to_string()) {
                 Ok(quote!(self.#ident.clone()))
             } else {
                 let index = cells.get(&ident.to_string()).ok_or_else(|| {
@@ -1301,17 +2944,17 @@ fn air_expr(
             Err(syn::Error::new_spanned(call, "unsupported call"))
         }
         Expr::Binary(binary) => {
-            let left = air_expr(&binary.left, columns, cells)?;
-            let right = air_expr(&binary.right, columns, cells)?;
+            let left = air_expr(&binary.left, columns, cells, enabler)?;
+            let right = air_expr(&binary.right, columns, cells, enabler)?;
             let op = &binary.op;
             Ok(quote!((#left #op #right)))
         }
         Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Neg(_)) => {
-            let inner = air_expr(&unary.expr, columns, cells)?;
+            let inner = air_expr(&unary.expr, columns, cells, enabler)?;
             Ok(quote!((-#inner)))
         }
-        Expr::Paren(paren) => air_expr(&paren.expr, columns, cells),
-        Expr::Group(group) => air_expr(&group.expr, columns, cells),
+        Expr::Paren(paren) => air_expr(&paren.expr, columns, cells, enabler),
+        Expr::Group(group) => air_expr(&group.expr, columns, cells, enabler),
         other => Err(syn::Error::new_spanned(other, "unsupported expression")),
     }
 }
@@ -1327,10 +2970,20 @@ fn generate_evaluation_impl(function: &LoweredFn) -> syn::Result<TokenStream2> {
         .chain(function.table.fields.iter().map(|f| f.to_string()))
         .collect();
 
+    // Flag tables (opcode_*_flag columns) have no `enabler` column — the
+    // shared column generator synthesizes `enabler()` as the flag sum, so the
+    // row-activity indicator is sound by construction. Non-flag tables use the
+    // committed `enabler` column.
+    let enabler = if count_opcode_flags(&function.table.fields) == 0 {
+        quote! { self.enabler.clone() }
+    } else {
+        quote! { self.enabler() }
+    };
+
     let mut cell_indices: HashMap<String, usize> = HashMap::new();
     let mut cell_pushes: Vec<TokenStream2> = Vec::new();
     for (cell, expr) in &function.derived {
-        let value = air_expr(expr, &columns, &cell_indices)?;
+        let value = air_expr(expr, &columns, &cell_indices, &enabler)?;
         cell_indices.insert(cell.to_string(), cell_pushes.len());
         cell_pushes.push(quote! { cells.push(#value); });
     }
@@ -1366,17 +3019,39 @@ fn generate_evaluation_impl(function: &LoweredFn) -> syn::Result<TokenStream2> {
     let one = quote! {
         T::from(stwo::core::fields::m31::BaseField::from_u32_unchecked(1u32))
     };
-    let mut constraint_exprs = vec![quote! {
-        self.enabler.clone() * (#one - self.enabler.clone())
-    }];
+    let mut constraint_exprs = Vec::new();
+    if !function.intrinsic_boolean_cells.contains("enabler") {
+        constraint_exprs.push(quote! {
+            #enabler * (#one - #enabler)
+        });
+    }
+    // Per-flag booleanity (structural, ungated) for flag tables — together
+    // with the enabler() = flag-sum booleanity this makes the flags one-hot,
+    // matching the schema's column-generated constraints.
+    for field in &function.table.fields {
+        let name = field.to_string();
+        if name.starts_with("opcode_")
+            && name.ends_with("_flag")
+            && !function.intrinsic_boolean_cells.contains(&name)
+        {
+            constraint_exprs.push(quote! {
+                self.#field.clone() * (#one - self.#field.clone())
+            });
+        }
+    }
     for constraint in &function.constraints {
         // Enabler-gated: padding rows are all-zero, which constant terms in
         // the cell chains would otherwise violate. Cell budgets are
         // max_degree - 1, so the gate stays within the bound.
-        let expr = air_expr(constraint, &columns, &cell_indices)?;
+        let expr = air_expr(constraint, &columns, &cell_indices, &enabler)?;
         constraint_exprs.push(quote! {
-            self.enabler.clone() * (#expr)
+            #enabler * (#expr)
         });
+    }
+    for constraint in &function.raw_constraints {
+        // Ungated `constrain`: vanishes on padding by its own structure.
+        let expr = air_expr(constraint, &columns, &cell_indices, &enabler)?;
+        constraint_exprs.push(expr);
     }
     let constraint_pushes: Vec<TokenStream2> = constraint_exprs
         .iter()
@@ -1407,17 +3082,17 @@ fn generate_evaluation_impl(function: &LoweredFn) -> syn::Result<TokenStream2> {
     // -enabler, one tuple per activation made with +enabler.
     let own_values = function.table.fields[..function.n_args]
         .iter()
-        .map(|cell| air_expr(&syn::parse_quote!(#cell), &columns, &cell_indices))
+        .map(|cell| air_expr(&syn::parse_quote!(#cell), &columns, &cell_indices, &enabler))
         .chain(
             function
                 .ret_cells
                 .iter()
-                .map(|cell| air_expr(&syn::parse_quote!(#cell), &columns, &cell_indices)),
+                .map(|cell| air_expr(&syn::parse_quote!(#cell), &columns, &cell_indices, &enabler)),
         )
         .collect::<syn::Result<Vec<_>>>()?;
     let mut entry_exprs = vec![quote! {
         (
-            (-self.enabler.clone()),
+            (-(#enabler)),
             vec![#(#own_values),*],
         )
     }];
@@ -1425,11 +3100,35 @@ fn generate_evaluation_impl(function: &LoweredFn) -> syn::Result<TokenStream2> {
         let values = args
             .iter()
             .chain(rets.iter())
-            .map(|cell| air_expr(&syn::parse_quote!(#cell), &columns, &cell_indices))
+            .map(|cell| air_expr(&syn::parse_quote!(#cell), &columns, &cell_indices, &enabler))
             .collect::<syn::Result<Vec<_>>>()?;
         entry_exprs.push(quote! {
             (
-                self.enabler.clone(),
+                #enabler,
+                vec![#(#values),*],
+            )
+        });
+    }
+    // External relation entries follow the activation entries, in lowering
+    // order — the same order `generate_component_module` lists their
+    // relation names, so the positional entry→relation mapping holds.
+    for (_, cells, emit, mult_cell) in &function.relation_entries {
+        let values = cells
+            .iter()
+            .map(|cell| air_expr(&syn::parse_quote!(#cell), &columns, &cell_indices, &enabler))
+            .collect::<syn::Result<Vec<_>>>()?;
+        let mult = match mult_cell {
+            Some(cell) => air_expr(&syn::parse_quote!(#cell), &columns, &cell_indices, &enabler)?,
+            None => enabler.clone(),
+        };
+        let numerator = if *emit {
+            mult
+        } else {
+            quote! { -(#mult) }
+        };
+        entry_exprs.push(quote! {
+            (
+                #numerator,
                 vec![#(#values),*],
             )
         });
@@ -1469,8 +3168,22 @@ pub fn define_air_fns(input: TokenStream) -> TokenStream {
         max_degree,
         embedded,
         embedded_component,
+        embedded_enabler_boolean,
+        embedded_relations,
+        logup_batch,
+        logup_unbatched_tail,
+        embedded_dynamic_component,
+        embedded_preprocessed,
+        embedded_params,
+        vm_access,
+        relations: external_relations,
         fns,
     } = parse_macro_input!(input as AirFnsInput);
+
+    let relation_arities: HashMap<String, usize> = external_relations
+        .iter()
+        .map(|(name, arity)| (name.to_string(), *arity))
+        .collect();
 
     let inline_fns: HashMap<String, AirFn> = fns
         .iter()
@@ -1499,6 +3212,8 @@ pub fn define_air_fns(input: TokenStream) -> TokenStream {
     // Lower in declaration order: calls reference earlier functions, so
     // flattened arities accumulate as we go.
     let mut arities: HashMap<String, (usize, usize)> = HashMap::new();
+    let fixed_params: std::collections::HashSet<String> =
+        embedded_params.iter().map(ToString::to_string).collect();
     #[allow(unused_mut)]
     let mut lowered: Vec<LoweredFn> = Vec::new();
     for function in fns.iter().filter(|f| !f.inline) {
@@ -1506,8 +3221,15 @@ pub fn define_air_fns(input: TokenStream) -> TokenStream {
             function,
             max_degree,
             &arities,
+            &relation_arities,
             &inline_fns,
-            embedded.is_some(),
+            LowerFnOptions {
+                materialize_rets: embedded.is_some(),
+                fixed_params: &fixed_params,
+                vm_access_enabled: vm_access.is_some(),
+                // Trusted preprocessed components route higher-degree entries through singleton tails.
+                materialize_relation_args: embedded_preprocessed.is_empty(),
+            },
         ) {
             Ok(result) => {
                 arities.insert(function.name.to_string(), (result.n_args, result.n_rets));
@@ -1518,7 +3240,58 @@ pub fn define_air_fns(input: TokenStream) -> TokenStream {
     }
 
     if let Some(flags) = embedded {
-        return generate_embedded(&mut lowered, &flags, embedded_component);
+        if !embedded_preprocessed.is_empty() {
+            if vm_access.is_some() {
+                return syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    "vm_access is incompatible with embedded_preprocessed",
+                )
+                .to_compile_error()
+                .into();
+            }
+            if !embedded_component {
+                return syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    "embedded_preprocessed requires embedded_component: true",
+                )
+                .to_compile_error()
+                .into();
+            }
+            if !flags.is_empty() {
+                return syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    "embedded_preprocessed does not accept embedded flag columns",
+                )
+                .to_compile_error()
+                .into();
+            }
+            return generate_embedded_preprocessed(
+                &mut lowered,
+                &embedded_relations,
+                logup_batch,
+                embedded_enabler_boolean,
+                &embedded_preprocessed,
+                &embedded_params,
+                logup_unbatched_tail,
+            );
+        }
+        // In embedded mode the declared relations are NOT given their own
+        // generated types — `emit`/`consume` map onto the host
+        // `crate::relations::Relations` (an opcode emitting `program_access`,
+        // `memory_access`, range checks, …). The declarations only fix arity
+        // for the parser.
+        return generate_embedded(
+            &mut lowered,
+            &flags,
+            EmbeddedOptions {
+                component: embedded_component,
+                relations_path: &embedded_relations,
+                logup_batch,
+                logup_unbatched_tail,
+                dynamic_component: embedded_dynamic_component,
+                vm_access: vm_access.as_ref(),
+            },
+        );
     }
 
     // Backend: tables, generic columns, exported lookup macros.
@@ -1557,7 +3330,7 @@ pub fn define_air_fns(input: TokenStream) -> TokenStream {
             quote! { #name: #relation_type::dummy(), }
         })
         .collect();
-    let relation_draw: Vec<_> = lowered
+    let mut relation_draw: Vec<_> = lowered
         .iter()
         .map(|f| {
             let name = &f.name;
@@ -1565,6 +3338,23 @@ pub fn define_air_fns(input: TokenStream) -> TokenStream {
             quote! { #name: #relation_type::draw(channel), }
         })
         .collect();
+
+    // Externally declared relations: a `relation!` type and an
+    // `AirFnRelations` field each, drawn from the channel alongside the io
+    // relations. Sharing one relation across two systems is done by drawing
+    // it once and passing it in (see the `extern_relation` test).
+    let mut relation_defs = relation_defs;
+    let mut relation_fields = relation_fields;
+    let mut relation_dummy = relation_dummy;
+    for (name, arity) in &external_relations {
+        let relation_type = format_ident!("{}Relation", to_pascal_case(&name.to_string()));
+        relation_defs.push(quote! {
+            stwo_constraint_framework::relation!(#relation_type, #arity);
+        });
+        relation_fields.push(quote! { pub #name: #relation_type, });
+        relation_dummy.push(quote! { #name: #relation_type::dummy(), });
+        relation_draw.push(quote! { #name: #relation_type::draw(channel), });
+    }
 
     // Tables holder + witness fill functions (the program run concretely).
     let table_fields: Vec<_> = lowered
@@ -1577,7 +3367,7 @@ pub fn define_air_fns(input: TokenStream) -> TokenStream {
         .collect();
     let call_fns: Vec<_> = lowered
         .iter()
-        .map(|f| generate_call_fn(f).unwrap_or_else(|e| e.to_compile_error()))
+        .map(|f| generate_call_fn(f, vm_access.as_ref()).unwrap_or_else(|e| e.to_compile_error()))
         .collect();
 
     // Component modules (air + witness) per function.
@@ -1635,10 +3425,461 @@ pub fn define_air_fns(input: TokenStream) -> TokenStream {
 /// struct with `evaluation()`, and the row-fill — for components that live
 /// inside a larger system (the host wires relations and proving). Flag
 /// columns are appended to the table and exposed on the struct.
+/// Generate an embedded component whose function arguments come from trusted
+/// preprocessed columns or verifier-supplied field constants. No committed
+/// table is emitted: the same lowered frame evaluates the AIR relation entries
+/// and the matching interaction trace over the fixed schedule.
+fn logup_batches(
+    entry_count: usize,
+    batch_size: usize,
+    unbatched_tail: usize,
+) -> syn::Result<Vec<Vec<usize>>> {
+    if unbatched_tail > entry_count {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "logup_unbatched_tail exceeds the relation-entry count",
+        ));
+    }
+    let batched_count = entry_count - unbatched_tail;
+    let mut batches = (0..batched_count)
+        .collect::<Vec<_>>()
+        .chunks(batch_size)
+        .map(<[usize]>::to_vec)
+        .collect::<Vec<_>>();
+    batches.extend((batched_count..entry_count).map(|index| vec![index]));
+    Ok(batches)
+}
+
+fn logup_finalize(
+    batches: &[Vec<usize>],
+    batch_size: usize,
+    unbatched_tail: usize,
+) -> TokenStream2 {
+    if unbatched_tail == 0 {
+        if batch_size == 2 {
+            quote! { eval.finalize_logup_in_pairs(); }
+        } else {
+            quote! { eval.finalize_logup(); }
+        }
+    } else {
+        let assignments = batches
+            .iter()
+            .enumerate()
+            .flat_map(|(batch, entries)| entries.iter().map(move |_| batch));
+        quote! { eval.finalize_logup_batched(&vec![#(#assignments),*]); }
+    }
+}
+
+fn generate_embedded_preprocessed(
+    lowered: &mut [LoweredFn],
+    relations_path: &Path,
+    logup_batch: usize,
+    enabler_boolean: bool,
+    preprocessed: &[(Ident, LitStr)],
+    params: &[Ident],
+    logup_unbatched_tail: usize,
+) -> TokenStream {
+    let [function] = lowered else {
+        return syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "embedded_preprocessed mode takes exactly one non-inline function",
+        )
+        .to_compile_error()
+        .into();
+    };
+    if !function.calls.is_empty() {
+        return syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "embedded_preprocessed functions cannot activate other functions",
+        )
+        .to_compile_error()
+        .into();
+    }
+    if function.table.fields.len() != function.n_args {
+        return syn::Error::new(
+            function.name.span(),
+            "embedded_preprocessed functions must stay within the declared degree budget without materialized intermediates",
+        )
+        .to_compile_error()
+        .into();
+    }
+    if function.relation_entries.is_empty() {
+        return syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "embedded_preprocessed functions require at least one relation entry",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    let field_names: std::collections::HashSet<String> = function
+        .table
+        .fields
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let mut preprocessed_by_name = HashMap::new();
+    for (position, (name, id)) in preprocessed.iter().enumerate() {
+        if !field_names.contains(&name.to_string()) {
+            return syn::Error::new(
+                name.span(),
+                format!("preprocessed parameter `{name}` is not a function parameter"),
+            )
+            .to_compile_error()
+            .into();
+        }
+        if preprocessed_by_name
+            .insert(name.to_string(), (position, id))
+            .is_some()
+        {
+            return syn::Error::new(name.span(), "duplicate embedded preprocessed parameter")
+                .to_compile_error()
+                .into();
+        }
+    }
+    let mut param_names = std::collections::HashSet::new();
+    for param in params {
+        if !field_names.contains(&param.to_string()) {
+            return syn::Error::new(
+                param.span(),
+                format!("embedded parameter `{param}` is not a function parameter"),
+            )
+            .to_compile_error()
+            .into();
+        }
+        if preprocessed_by_name.contains_key(&param.to_string()) {
+            return syn::Error::new(
+                param.span(),
+                "a function parameter cannot be both preprocessed and verifier-supplied",
+            )
+            .to_compile_error()
+            .into();
+        }
+        if !param_names.insert(param.to_string()) {
+            return syn::Error::new(param.span(), "duplicate embedded parameter")
+                .to_compile_error()
+                .into();
+        }
+    }
+    // Any remaining function parameters are committed witness columns. The
+    // generated table contains only these fields, while the logical columns
+    // frame also includes preprocessing and verifier-owned constants.
+    let committed_fields: Vec<Ident> = function
+        .table
+        .fields
+        .iter()
+        .filter(|field| {
+            !preprocessed_by_name.contains_key(&field.to_string())
+                && !param_names.contains(&field.to_string())
+        })
+        .cloned()
+        .collect();
+    let committed_positions: HashMap<String, usize> = committed_fields
+        .iter()
+        .enumerate()
+        .map(|(position, field)| (field.to_string(), position + 1))
+        .collect();
+    let has_committed = !committed_fields.is_empty();
+
+    let columns_type = column_struct_name(&function.name);
+    let preprocessed_ids: Vec<&LitStr> = preprocessed.iter().map(|(_, id)| id).collect();
+    let table = if has_committed {
+        let committed_table = OpcodeDef {
+            name: function.table.name.clone(),
+            fields: committed_fields,
+            derived: Vec::new(),
+            constraints: Vec::new(),
+            lookups: LookupsDef::default(),
+            air_only: false,
+        };
+        generate_table(&committed_table)
+    } else {
+        quote! {}
+    };
+    let prover_columns =
+        generate_prover_columns(&function.table).unwrap_or_else(|error| error.to_compile_error());
+    let evaluation =
+        generate_evaluation_impl(function).unwrap_or_else(|error| error.to_compile_error());
+    let relations: Vec<&Ident> = function
+        .relation_entries
+        .iter()
+        .map(|(relation, _, _, _)| relation)
+        .collect();
+    let n_entries = relations.len();
+    let indices: Vec<usize> = (0..n_entries).collect();
+
+    let air_values: Vec<TokenStream2> = function
+        .table
+        .fields
+        .iter()
+        .map(|field| {
+            if let Some((_, id)) = preprocessed_by_name.get(&field.to_string()) {
+                quote! {
+                    eval.get_preprocessed_column(
+                        stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId {
+                            id: #id.into(),
+                        },
+                    )
+                }
+            } else if param_names.contains(&field.to_string()) {
+                quote! { E::F::from(self.#field) }
+            } else {
+                quote! { eval.next_trace_mask() }
+            }
+        })
+        .collect();
+    let witness_values: Vec<TokenStream2> = function
+        .table
+        .fields
+        .iter()
+        .map(|field| {
+            if let Some((position, _)) = preprocessed_by_name.get(&field.to_string()) {
+                quote! { preprocessed[#position].values.data[i] }
+            } else if param_names.contains(&field.to_string()) {
+                quote! { PackedM31::broadcast(#field) }
+            } else {
+                let position = committed_positions
+                    .get(&field.to_string())
+                    .expect("committed field has a trace position");
+                quote! { trace[#position].values.data[i] }
+            }
+        })
+        .collect();
+    let air_enabler = if has_committed {
+        quote! { eval.next_trace_mask() }
+    } else {
+        quote! { E::F::from(BaseField::from_u32_unchecked(1)) }
+    };
+    let witness_trace_param = if has_committed {
+        quote! {
+            trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
+        }
+    } else {
+        quote! {}
+    };
+    let witness_empty_check = if has_committed {
+        quote! { trace.is_empty() || preprocessed.is_empty() }
+    } else {
+        quote! { preprocessed.is_empty() }
+    };
+    let witness_enabler = if has_committed {
+        quote! { trace[0].values.data[i] }
+    } else {
+        quote! { PackedM31::broadcast(BaseField::from_u32_unchecked(1)) }
+    };
+    let witness_size = if has_committed {
+        quote! { trace[0].values.data.len() }
+    } else {
+        quote! { preprocessed[0].values.data.len() }
+    };
+    let witness_log_size = if has_committed {
+        quote! { trace[0].domain.log_size() }
+    } else {
+        quote! { preprocessed[0].domain.log_size() }
+    };
+
+    let batches = match logup_batches(n_entries, logup_batch, logup_unbatched_tail) {
+        Ok(batches) => batches,
+        Err(error) => return error.to_compile_error().into(),
+    };
+    let constraint_skip = usize::from(!enabler_boolean);
+    let finalize_logup = logup_finalize(&batches, logup_batch, logup_unbatched_tail);
+    let interaction_columns: Vec<TokenStream2> = batches
+        .iter()
+        .map(|batch| match batch.as_slice() {
+            [index] => quote! {
+                {
+                    let mut column = logup_gen.new_col();
+                    for (vec_row, (numerator, denominator)) in numerators[#index]
+                        .iter()
+                        .zip(denominators[#index].iter())
+                        .enumerate()
+                    {
+                        column.write_frac(vec_row, *numerator, *denominator);
+                    }
+                    column.finalize_col();
+                }
+            },
+            [first, second] => quote! {
+                {
+                    let mut column = logup_gen.new_col();
+                    for vec_row in 0..simd_size {
+                        let first_numerator = numerators[#first][vec_row];
+                        let first_denominator = denominators[#first][vec_row];
+                        let second_numerator = numerators[#second][vec_row];
+                        let second_denominator = denominators[#second][vec_row];
+                        column.write_frac(
+                            vec_row,
+                            first_numerator * second_denominator
+                                + second_numerator * first_denominator,
+                            first_denominator * second_denominator,
+                        );
+                    }
+                    column.finalize_col();
+                }
+            },
+            _ => unreachable!("logup batch is limited to one or two entries"),
+        })
+        .collect();
+
+    quote! {
+        #table
+
+        pub mod prover_columns {
+            #[allow(unused_imports)]
+            use stwo_constraint_framework::EvalAtRow;
+
+            #prover_columns
+        }
+
+        #evaluation
+
+        /// Preprocessed columns in the exact order consumed by the generated
+        /// interaction witness.
+        pub fn preprocessed_column_ids() -> Vec<
+            stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId,
+        > {
+            vec![
+                #(
+                    stwo_constraint_framework::preprocessed_columns::PreProcessedColumnId {
+                        id: #preprocessed_ids.into(),
+                    }
+                ),*
+            ]
+        }
+
+        /// Prover component wiring for a trusted preprocessed schedule.
+        pub mod component {
+            pub mod air {
+                use stwo::core::fields::m31::BaseField;
+                use stwo_constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval};
+
+                use #relations_path as Relations;
+                use super::super::prover_columns::#columns_type;
+
+                pub type Component = FrameworkComponent<Eval>;
+
+                #[derive(Clone)]
+                pub struct Eval {
+                    pub log_size: u32,
+                    #(pub #params: BaseField,)*
+                    pub relations: Relations,
+                }
+
+                impl FrameworkEval for Eval {
+                    fn log_size(&self) -> u32 {
+                        self.log_size
+                    }
+
+                    fn max_constraint_log_degree_bound(&self) -> u32 {
+                        self.log_size + 1
+                    }
+
+                    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+                        let columns = #columns_type::from_iter([
+                            #air_enabler,
+                            #(#air_values),*
+                        ]);
+                        let (constraints, entries) = columns.evaluation();
+                        for constraint in constraints.into_iter().skip(#constraint_skip) {
+                            eval.add_constraint(constraint);
+                        }
+                        let mut entries = entries.into_iter();
+                        let _ = entries.next();
+                        #(
+                            {
+                                let (multiplicity, values) =
+                                    entries.next().expect("relation entry");
+                                eval.add_to_relation(
+                                    stwo_constraint_framework::RelationEntry::new(
+                                        &self.relations.#relations,
+                                        multiplicity.into(),
+                                        &values,
+                                    ),
+                                );
+                            }
+                        )*
+                        #finalize_logup
+                        eval
+                    }
+                }
+            }
+
+            pub mod witness {
+                use num_traits::Zero;
+                use stwo::core::ColumnVec;
+                use stwo::core::fields::m31::BaseField;
+                use stwo::core::fields::qm31::QM31;
+                use stwo::prover::backend::simd::SimdBackend;
+                use stwo::prover::backend::simd::m31::PackedM31;
+                use stwo::prover::backend::simd::qm31::PackedQM31;
+                use stwo::prover::poly::BitReversedOrder;
+                use stwo::prover::poly::circle::CircleEvaluation;
+                use stwo_constraint_framework::{LogupTraceGenerator, Relation};
+
+                use #relations_path as Relations;
+                use super::super::prover_columns::#columns_type;
+
+                /// Build interaction columns from the trusted preprocessing and
+                /// the same lowered relation entries used by the AIR.
+                pub fn gen_interaction_trace(
+                    #witness_trace_param
+                    preprocessed: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
+                    #(#params: BaseField,)*
+                    relations: &Relations,
+                ) -> (
+                    ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
+                    QM31,
+                ) {
+                    if #witness_empty_check {
+                        return (vec![], QM31::zero());
+                    }
+                    let simd_size = #witness_size;
+                    let log_size = #witness_log_size;
+                    let mut logup_gen = LogupTraceGenerator::new(log_size);
+                    let mut numerators: Vec<Vec<PackedQM31>> =
+                        vec![Vec::with_capacity(simd_size); #n_entries];
+                    let mut denominators: Vec<Vec<PackedQM31>> =
+                        vec![Vec::with_capacity(simd_size); #n_entries];
+                    for i in 0..simd_size {
+                        let columns = #columns_type::from_iter([
+                            #witness_enabler,
+                            #(#witness_values),*
+                        ]);
+                        let (_, entries) = columns.evaluation();
+                        let entries: Vec<_> = entries.into_iter().skip(1).collect();
+                        #(
+                            {
+                                let (multiplicity, values) = &entries[#indices];
+                                numerators[#indices].push(PackedQM31::from(*multiplicity));
+                                denominators[#indices].push(
+                                    Relation::combine(&relations.#relations, values),
+                                );
+                            }
+                        )*
+                    }
+                    #(#interaction_columns)*
+                    logup_gen.finalize_last()
+                }
+            }
+        }
+    }
+    .into()
+}
+
+struct EmbeddedOptions<'a> {
+    component: bool,
+    relations_path: &'a Path,
+    logup_batch: usize,
+    logup_unbatched_tail: usize,
+    dynamic_component: bool,
+    vm_access: Option<&'a (Path, Path)>,
+}
+
 fn generate_embedded(
     lowered: &mut [LoweredFn],
     flags: &[Ident],
-    embedded_component: bool,
+    options: EmbeddedOptions<'_>,
 ) -> TokenStream {
     let [function] = lowered else {
         return syn::Error::new(
@@ -1662,9 +3903,24 @@ fn generate_embedded(
     let prover_columns =
         generate_prover_columns(&function.table).unwrap_or_else(|e| e.to_compile_error());
     let evaluation = generate_evaluation_impl(function).unwrap_or_else(|e| e.to_compile_error());
-    let fill = generate_embedded_fill(function, flags).unwrap_or_else(|e| e.to_compile_error());
-    let component = if embedded_component {
-        generate_embedded_poseidon2_component(function, flags)
+    let fill = generate_embedded_fill(function, flags, options.vm_access)
+        .unwrap_or_else(|e| e.to_compile_error());
+    let component = if options.component {
+        if function.relation_entries.is_empty() {
+            // No emit/consume statements: the Poseidon2 adapter, which emits
+            // from the io activation tuple under its narrow/wide/io flags.
+            generate_embedded_poseidon2_component(function, flags, options.relations_path)
+        } else {
+            // An opcode: emit its declared relations (emit/consume) against
+            // the host `crate::relations::Relations`.
+            generate_embedded_opcode_component(
+                function,
+                options.relations_path,
+                options.logup_batch,
+                options.logup_unbatched_tail,
+                options.dynamic_component,
+            )
+        }
     } else {
         quote! {}
     };
@@ -1688,8 +3944,314 @@ fn generate_embedded(
     .into()
 }
 
+/// Is a host relation preprocessed (a lookup table whose multiplicities the
+/// opcode must register)? In the rv32im relation set these are the range
+/// checks and the bitwise table.
+fn is_preprocessed_relation(name: &Ident) -> bool {
+    let n = name.to_string();
+    n.starts_with("range_check") || n == "bitwise"
+}
+
+/// The embedded component maps the function's declared relation statements to
+/// a host relation bundle and generates matching AIR and witness LogUp paths.
+/// The function's own io activation tuple is unused because the host fills the
+/// table directly rather than activating it through a function relation.
+fn generate_embedded_opcode_component(
+    function: &LoweredFn,
+    relations_path: &Path,
+    logup_batch: usize,
+    logup_unbatched_tail: usize,
+    embedded_dynamic_component: bool,
+) -> TokenStream2 {
+    let columns_type = column_struct_name(&function.name);
+    // SIMD length column: the first committed column (flag tables have no
+    // `enabler` column to measure).
+    let len_col = function
+        .table
+        .fields
+        .first()
+        .cloned()
+        .unwrap_or_else(|| format_ident!("enabler"));
+    let n_entries = function.relation_entries.len();
+    let indices: Vec<usize> = (0..n_entries).collect();
+    let relations: Vec<&Ident> = function
+        .relation_entries
+        .iter()
+        .map(|(relation, _, _, _)| relation)
+        .collect();
+
+    // Preprocessed entries (range checks / bitwise): their per-row
+    // multiplicities feed the preprocessed table's counter.
+    let preprocessed: Vec<(usize, &Ident)> = function
+        .relation_entries
+        .iter()
+        .enumerate()
+        .filter(|(_, (relation, _, _, _))| is_preprocessed_relation(relation))
+        .map(|(index, (relation, _, _, _))| (index, relation))
+        .collect();
+    let pp_slots: Vec<usize> = (0..preprocessed.len()).collect();
+    let pp_entry_indices: Vec<usize> = preprocessed.iter().map(|(i, _)| *i).collect();
+    let pp_relations: Vec<&Ident> = preprocessed.iter().map(|(_, r)| *r).collect();
+    let n_preprocessed = preprocessed.len();
+    let batches = match logup_batches(n_entries, logup_batch, logup_unbatched_tail) {
+        Ok(batches) => batches,
+        Err(error) => return error.to_compile_error(),
+    };
+    let finalize_logup = logup_finalize(&batches, logup_batch, logup_unbatched_tail);
+    let interaction_columns: Vec<TokenStream2> = batches
+        .iter()
+        .map(|batch| match batch.as_slice() {
+            [index] => quote! {
+                {
+                    let mut col = logup_gen.new_col();
+                    for (vec_row, (n, d)) in numerators[#index]
+                        .iter()
+                        .zip(denominators[#index].iter())
+                        .enumerate()
+                    {
+                        col.write_frac(vec_row, *n, *d);
+                    }
+                    col.finalize_col();
+                }
+            },
+            [first, second] => quote! {
+                {
+                    let mut col = logup_gen.new_col();
+                    for vec_row in 0..simd_size {
+                        let first_numerator = numerators[#first][vec_row];
+                        let first_denominator = denominators[#first][vec_row];
+                        let second_numerator = numerators[#second][vec_row];
+                        let second_denominator = denominators[#second][vec_row];
+                        col.write_frac(
+                            vec_row,
+                            first_numerator * second_denominator
+                                + second_numerator * first_denominator,
+                            first_denominator * second_denominator,
+                        );
+                    }
+                    col.finalize_col();
+                }
+            },
+            _ => unreachable!("logup batch is limited to one or two entries"),
+        })
+        .collect();
+    let register_multiplicities = if preprocessed.is_empty() {
+        quote! {
+            /// This component has no preprocessed lookup multiplicities.
+            pub fn register_multiplicities<T>(
+                _trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
+                _counters: &mut T,
+            ) {
+            }
+        }
+    } else {
+        quote! {
+            /// Register preprocessed multiplicities for range-check and bitwise lookups.
+            pub fn register_multiplicities(
+                trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
+                counters: &mut crate::relations::Counters,
+            ) {
+                if trace.is_empty() {
+                    return;
+                }
+                let _ = (&counters,);
+                let cols = #columns_type::from_iter(trace.iter().map(|eval| &eval.values.data));
+                let simd_size = cols.#len_col.len();
+                let mut multiplicities: Vec<Vec<stwo::prover::backend::simd::m31::PackedM31>> =
+                    vec![Vec::with_capacity(simd_size); #n_preprocessed];
+                let mut elements: Vec<Vec<Vec<stwo::prover::backend::simd::m31::PackedM31>>> =
+                    Vec::with_capacity(#n_preprocessed);
+                for _ in 0..#n_preprocessed {
+                    elements.push(Vec::new());
+                }
+                for i in 0..simd_size {
+                    let (_, entries) = cols.at(i).evaluation();
+                    let entries: Vec<_> = entries.into_iter().skip(1).collect();
+                    #(
+                        {
+                            let (multiplicity, values) = &entries[#pp_entry_indices];
+                            multiplicities[#pp_slots].push(*multiplicity);
+                            if elements[#pp_slots].is_empty() {
+                                for _ in 0..values.len() {
+                                    elements[#pp_slots].push(Vec::with_capacity(simd_size));
+                                }
+                            }
+                            for (column, value) in
+                                elements[#pp_slots].iter_mut().zip(values.iter())
+                            {
+                                column.push(*value);
+                            }
+                        }
+                    )*
+                }
+                #(
+                    counters.#pp_relations.register_many(
+                        &multiplicities[#pp_slots],
+                        &elements[#pp_slots]
+                            .iter()
+                            .map(|column| column.as_slice())
+                            .collect::<Vec<_>>(),
+                    );
+                )*
+            }
+        }
+    };
+    let dynamic_eval = if embedded_dynamic_component {
+        quote! {
+            impl air::relation_eval::DynamicRelationFrameworkEval for Eval {
+                fn evaluate_dynamic_relations<E: air::relation_eval::DynamicRelationEvalAtRow>(
+                    &self,
+                    mut eval: E,
+                ) -> E {
+                    let cols = #columns_type::from_eval(&mut eval);
+                    let (constraints, entries) = cols.evaluation();
+                    for constraint in constraints {
+                        eval.add_constraint(constraint);
+                    }
+                    let mut entries = entries.into_iter();
+                    let _ = entries.next();
+                    #(
+                        {
+                            let (multiplicity, values) =
+                                entries.next().expect("relation entry");
+                            eval.add_to_named_relation(
+                                stringify!(#relations),
+                                multiplicity.into(),
+                                &values,
+                            );
+                        }
+                    )*
+                    #finalize_logup
+                    eval
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    quote! {
+        /// Prover component wiring for the embedded opcode.
+        pub mod component {
+            pub mod air {
+                use stwo_constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval};
+
+                use #relations_path as Relations;
+                use super::super::prover_columns::#columns_type;
+
+                pub type Component = FrameworkComponent<Eval>;
+
+                #[derive(Clone)]
+                pub struct Eval {
+                    pub log_size: u32,
+                    pub relations: Relations,
+                }
+
+                impl FrameworkEval for Eval {
+                    fn log_size(&self) -> u32 {
+                        self.log_size
+                    }
+
+                    fn max_constraint_log_degree_bound(&self) -> u32 {
+                        self.log_size + 1
+                    }
+
+                    fn evaluate<E: EvalAtRow>(&self, mut eval: E) -> E {
+                        let cols = #columns_type::from_eval(&mut eval);
+                        let (constraints, entries) = cols.evaluation();
+                        for constraint in constraints {
+                            eval.add_constraint(constraint);
+                        }
+                        let mut entries = entries.into_iter();
+                        // Entry 0 is the function's own io activation tuple,
+                        // unused: the opcode emits the host relations instead.
+                        let _ = entries.next();
+                        #(
+                            {
+                                let (multiplicity, values) =
+                                    entries.next().expect("relation entry");
+                                eval.add_to_relation(
+                                    stwo_constraint_framework::RelationEntry::new(
+                                        &self.relations.#relations,
+                                        multiplicity.into(),
+                                        &values,
+                                    ),
+                                );
+                            }
+                        )*
+                        #finalize_logup
+                        eval
+                    }
+                }
+
+                #dynamic_eval
+            }
+
+            pub mod witness {
+                use num_traits::Zero;
+                use stwo::core::ColumnVec;
+                use stwo::core::fields::m31::BaseField;
+                use stwo::core::fields::qm31::QM31;
+                use stwo::prover::backend::simd::SimdBackend;
+                use stwo::prover::backend::simd::qm31::PackedQM31;
+                use stwo::prover::poly::BitReversedOrder;
+                use stwo::prover::poly::circle::CircleEvaluation;
+                use stwo_constraint_framework::{LogupTraceGenerator, Relation};
+
+                use #relations_path as Relations;
+                use super::super::prover_columns::#columns_type;
+
+                /// Interaction columns use the same relation order and batch
+                /// shape as the generated AIR.
+                pub fn gen_interaction_trace(
+                    trace: &[CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>],
+                    relations: &Relations,
+                ) -> (
+                    ColumnVec<CircleEvaluation<SimdBackend, BaseField, BitReversedOrder>>,
+                    QM31,
+                ) {
+                    if trace.is_empty() {
+                        return (vec![], QM31::zero());
+                    }
+                    let cols = #columns_type::from_iter(trace.iter().map(|eval| &eval.values.data));
+                    let simd_size = cols.#len_col.len();
+                    let log_size = trace[0].domain.log_size();
+                    let mut logup_gen = LogupTraceGenerator::new(log_size);
+
+                    let mut numerators: Vec<Vec<PackedQM31>> =
+                        vec![Vec::with_capacity(simd_size); #n_entries];
+                    let mut denominators: Vec<Vec<PackedQM31>> =
+                        vec![Vec::with_capacity(simd_size); #n_entries];
+                    for i in 0..simd_size {
+                        let (_, entries) = cols.at(i).evaluation();
+                        // Skip entry 0 (the io activation tuple).
+                        let entries: Vec<_> = entries.into_iter().skip(1).collect();
+                        #(
+                            {
+                                let (multiplicity, values) = &entries[#indices];
+                                numerators[#indices].push(PackedQM31::from(*multiplicity));
+                                denominators[#indices].push(
+                                    Relation::combine(&relations.#relations, values),
+                                );
+                            }
+                        )*
+                    }
+                    #(#interaction_columns)*
+                    logup_gen.finalize_last()
+                }
+
+                #register_multiplicities
+            }
+        }
+    }
+}
+
 /// LogUp adapter for embedded Poseidon2: narrow, wide, and atomic io modes.
-fn generate_embedded_poseidon2_component(function: &LoweredFn, flags: &[Ident]) -> TokenStream2 {
+fn generate_embedded_poseidon2_component(
+    function: &LoweredFn,
+    flags: &[Ident],
+    relations_path: &Path,
+) -> TokenStream2 {
     let _ = flags;
     let columns_type = column_struct_name(&function.name);
     quote! {
@@ -1697,9 +4259,12 @@ fn generate_embedded_poseidon2_component(function: &LoweredFn, flags: &[Ident]) 
         pub mod component {
             pub mod air {
                 use num_traits::One;
+                use crate::relation_eval::{
+                    DynamicRelationEvalAtRow, DynamicRelationFrameworkEval,
+                };
                 use stwo_constraint_framework::{EvalAtRow, FrameworkComponent, FrameworkEval, RelationEntry};
 
-                use crate::relations::Relations;
+                use #relations_path as Relations;
                 use super::super::prover_columns::#columns_type;
 
                 pub type Component = FrameworkComponent<Eval>;
@@ -1764,6 +4329,56 @@ fn generate_embedded_poseidon2_component(function: &LoweredFn, flags: &[Ident]) 
                         eval
                     }
                 }
+
+                impl DynamicRelationFrameworkEval for Eval {
+                    fn evaluate_dynamic_relations<E: DynamicRelationEvalAtRow>(
+                        &self,
+                        mut eval: E,
+                    ) -> E {
+                        let cols = #columns_type::from_eval(&mut eval);
+                        let (constraints, entries) = cols.evaluation();
+                        for constraint in constraints {
+                            eval.add_constraint(constraint);
+                        }
+
+                        let one = E::F::one();
+                        let enabler = cols.enabler.clone();
+                        let wide = cols.wide.clone();
+                        let io = cols.io.clone();
+                        eval.add_constraint(wide.clone() * (one.clone() - wide.clone()));
+                        eval.add_constraint(io.clone() * (one.clone() - io.clone()));
+                        eval.add_constraint(wide.clone() * io.clone());
+
+                        let (_, tuple) = entries
+                            .into_iter()
+                            .next()
+                            .expect("the felt function has one activation tuple");
+                        let (input, output) = tuple.split_at(16);
+
+                        eval.add_to_named_relation(
+                            stringify!(poseidon2),
+                            (-(enabler.clone() * (one.clone() - io.clone()))).into(),
+                            input,
+                        );
+                        eval.add_to_named_relation(
+                            stringify!(poseidon2),
+                            (enabler.clone() * (one.clone() - wide.clone() - io.clone())).into(),
+                            &output[..1],
+                        );
+                        eval.add_to_named_relation(
+                            stringify!(poseidon2),
+                            (enabler.clone() * wide).into(),
+                            &output[..8],
+                        );
+                        eval.add_to_named_relation(
+                            stringify!(poseidon2_io),
+                            (enabler * io).into(),
+                            &tuple,
+                        );
+                        eval.finalize_logup_in_pairs();
+                        eval
+                    }
+                }
             }
 
             pub mod witness {
@@ -1778,7 +4393,8 @@ fn generate_embedded_poseidon2_component(function: &LoweredFn, flags: &[Ident]) 
                 use stwo::prover::poly::circle::CircleEvaluation;
                 use stwo_constraint_framework::{LogupTraceGenerator, Relation};
 
-                use crate::relations::{Counters, Relations};
+                use crate::relations::Counters;
+                use #relations_path as Relations;
                 use super::super::prover_columns::#columns_type;
 
                 pub fn gen_interaction_trace(
@@ -1844,7 +4460,388 @@ fn generate_embedded_poseidon2_component(function: &LoweredFn, flags: &[Ident]) 
 
 /// The embedded row-fill: run the cells, push the row (flags appended),
 /// return the outputs.
-fn generate_embedded_fill(function: &LoweredFn, flags: &[Ident]) -> syn::Result<TokenStream2> {
+fn generate_access_fill_step(step: &FillStep, state_path: &Path) -> syn::Result<TokenStream2> {
+    let base_field = quote!(stwo::core::fields::m31::BaseField);
+    match step {
+        FillStep::AccessPrepare {
+            kind,
+            addr_space,
+            addr,
+            prev,
+        } => {
+            let raw = format_ident!("__{}_prior_word", prev[0]);
+            let register_read = quote! {
+                #state_path::read_register(
+                    state,
+                    u8::try_from(#addr.0).expect("register index must fit in u8"),
+                )
+            };
+            let memory_read = quote! { #state_path::read_memory_word(state, #addr.0) };
+            let read = if kind.is_dynamic() {
+                let addr_space = addr_space.as_ref().expect("dynamic access address space");
+                quote! {
+                    match #addr_space.0 {
+                        0 => #register_read,
+                        1 => #memory_read,
+                        _ => panic!("word access address space must be zero or one"),
+                    }
+                }
+            } else if kind.is_register() {
+                register_read
+            } else {
+                memory_read
+            };
+            Ok(quote! {
+                let #raw = #read;
+                let [#(#prev),*] = #raw.to_le_bytes().map(|limb| {
+                    #base_field::from_u32_unchecked(u32::from(limb))
+                });
+            })
+        }
+        FillStep::AccessCommit {
+            kind,
+            addr_space,
+            clock,
+            addr,
+            prev,
+            clock_prev,
+            next,
+            desired,
+            addr_inverse,
+        } => {
+            let record = format_ident!("__{}_record", clock_prev);
+            let raw = format_ident!("__{}_prior_word", prev[0]);
+            let register_read = quote! {
+                    #state_path::read_register(
+                        state,
+                        u8::try_from(#addr.0).expect("register index must fit in u8"),
+                    )
+            };
+            let memory_read = quote! { #state_path::read_memory_word(state, #addr.0) };
+            let read = if kind.is_dynamic() {
+                let addr_space = addr_space.as_ref().expect("dynamic access address space");
+                quote! {
+                    match #addr_space.0 {
+                        0 => #register_read,
+                        1 => #memory_read,
+                        _ => panic!("word access address space must be zero or one"),
+                    }
+                }
+            } else if kind.is_register() {
+                register_read
+            } else {
+                memory_read
+            };
+            let register_trace = quote! {
+                tracer.trace_reg_access(
+                    u8::try_from(#addr.0).expect("register index must fit in u8"),
+                    #raw,
+                    __next_word,
+                )
+            };
+            let memory_trace = quote! { tracer.trace_mem_access(#addr.0, #raw, __next_word) };
+            let trace = if kind.is_dynamic() {
+                let addr_space = addr_space.as_ref().expect("dynamic access address space");
+                quote! {
+                    match #addr_space.0 {
+                        0 => #register_trace,
+                        1 => #memory_trace,
+                        _ => panic!("word access address space must be zero or one"),
+                    }
+                }
+            } else if kind.is_register() {
+                register_trace
+            } else {
+                memory_trace
+            };
+            let prepare = if kind.is_write() {
+                let desired = desired.as_ref().expect("write access has desired limbs");
+                let desired_bytes = desired.iter().map(|limb| {
+                    quote! { u8::try_from(#limb.0).expect("access limb must fit in u8") }
+                });
+                let register_write = quote! {
+                    #state_path::write_register(
+                        state,
+                        u8::try_from(#addr.0).expect("register index must fit in u8"),
+                        __requested_word,
+                    );
+                };
+                let memory_write =
+                    quote! { #state_path::write_memory_word(state, #addr.0, __requested_word); };
+                let write = if kind.is_dynamic() {
+                    let addr_space = addr_space.as_ref().expect("dynamic access address space");
+                    quote! {
+                        match #addr_space.0 {
+                            0 => { #register_write }
+                            1 => { #memory_write }
+                            _ => panic!("word access address space must be zero or one"),
+                        }
+                    }
+                } else if kind.is_register() {
+                    register_write
+                } else {
+                    memory_write
+                };
+                quote! {
+                    let __requested_word = u32::from_le_bytes([
+                        #(#desired_bytes),*
+                    ]);
+                    #write
+                    let __next_word = #read;
+                }
+            } else {
+                quote! {
+                    let #raw = #read;
+                    let __next_word = #raw;
+                }
+            };
+            let bind_prev = if kind.is_write() {
+                quote! {}
+            } else {
+                quote! {
+                    let [#(#prev),*] = #record.prev.to_le_bytes().map(|limb| {
+                        #base_field::from_u32_unchecked(u32::from(limb))
+                    });
+                }
+            };
+            let bind_inverse = match addr_inverse {
+                Some(inverse) => quote! {
+                    let #inverse = if #addr.0 == 0 {
+                        #base_field::from_u32_unchecked(0)
+                    } else {
+                        stwo::core::fields::FieldExpOps::inverse(&#addr)
+                    };
+                },
+                None => quote! {},
+            };
+            Ok(quote! {
+                assert_eq!(
+                    #clock.0,
+                    tracer.clock,
+                    "generated access clock must equal the tracer clock",
+                );
+                #prepare
+                let #record = #trace;
+                assert_eq!(
+                    #record.addr,
+                    #addr.0,
+                    "generated access address must match the traced address",
+                );
+                assert_eq!(
+                    #record.prev,
+                    #raw,
+                    "generated access prior value must match architectural state",
+                );
+                #bind_prev
+                let #clock_prev = #base_field::from_u32_unchecked(#record.clock_prev);
+                let [#(#next),*] = #record.next.to_le_bytes().map(|limb| {
+                    #base_field::from_u32_unchecked(u32::from(limb))
+                });
+                #bind_inverse
+            })
+        }
+        _ => Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "expected an access fill step",
+        )),
+    }
+}
+
+fn generate_intrinsic_fill_step(step: &FillStep) -> syn::Result<TokenStream2> {
+    let base_field = quote!(stwo::core::fields::m31::BaseField);
+    match step {
+        FillStep::SplitM31 { value, limbs } => {
+            let value = concrete_expr(value)?;
+            Ok(quote! {
+                let [#(#limbs),*] = (#value).0.to_le_bytes().map(|limb| {
+                    #base_field::from_u32_unchecked(u32::from(limb))
+                });
+            })
+        }
+        FillStep::Bitwise {
+            kind,
+            lhs,
+            rhs,
+            output,
+        } => {
+            let operation = match kind {
+                BitwiseKind::And => quote!(#lhs.0 & #rhs.0),
+                BitwiseKind::Or => quote!(#lhs.0 | #rhs.0),
+                BitwiseKind::Xor => quote!(#lhs.0 ^ #rhs.0),
+            };
+            Ok(quote! {
+                let #output = #base_field::from_u32_unchecked(#operation);
+            })
+        }
+        FillStep::WordArithmetic {
+            kind,
+            lhs,
+            rhs,
+            output,
+            carries,
+        } => {
+            let steps = lhs
+                .iter()
+                .zip(rhs)
+                .zip(output)
+                .zip(carries)
+                .map(|(((lhs, rhs), output), carry)| match kind {
+                    WordArithmeticKind::Add => quote! {
+                        let __wide = u16::from(
+                            u8::try_from(#lhs.0).expect("word limb must fit in u8"),
+                        ) + u16::from(
+                            u8::try_from(#rhs.0).expect("word limb must fit in u8"),
+                        ) + __carry;
+                        let #output = #base_field::from_u32_unchecked(
+                            u32::from((__wide & 0xff) as u8),
+                        );
+                        __carry = __wide >> 8;
+                        let #carry = #base_field::from_u32_unchecked(u32::from(__carry));
+                    },
+                    WordArithmeticKind::Sub => quote! {
+                        let __wide = i16::from(
+                            u8::try_from(#lhs.0).expect("word limb must fit in u8"),
+                        ) - i16::from(
+                            u8::try_from(#rhs.0).expect("word limb must fit in u8"),
+                        ) - __borrow;
+                        let #output = #base_field::from_u32_unchecked(
+                            u32::from(__wide.rem_euclid(256) as u8),
+                        );
+                        __borrow = i16::from(__wide < 0);
+                        let #carry = #base_field::from_u32_unchecked(__borrow as u32);
+                    },
+                })
+                .collect::<Vec<_>>();
+            let initial = match kind {
+                WordArithmeticKind::Add => quote!(let mut __carry = 0u16;),
+                WordArithmeticKind::Sub => quote!(let mut __borrow = 0i16;),
+            };
+            Ok(quote! {
+                #initial
+                #(#steps)*
+            })
+        }
+        FillStep::SelectedBinaryWord {
+            lhs,
+            rhs,
+            selectors,
+            output,
+        } => {
+            let [add, sub, and, or, xor] = selectors;
+            Ok(quote! {
+                let __binary_lhs = u32::from_le_bytes([#(
+                    u8::try_from(#lhs.0).expect("word limb must fit in u8")
+                ),*]);
+                let __binary_rhs = u32::from_le_bytes([#(
+                    u8::try_from(#rhs.0).expect("word limb must fit in u8")
+                ),*]);
+                let __binary_result = match [#add.0, #sub.0, #and.0, #or.0, #xor.0] {
+                    [1, 0, 0, 0, 0] => __binary_lhs.wrapping_add(__binary_rhs),
+                    [0, 1, 0, 0, 0] => __binary_lhs.wrapping_sub(__binary_rhs),
+                    [0, 0, 1, 0, 0] => __binary_lhs & __binary_rhs,
+                    [0, 0, 0, 1, 0] => __binary_lhs | __binary_rhs,
+                    [0, 0, 0, 0, 1] => __binary_lhs ^ __binary_rhs,
+                    _ => panic!("binary_u32 requires one selected operation"),
+                };
+                let [#(#output),*] = __binary_result.to_le_bytes().map(|limb| {
+                    #base_field::from_u32_unchecked(u32::from(limb))
+                });
+            })
+        }
+        FillStep::DivRemWord {
+            lhs,
+            rhs,
+            signed,
+            quotient,
+            remainder,
+            zero_divisor,
+            zero_remainder,
+            overflow,
+            divisor_sum_inverse,
+            remainder_sum_inverse,
+        } => Ok(quote! {
+            let (
+                [#(#quotient),*],
+                [#(#remainder),*],
+                #zero_divisor,
+                #zero_remainder,
+                #overflow,
+                #divisor_sum_inverse,
+                #remainder_sum_inverse,
+            ) = {
+                let __lhs_bytes = [#(
+                    u8::try_from(#lhs.0).expect("word limb must fit in u8")
+                ),*];
+                let __rhs_bytes = [#(
+                    u8::try_from(#rhs.0).expect("word limb must fit in u8")
+                ),*];
+                let __lhs_word = u32::from_le_bytes(__lhs_bytes);
+                let __rhs_word = u32::from_le_bytes(__rhs_bytes);
+                let __signed = match #signed.0 {
+                    0 => false,
+                    1 => true,
+                    _ => panic!("division signed selector must be zero or one"),
+                };
+                let __zero_divisor = __rhs_word == 0;
+                let __overflow = __signed
+                    && __lhs_word == 0x8000_0000
+                    && __rhs_word == u32::MAX;
+                let (__quotient, __remainder) = if __zero_divisor {
+                    (u32::MAX, __lhs_word)
+                } else if __signed {
+                    let __lhs_signed = __lhs_word as i32;
+                    let __rhs_signed = __rhs_word as i32;
+                    (
+                        __lhs_signed.wrapping_div(__rhs_signed) as u32,
+                        __lhs_signed.wrapping_rem(__rhs_signed) as u32,
+                    )
+                } else {
+                    (__lhs_word / __rhs_word, __lhs_word % __rhs_word)
+                };
+                let __zero_remainder = !__zero_divisor && __remainder == 0;
+                let __divisor_sum = __rhs_bytes
+                    .into_iter()
+                    .map(u32::from)
+                    .sum::<u32>();
+                let __remainder_bytes = __remainder.to_le_bytes();
+                let __remainder_sum = __remainder_bytes
+                    .into_iter()
+                    .map(u32::from)
+                    .sum::<u32>();
+                let __inverse_or_zero = |value| {
+                    if value == 0 {
+                        #base_field::from_u32_unchecked(0)
+                    } else {
+                        #base_field::from_u32_unchecked(value).inverse()
+                    }
+                };
+                (
+                    __quotient.to_le_bytes().map(|limb| {
+                        #base_field::from_u32_unchecked(u32::from(limb))
+                    }),
+                    __remainder_bytes.map(|limb| {
+                        #base_field::from_u32_unchecked(u32::from(limb))
+                    }),
+                    #base_field::from_u32_unchecked(u32::from(__zero_divisor)),
+                    #base_field::from_u32_unchecked(u32::from(__zero_remainder)),
+                    #base_field::from_u32_unchecked(u32::from(__overflow)),
+                    __inverse_or_zero(__divisor_sum),
+                    __inverse_or_zero(__remainder_sum),
+                )
+            };
+        }),
+        _ => Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "expected an intrinsic fill step",
+        )),
+    }
+}
+
+fn generate_embedded_fill(
+    function: &LoweredFn,
+    flags: &[Ident],
+    vm_access: Option<&(Path, Path)>,
+) -> syn::Result<TokenStream2> {
     let name = &function.name;
     let fn_name = format_ident!("{}_fill", name);
     let table_type = table_name(name);
@@ -1861,11 +4858,29 @@ fn generate_embedded_fill(function: &LoweredFn, flags: &[Ident]) -> syn::Result<
                 steps.push(quote! { let #cell = #value; });
             }
             FillStep::Call { .. } => unreachable!("embedded functions make no calls"),
+            FillStep::SplitM31 { .. }
+            | FillStep::Bitwise { .. }
+            | FillStep::WordArithmetic { .. }
+            | FillStep::SelectedBinaryWord { .. }
+            | FillStep::DivRemWord { .. } => {
+                steps.push(generate_intrinsic_fill_step(step)?);
+            }
+            FillStep::AccessPrepare { .. } | FillStep::AccessCommit { .. } => {
+                let (state_path, _) = vm_access.expect("access lowering requires vm config");
+                steps.push(generate_access_fill_step(step, state_path)?);
+            }
         }
     }
 
-    // Row layout: enabler, the lowered fields, then the flags.
-    let mut row_values: Vec<TokenStream2> = vec![quote!(1u32)];
+    // Row layout: the leading `enabler` column (1 for filled rows) exists
+    // only on non-flag tables — flag tables synthesize `enabler()` from the
+    // opcode flags and have no enabler column. Then the lowered fields, then
+    // the embedded flags.
+    let mut row_values: Vec<TokenStream2> = if count_opcode_flags(&function.table.fields) == 0 {
+        vec![quote!(1u32)]
+    } else {
+        vec![]
+    };
     for field in &function.table.fields[..function.table.fields.len() - n_flags] {
         row_values.push(quote!(#field.0));
     }
@@ -1877,16 +4892,34 @@ fn generate_embedded_fill(function: &LoweredFn, flags: &[Ident]) -> syn::Result<
     let doc = format!(
         "Run `{name}` over the arguments, push the trace row (with the flag          columns appended), and return the outputs."
     );
+    let table_param = if let Some((state_path, tracer_path)) = vm_access {
+        quote! {
+            state: &mut impl #state_path,
+            tracer: &mut #tracer_path,
+        }
+    } else {
+        quote! { table: &mut #table_type, }
+    };
+    let push_row = if vm_access.is_some() {
+        quote! { tracer.#name.push_row(&[#(#row_values),*]); }
+    } else {
+        quote! { table.push_row(&[#(#row_values),*]); }
+    };
+
     Ok(quote! {
         #[doc = #doc]
+        // Cells used only in relation tuples / constraints are recomputed in
+        // the AIR's `evaluation()`, so their fill bindings can be unused here.
+        #[allow(unused_variables)]
         pub fn #fn_name(
-            table: &mut #table_type,
+            #table_param
             args: [stwo::core::fields::m31::BaseField; #n_args],
             flags: [u32; #n_flags],
         ) -> [stwo::core::fields::m31::BaseField; #n_rets] {
+            let enabler = stwo::core::fields::m31::BaseField::from_u32_unchecked(1);
             let [#(#arg_cells),*] = args;
             #(#steps)*
-            table.push_row(&[#(#row_values),*]);
+            #push_row
             [#(#ret_cells),*]
         }
     })
@@ -1894,7 +4927,10 @@ fn generate_embedded_fill(function: &LoweredFn, flags: &[Ident]) -> syn::Result<
 
 /// The witness fill: run the lowered cells over `BaseField`, recursively
 /// activate callees, push the row, return the outputs.
-fn generate_call_fn(function: &LoweredFn) -> syn::Result<TokenStream2> {
+fn generate_call_fn(
+    function: &LoweredFn,
+    vm_access: Option<&(Path, Path)>,
+) -> syn::Result<TokenStream2> {
     let name = &function.name;
     let fn_name = format_ident!("call_{}", name);
     let n_args = function.n_args;
@@ -1910,9 +4946,26 @@ fn generate_call_fn(function: &LoweredFn) -> syn::Result<TokenStream2> {
             }
             FillStep::Call { rets, callee, args } => {
                 let callee_fn = format_ident!("call_{}", callee);
-                steps.push(quote! {
-                    let [#(#rets),*] = #callee_fn(tables, [#(#args),*]);
-                });
+                if vm_access.is_some() {
+                    steps.push(quote! {
+                        let [#(#rets),*] = #callee_fn(tables, state, tracer, [#(#args),*]);
+                    });
+                } else {
+                    steps.push(quote! {
+                        let [#(#rets),*] = #callee_fn(tables, [#(#args),*]);
+                    });
+                }
+            }
+            FillStep::SplitM31 { .. }
+            | FillStep::Bitwise { .. }
+            | FillStep::WordArithmetic { .. }
+            | FillStep::SelectedBinaryWord { .. }
+            | FillStep::DivRemWord { .. } => {
+                steps.push(generate_intrinsic_fill_step(step)?);
+            }
+            FillStep::AccessPrepare { .. } | FillStep::AccessCommit { .. } => {
+                let (state_path, _) = vm_access.expect("access lowering requires vm config");
+                steps.push(generate_access_fill_step(step, state_path)?);
             }
         }
     }
@@ -1926,12 +4979,25 @@ fn generate_call_fn(function: &LoweredFn) -> syn::Result<TokenStream2> {
 
     let doc =
         format!("Activate `{name}`: run the body, recursively activate callees, push the row.");
+    let access_params = if let Some((state_path, tracer_path)) = vm_access {
+        quote! {
+            state: &mut impl #state_path,
+            tracer: &mut #tracer_path,
+        }
+    } else {
+        quote! {}
+    };
     Ok(quote! {
         #[doc = #doc]
+        // Cells used only in relation tuples / constraints are recomputed in
+        // the AIR's `evaluation()`, so their fill bindings can be unused here.
+        #[allow(unused_variables)]
         pub fn #fn_name(
             tables: &mut Tables,
+            #access_params
             args: [stwo::core::fields::m31::BaseField; #n_args],
         ) -> [stwo::core::fields::m31::BaseField; #n_rets] {
+            let enabler = stwo::core::fields::m31::BaseField::from_u32_unchecked(1);
             let [#(#arg_cells),*] = args;
             #(#steps)*
             tables.#name.push_row(&[#(#row_values),*]);
@@ -1946,10 +5012,16 @@ fn generate_call_fn(function: &LoweredFn) -> syn::Result<TokenStream2> {
 fn generate_component_module(function: &LoweredFn) -> TokenStream2 {
     let name = &function.name;
     let columns_type = column_struct_name(name);
-    let n_entries = 1 + function.calls.len();
+    let n_entries = 1 + function.calls.len() + function.relation_entries.len();
     let entry_indices: Vec<usize> = (0..n_entries).collect();
     let entry_relations: Vec<&Ident> = std::iter::once(&function.name)
         .chain(function.calls.iter().map(|(callee, _, _)| callee))
+        .chain(
+            function
+                .relation_entries
+                .iter()
+                .map(|(relation, _, _, _)| relation),
+        )
         .collect();
     let doc = format!("{name} component, generated from its felt function.");
     quote! {
@@ -2135,9 +5207,12 @@ fn generate_harness(lowered: &[LoweredFn]) -> TokenStream2 {
             quote! { prover_columns::#columns_type::<()>::SIZE }
         })
         .collect();
-    // One singleton fraction column per entry: the own activation plus one
-    // per call made.
-    let entry_counts: Vec<usize> = lowered.iter().map(|f| 1 + f.calls.len()).collect();
+    // One singleton fraction column per entry: the own activation, one per
+    // call made, and one per external relation emit/consume.
+    let entry_counts: Vec<usize> = lowered
+        .iter()
+        .map(|f| 1 + f.calls.len() + f.relation_entries.len())
+        .collect();
 
     quote! {
         /// A public activation: the io tuple of an entry call the host

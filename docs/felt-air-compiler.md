@@ -1,4 +1,12 @@
-# A felt language that compiles to AIR (design)
+# A felt language that compiles to AIR
+
+> **Status: current compiler architecture.** `define_air_fns!` implements static
+> control flow, functions, hints, degree-budget materialization, relation
+> statements, embedded components, proof-bound VM access, and word intrinsics.
+> Every ordinary RV32IM opcode family and Poseidon2 use it for execution,
+> witness filling, and AIR generation. `define_air!` owns the common schema,
+> lookup tables, COMMIT, and support tables. Macro source and tests are
+> authoritative for implemented syntax.
 
 ## The observation
 
@@ -26,38 +34,36 @@ committed trace column plus one equality constraint):
   `t = x * y` (materialized, constraint `t - x * y`) and the inline `t * z`.
 - Addition does not: `a + b + c + d` stays one inline expression no matter its
   length — it never increases the degree.
-- Reuse counts: a degree-2 subexpression used by ten constraints may be cheaper
-  materialized once than inlined ten times into the composition evaluation; the
-  compiler weighs (columns added) against (constraint degree and evaluation
-  cost).
+- Common subexpressions that must be materialized are deduplicated. The compiler
+  does not yet decide to materialize an otherwise valid expression based on
+  prover cost; that cost model remains future work.
 
-The output is exactly what `define_trace_tables!` consumes today: a column list
-(inputs + materialized intermediates), `derived:` (the inline nodes),
-`constraints:` (the materialization equalities plus the program's asserted
-zeros), and `lookups:` (relation calls in the code become LogUp entries).
+The generated backend contains a column list (inputs plus materialized
+intermediates), inline derived expressions, materialization equalities and
+program assertions, and LogUp entries for relation calls.
 
-The same program is the witness generator: run it with concrete `PackedM31`
-values and every materialized node _is_ the column fill, in the same order. This
-is the existing `T`-generic trick (one expression, evaluated with `E::F` for the
-AIR and `PackedM31` via `at(i)` for the witness) taken to its conclusion — the
-macro already proves the architecture works; the compiler adds control flow and
-automatic materialization on top.
+The same lowered program generates the AIR evaluation and the concrete
+`BaseField` witness calls, so materialized cells and their constraints stay in
+the same order.
 
-## Poseidon2, the motivating case
+## Poseidon2, the implemented reference
 
-Today the poseidon2 table is ~700 hand-flattened columns
-(`full0_sq1_0..15, full0_sq2_0..15, full0_mix_0..15, full1_...`) and the one
-remaining hand-written component module, because the expression DSL cannot loop.
-As felt code it is:
+Poseidon2 is the production reference for the felt-function path. Its
+permutation is written with static loops and helper functions in
+`crates/air/src/poseidon2.rs`, and `define_air_fns!` generates its materialized
+columns, constraints, witness calls, and embedded prover component. Its source
+has this shape:
 
 ```text
 fn poseidon2(state: [felt; 16]) -> [felt; 16] {
-    for round in 0..8 {                       // static bound: unrolled
+    state = external_matrix(state);
+    for round in 0..4 {                       // static bound: unrolled
         state = add_round_constants(state, EXTERNAL[round]);
         for i in 0..16 { state[i] = sbox(state[i]); }   // x^5
-        state = external_mix(state);          // additive: stays inline
+        state = external_matrix(state);       // additive: stays inline
     }
-    // ... partial rounds ...
+    for round in 0..14 { state = partial_round(state, round); }
+    for round in 4..8 { state = full_round(state, round); }
     state
 }
 
@@ -66,10 +72,11 @@ fn sbox(x: felt) -> felt {
 }
 ```
 
-At `max_degree = 3` the compiler materializes two cells per s-box instead of
-today's hand-chosen three (`sq1`, `sq2`, `mix`), derives the column count, the
-constraints, and the witness fill — and changing the degree budget re-derives
-all three. The flattened table becomes generated output, not source.
+At `max_degree = 3` the compiler materializes the cells needed to stay within
+the constraint bound and derives the column layout, constraints, and witness
+fill together. The flattened table is generated output, not source. Every
+recursion-reachable AIR has the same single-source property, enforced by
+`crates/recursion/tests/air_dsl_guard.rs`.
 
 ## Control flow: the calling convention is a LogUp relation
 
@@ -90,7 +97,7 @@ replaces sequencing. What remains per activation is exactly one natural tuple,
   callee's constraints are what make them right.
 - A recursive call is the same emission against the function's own relation:
   rows of one AIR consuming and emitting each other, telescoping exactly like
-  the recursion crate's `merkle_node` paths and `sponge_step` chains.
+  the recursion crate's `merkle_node` paths and transcript state relations.
 - The program's public interface is the entry activations: the verifier emits
   `+fn_io(inputs, outputs)` as public claim terms (the `RootClaim` pattern), and
   the whole multiset must cancel.
@@ -102,40 +109,148 @@ outputs and collapse into multiplicity — no call-site nonce needed.
 The codebase already runs on this pattern without naming it: the opcode tables
 are "functions" consuming `program_access` and `memory_access` tuples;
 `poseidon2_io(in16, out16)` is precisely an activation tuple; the recursion
-circuit's `op_def`/`wire` relations are call frames for QM31 arithmetic. The
-language makes the pattern first-class: `let c = cube(a)` in source compiles to
-a column `c`, an emission into `cube`'s relation, and a row in `cube`'s table —
-wiring, table layout, and witness fill all from one line.
+circuit's `wire` relation connects QM31 values across verifier-scheduled
+arithmetic rows. The language makes the pattern first-class: `let c = cube(a)`
+in source compiles to a column `c`, an emission into `cube`'s relation, and a
+row in `cube`'s table — wiring, table layout, and witness fill all from one
+line.
 
-## Relation to the current DSL (incremental path)
+## Relation to the current DSL
 
-The expression DSL already has: single-assignment named intermediates
-(`derived:`), expansion-time constant folding (`pow2`, `inv`, integer subtrees),
-spec-shaped lookups, and the dual AIR/witness evaluation. What it lacks is
-exactly what the compiler adds:
+`define_air!` provides the table-schema path for common relations, preprocessed
+lookups, COMMIT, and VM support tables. It generates column layouts, witness
+evaluation, constraints, lookups, and component integration from one
+declaration.
 
-1. **Degree-budget materialization** (smallest step, immediately useful): today
-   a derived column that would breach the bound must be manually split into a
-   real trace column (the div carry chain stayed at degree 2 only by careful
-   hand-shaping, and two pre-existing degree-4 groups in div shipped unnoticed
-   until the first real-row proof — see commit e55578ff). Let the macro compute
-   each expression's degree and either reject with "materialize this" or
-   auto-materialize. Auto-materialization changes the table layout, so the macro
-   must also emit the fill — which it can, since the fill is the same expression
-   evaluated concretely.
-2. **Static control flow**: `for` with constant bounds (unroll), `if` on
-   compile-time flags (select). This is enough to absorb poseidon2 and delete
-   the last hand-written component.
-3. **Functions/frames**: reusable sub-circuits with the Cairo frame rule — a
-   callee reads only its arguments, writes only its frame. At this point the
-   language is a real (if minimal) felt language, and per the opening
-   observation it could in principle be _executed_ on a write-once-memory VM as
-   well as compiled to the AIR.
+`define_air_fns!` provides the felt-function path: degree-budget
+materialization, static `for`/`map`/`sum`, inline functions and function I/O,
+hints, external relation statements, canonical M31 splitting, byte-level lookup
+operations, wrapping and selected word arithmetic, embedded flag columns, and
+embedded component integration. Poseidon2 and every ordinary RV32IM opcode
+family use this path.
 
-Step 1 hardens soundness today; step 2 removes the poseidon2 exception; step 3
-is the full language. Each step keeps the single-source invariant: AIR, witness,
-and (through the recursion recorder) the final proof all derive from the same
-definition.
+Opcode and runner migration is complete. Every component reachable from either
+proof roster is authored directly through `define_air!` or `define_air_fns!`;
+the structural guard rejects a handwritten `FrameworkEval`, standalone
+`define_component_tables!`, or wrapper macro in an owner source. Remaining
+compiler work concerns reusable language features and measured cost, not a
+second component-authoring path.
+
+## Opcode AIR and runner path
+
+Each ordinary opcode family has one function whose body **is** simultaneously
+the executable semantics, witness fill, and AIR. The runner decodes an
+instruction, supplies the selected family flags, and calls the generated fill;
+it does not duplicate opcode arithmetic or memory semantics.
+
+Opcode compiler capabilities, in dependency order:
+
+1. **External relation statements.** ✅ _Implemented._ A system declares
+   `relation name(arity);` at the top and function bodies use `emit name(args)`
+   / `consume name(args)`; the entry is threaded through the same single-source
+   `evaluation()` seam and the positional entry→relation mapping, drawn as an
+   `AirFnRelations` field, and balanced across the proof. See the
+   `extern_relation` tests in `crates/stwo-macros/tests/air_fns.rs` (a `source`
+   function emits `pass(x)`, a `sink` consumes it, and the relation cancels).
+   LUI now wires the zkVM relations directly from its production felt function:
+
+   ```text
+   fn lui(clock, pc, rd_addr, imm_0, imm_1, imm_2) {
+       let imm = imm_0 + 16 * imm_1 + 4096 * imm_2;
+       consume program_access(
+           pc, constant(crate::instructions::Opcode::Lui as u32), rd_addr, imm, 0
+       );
+       consume registers_state(pc, clock);
+       emit registers_state(pc + 4, clock + 1);
+       consume range_check_8_8_4(imm_1, imm_2, imm_0);
+       write_reg rd(clock, rd_addr, [0, 16 * imm_0, imm_1, imm_2]);
+       return pc + 4;
+   }
+   ```
+
+   `write_reg rd(...)` generates the `rd_addr`, `rd_prev`, `rd_clock_prev`, and
+   `rd_next` bindings, the paired `memory_access` consume/emit entries, the
+   `range_check_20` clock-diff entry, and x0-safe write constraints. `read_reg`
+   additionally proves that a read cannot mutate the value. `read_mem` and
+   `write_mem` provide the same behavior for aligned words in address space 1.
+   `read_word name(clock, address_space, address)` and
+   `write_word name(clock, address_space, address, limbs)` select register
+   address space 0 or aligned-memory address space 1 in the felt function; the
+   compiler constrains the selector to be boolean and preserves x0 semantics for
+   dynamic register writes. Byte and half-word opcodes select and replace lanes
+   in felt code before the aligned-word write. State transitions and
+   opcode-specific range checks stay explicit relation statements.
+
+2. **Witness-side access resolution.** ✅ _Implemented._ A `vm_access` block
+   supplies the architectural-state trait and tracer paths. Generated calls read
+   or update that state, invoke `Tracer::trace_reg_access` or
+   `Tracer::trace_mem_access`, bind the returned access cells, and push the same
+   function row into the configured tracer table in embedded mode. The tracer
+   performs gap filling and preserves `mem_initial`; the `clock_gap:` section of
+   `define_air!` generates the corresponding AIR component. `ClockGapTable` is
+   its columnar witness container, not a separately authored AIR component.
+   Adding a push-by-`Access` API to `define_air!` would duplicate this
+   resolution path and is intentionally not part of the design.
+
+3. **Witness hints.** ✅ _Implemented._ `hint name = expr;` declares a
+   prover-chosen committed column, free in the AIR (the body constrains it with
+   `assert`s) and filled by evaluating `expr` on the witness path — for the
+   carry bits, sign decompositions, and `diff_inv` markers opcodes commit but do
+   not derive in-row. See `test_hint_*` in
+   `crates/stwo-macros/tests/air_fns.rs`.
+
+4. **Word intrinsics.** ✅ _Implemented._ `split_m31(value)` commits the
+   canonical four-byte representation, constrains its recomposition, and
+   consumes `range_check_8_8` plus `range_check_m31`. `bitand`, `bitor`, and
+   `bitxor` commit one byte output and consume the corresponding preprocessed
+   `bitwise` row, optionally under an opcode multiplicity. `add_u32` and
+   `sub_u32` commit four wrapping result limbs plus the carry/borrow chain,
+   constrain every chain bit, and range-check an active result.
+   `binary_u32(lhs, rhs, active, add, sub, and, or, xor)` instead commits one
+   range-bound result word, constrains each selector boolean and their sum to
+   `active`, derives the arithmetic carry/borrow chains, and uses one
+   multiplicity-gated bitwise relation per limb with the selected operation ID.
+   The base ALU families use this shared-output form. `divrem_u32` commits RV32
+   signed or unsigned quotient, remainder, zero, overflow, and inverse
+   witnesses; it adds no implicit soundness rule, so the felt body binds those
+   columns through the wide product identity, absolute-remainder bound,
+   special-case constraints, and explicit range relations. AUIPC and JAL use the
+   split for their written word; JALR splits its canonical target and binds the
+   cleared low bit through `bitand`. Comparisons use the terminal borrow from
+   `sub_u32`; signed comparisons authenticate the standard sign-bit ordering
+   transform through `bitxor`. Equality branches prove equality by checking that
+   neither directional subtraction borrows.
+
+5. **Dispatch.** Opcode families with flag columns (`base_alu_reg`'s
+   add/sub/xor/or/and) are one function with one-hot felt parameters. Arithmetic
+   selectors and relation multiplicities gate each variant; there is no dynamic
+   branch in the AIR language. The decode step stays in the runner
+   (`air::instructions`) and calls the generated family function with the
+   selected flag tuple.
+
+The capabilities (1) through (5) are in place. Tests in
+`crates/stwo-macros/tests/air_fns.rs` prove generated register and memory
+accesses through external relation boundaries, reject stale clocks, incorrect
+prior values, read-side writes, and non-zero x0 writes, and exercise gap filling
+with the real tracer. The `mini_vm` tests separately cover function activation,
+state-relation telescoping, and hint-backed witness columns.
+
+The integration seam is also complete. `define_air!`'s `external:` section lists
+every fn-DSL table folded into the `Tracer`; the list in
+`crates/air/src/schema.rs` is authoritative. Each entry generates its tracer
+field, initialization, row count, debug support, and column re-export. The
+component router assigns Poseidon2 to the detached hash proof and every opcode
+table to the VM proof.
+
+### The `components!` boundary
+
+`components!` is not an alternate AIR-authoring surface. It assembles generated
+components into proof rosters and derives `Claim`, `Components`, and trace
+orchestration using prover-side STWO types that the AIR crate does not depend
+on. Opcode-specific `define_air!` tables and handwritten runner semantics are
+gone. `runner/src/ops/` remains as the decode-to-generated-fill adapter layer;
+deleting it would require moving instruction dispatch, not removing duplicate
+AIR semantics.
 
 ## Open questions
 

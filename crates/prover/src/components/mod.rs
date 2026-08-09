@@ -1,31 +1,35 @@
 //! Component system for tracer-backed and preprocessed AIR components.
 
-// Every bare entry's whole component module (air + witness) is generated
-// from its `define_trace_tables!` declaration; `name: module` entries point
-// at a hand-written or macro-generated module instead.
+// Every bare entry's whole component module (AIR + witness) is generated from
+// its `define_air!` table declaration. A `name: module` entry reuses a
+// component generated through the AIR DSL in its owning crate.
 stwo_macros::components! {
     trace: {
-        auipc,
-        base_alu_imm,
-        base_alu_reg,
-        branch_eq,
-        branch_lt,
-        div,
-        jal,
-        jalr,
-        load_store,
-        lt_imm,
-        lt_reg,
-        lui,
-        mul,
-        mulh,
-        shifts_imm,
-        shifts_reg,
+        auipc: air::opcodes::auipc::component,
+        base_alu_imm: air::opcodes::base_alu_imm::component,
+        base_alu_reg: air::opcodes::base_alu_reg::component,
+        branch_eq: air::opcodes::branch_eq::component,
+        branch_lt: air::opcodes::branch_lt::component,
+        commit,
+        div: air::opcodes::div::component,
+        jal: air::opcodes::jal::component,
+        jalr: air::opcodes::jalr::component,
+        load_store: air::opcodes::load_store::component,
+        lt_imm: air::opcodes::lt_imm::component,
+        lt_reg: air::opcodes::lt_reg::component,
+        lui: air::opcodes::lui::component,
+        mul: air::opcodes::mul::component,
+        mulh: air::opcodes::mulh::component,
+        shifts_imm: air::opcodes::shifts_imm::component,
+        shifts_reg: air::opcodes::shifts_reg::component,
         program,
         memory,
         merkle,
-        poseidon2: air::poseidon2::component,
         clock_update,
+    },
+    // The segment prover commits this DSL-owned table in its hash instance.
+    detached: {
+        poseidon2,
     },
     lookup: {
         bitwise,
@@ -39,8 +43,54 @@ stwo_macros::components! {
 #[cfg(test)]
 mod tests {
     use num_traits::Zero;
+    use stwo::core::fields::m31::BaseField;
+    use stwo::core::fields::qm31::SecureField;
     use stwo_constraint_framework::FrameworkEval;
     use stwo_constraint_framework::expr::ExprEvaluator;
+
+    #[test]
+    fn component_claim_positional_layout_round_trips() {
+        let log_sizes = core::array::from_fn(|index| index as u32 + 4);
+        assert_eq!(
+            super::Claim::from_component_log_sizes(log_sizes).component_log_sizes(),
+            log_sizes
+        );
+    }
+
+    #[test]
+    fn component_claimed_sum_positional_layout_round_trips() {
+        let values =
+            core::array::from_fn(|index| SecureField::from(BaseField::from(index as u32 + 1)));
+        assert_eq!(
+            super::ClaimedSum::from_component_values(values).component_values(),
+            values
+        );
+    }
+
+    #[test]
+    fn fixed_trace_generation_pads_to_the_requested_component_layout() {
+        let natural = super::gen_trace(air::trace::Tracer::default());
+        let mut log_sizes = super::Claim::from(&natural).component_log_sizes();
+        log_sizes[0] += 1;
+        let fixed = super::gen_trace_at_log_sizes(air::trace::Tracer::default(), log_sizes)
+            .expect("the larger fixed layout contains every trace row");
+        assert_eq!(super::Claim::from(&fixed).component_log_sizes(), log_sizes);
+    }
+
+    #[test]
+    fn fixed_trace_generation_rejects_a_component_below_the_minimum_layout() {
+        let natural = super::gen_trace(air::trace::Tracer::default());
+        let mut log_sizes = super::Claim::from(&natural).component_log_sizes();
+        log_sizes[0] = 3;
+        assert!(matches!(
+            super::gen_trace_at_log_sizes(air::trace::Tracer::default(), log_sizes),
+            Err(super::FixedTraceError::ComponentCapacityExceeded {
+                component: "auipc",
+                rows: 0,
+                log_size: 3,
+            })
+        ));
+    }
 
     // One end-to-end proof per opcode guest binary.
     crate::test_bin_e2e!(auipc, auipc);
@@ -89,17 +139,58 @@ mod tests {
     crate::test_bin_e2e!(shifts_reg, srl);
     crate::test_bin_e2e!(shifts_reg, sra);
 
-    // The quadratic carry denominators keep mul/mulh at fixed constraint
-    // counts; a change here means the degree-bound analysis must be redone.
+    #[test]
+    fn load_store_constraint_degrees_fit_the_declared_bound() {
+        let eval = super::load_store::air::Eval {
+            log_size: 6,
+            relations: crate::relations::Relations::dummy(),
+        };
+        let evaluated = eval.evaluate(ExprEvaluator::new());
+        let degrees = evaluated.constraint_degree_bounds();
+        let breaches = degrees
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, degree)| *degree > 3)
+            .collect::<Vec<_>>();
+
+        assert!(breaches.is_empty(), "{breaches:?}");
+    }
+
+    #[test]
+    fn div_constraint_degrees_fit_the_declared_bound() {
+        let eval = super::div::air::Eval {
+            log_size: 6,
+            relations: crate::relations::Relations::dummy(),
+        };
+        let evaluated = eval.evaluate(ExprEvaluator::new());
+        let degrees = evaluated.constraint_degree_bounds();
+        let breaches = degrees
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, degree)| *degree > 3)
+            .collect::<Vec<_>>();
+
+        assert!(breaches.is_empty(), "{breaches:?}");
+    }
+
     #[test]
     fn test_mul_constraint_degree_bounds() {
         let eval = super::mul::air::Eval {
             log_size: 6,
             relations: crate::relations::Relations::dummy(),
         };
-        let expr_eval = eval.evaluate(ExprEvaluator::new());
-        let degrees = expr_eval.constraint_degree_bounds();
-        assert_eq!(degrees.len(), 17);
+        let evaluated = eval.evaluate(ExprEvaluator::new());
+        let degrees = evaluated.constraint_degree_bounds();
+        let breaches = degrees
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, degree)| *degree > 3)
+            .collect::<Vec<_>>();
+
+        assert!(breaches.is_empty(), "{breaches:?}");
     }
 
     #[test]
@@ -108,9 +199,52 @@ mod tests {
             log_size: 6,
             relations: crate::relations::Relations::dummy(),
         };
-        let expr_eval = eval.evaluate(ExprEvaluator::new());
-        let degrees = expr_eval.constraint_degree_bounds();
-        assert_eq!(degrees.len(), 28);
+        let evaluated = eval.evaluate(ExprEvaluator::new());
+        let degrees = evaluated.constraint_degree_bounds();
+        let breaches = degrees
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, degree)| *degree > 3)
+            .collect::<Vec<_>>();
+
+        assert!(breaches.is_empty(), "{breaches:?}");
+    }
+
+    #[test]
+    fn shifts_reg_constraint_degrees_fit_the_declared_bound() {
+        let eval = super::shifts_reg::air::Eval {
+            log_size: 6,
+            relations: crate::relations::Relations::dummy(),
+        };
+        let evaluated = eval.evaluate(ExprEvaluator::new());
+        let degrees = evaluated.constraint_degree_bounds();
+        let breaches = degrees
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, degree)| *degree > 3)
+            .collect::<Vec<_>>();
+
+        assert!(breaches.is_empty(), "{breaches:?}");
+    }
+
+    #[test]
+    fn shifts_imm_constraint_degrees_fit_the_declared_bound() {
+        let eval = super::shifts_imm::air::Eval {
+            log_size: 6,
+            relations: crate::relations::Relations::dummy(),
+        };
+        let evaluated = eval.evaluate(ExprEvaluator::new());
+        let degrees = evaluated.constraint_degree_bounds();
+        let breaches = degrees
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, degree)| *degree > 3)
+            .collect::<Vec<_>>();
+
+        assert!(breaches.is_empty(), "{breaches:?}");
     }
 
     #[test]
@@ -135,8 +269,9 @@ mod tests {
     crate::test_lookup_e2e!(base_alu_reg, range_check_8_8, add);
     crate::test_lookup_e2e!(base_alu_reg, range_check_8_8, sub);
 
-    crate::test_lookup_e2e!(shifts_reg, range_check_8_11, sll);
-    crate::test_lookup_e2e!(shifts_reg, range_check_8_11, srl);
+    crate::test_lookup_e2e!(shifts_reg, bitwise, sll);
+    crate::test_lookup_e2e!(shifts_reg, bitwise, sra);
+    crate::test_lookup_e2e!(shifts_imm, range_check_8_8, srai);
 
     crate::test_lookup_e2e!(load_store, range_check_8_8_4, lb);
     crate::test_lookup_e2e!(load_store, range_check_8_8_4, sb);
@@ -145,4 +280,284 @@ mod tests {
 
     crate::test_lookup_e2e!(base_alu_reg, range_check_20, add);
     crate::test_lookup_e2e!(load_store, range_check_20, lw);
+
+    #[test]
+    fn mutated_generated_load_result_fails_component_constraints() {
+        let mut tracer = crate::e2e::run_test_bin("lb");
+        tracer.load_store.destination_next_0[0] ^= 1;
+        let traces = super::gen_trace(tracer);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::Components::assert_constraints_on_polys(
+                &traces,
+                &crate::relations::Relations::dummy(),
+            );
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mutated_generated_store_preserved_limb_fails_component_constraints() {
+        let mut tracer = crate::e2e::run_test_bin("sb");
+        tracer.load_store.destination_next_3[0] ^= 1;
+        let traces = super::gen_trace(tracer);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::Components::assert_constraints_on_polys(
+                &traces,
+                &crate::relations::Relations::dummy(),
+            );
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mutated_generated_division_quotient_fails_component_constraints() {
+        let mut tracer = crate::e2e::run_test_bin("div");
+        tracer.div.quotient_0[0] ^= 1;
+        let traces = super::gen_trace(tracer);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::Components::assert_constraints_on_polys(
+                &traces,
+                &crate::relations::Relations::dummy(),
+            );
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mutated_generated_division_remainder_fails_component_constraints() {
+        let mut tracer = crate::e2e::run_test_bin("rem");
+        tracer.div.remainder_0[0] ^= 1;
+        let traces = super::gen_trace(tracer);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::Components::assert_constraints_on_polys(
+                &traces,
+                &crate::relations::Relations::dummy(),
+            );
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mutated_generated_add_result_fails_component_constraints() {
+        let mut tracer = crate::e2e::run_test_bin("add");
+        tracer.base_alu_reg.rd_value_0[0] ^= 1;
+        let traces = super::gen_trace(tracer);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::Components::assert_constraints_on_polys(
+                &traces,
+                &crate::relations::Relations::dummy(),
+            );
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn generated_add_rejects_two_active_opcode_flags() {
+        let mut tracer = crate::e2e::run_test_bin("add");
+        tracer.base_alu_reg.opcode_sub_flag[0] = 1;
+        let traces = super::gen_trace(tracer);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::Components::assert_constraints_on_polys(
+                &traces,
+                &crate::relations::Relations::dummy(),
+            );
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn generated_add_rejects_non_boolean_opcode_flags() {
+        let mut tracer = crate::e2e::run_test_bin("add");
+        tracer.base_alu_reg.opcode_add_flag[0] = 2;
+        tracer.base_alu_reg.opcode_sub_flag[0] = 2_147_483_646;
+        let traces = super::gen_trace(tracer);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::Components::assert_constraints_on_polys(
+                &traces,
+                &crate::relations::Relations::dummy(),
+            );
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn generated_add_accepts_an_all_zero_padding_selector_locally() {
+        let mut tracer = crate::e2e::run_test_bin("add");
+        tracer.base_alu_reg.opcode_add_flag[0] = 0;
+        let traces = super::gen_trace(tracer);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::Components::assert_constraints_on_polys(
+                &traces,
+                &crate::relations::Relations::dummy(),
+            );
+        }));
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn padding_a_required_add_row_leaves_a_relation_deficit() {
+        let mut tracer = crate::e2e::run_test_bin("add");
+        tracer.base_alu_reg.opcode_add_flag[0] = 0;
+        let traces = super::gen_trace(tracer);
+        let (_, claimed_sum) =
+            super::gen_interaction_trace(&traces, &crate::relations::Relations::dummy());
+
+        assert!(!claimed_sum.sum().is_zero());
+    }
+
+    #[test]
+    fn base_alu_shared_output_geometry_is_pinned() {
+        use air::opcodes::base_alu_imm::prover_columns::BaseAluImmColumns;
+        use air::opcodes::base_alu_reg::prover_columns::BaseAluRegColumns;
+
+        let imm = BaseAluImmColumns::from_iter(std::iter::repeat_n(
+            BaseField::zero(),
+            BaseAluImmColumns::<()>::SIZE,
+        ));
+        let reg = BaseAluRegColumns::from_iter(std::iter::repeat_n(
+            BaseField::zero(),
+            BaseAluRegColumns::<()>::SIZE,
+        ));
+        let (imm_constraints, imm_relations) = imm.evaluation();
+        let (reg_constraints, reg_relations) = reg.evaluation();
+
+        assert_eq!(
+            [
+                (
+                    BaseAluImmColumns::<()>::SIZE,
+                    imm_constraints.len(),
+                    imm_relations.len(),
+                ),
+                (
+                    BaseAluRegColumns::<()>::SIZE,
+                    reg_constraints.len(),
+                    reg_relations.len(),
+                ),
+            ],
+            [(35, 25, 17), (43, 29, 19)]
+        );
+    }
+
+    #[test]
+    fn mutated_generated_xori_result_leaves_a_relation_deficit() {
+        let mut tracer = crate::e2e::run_test_bin("xori");
+        tracer.base_alu_imm.rd_value_0[0] ^= 1;
+        let traces = super::gen_trace(tracer);
+        let (_, claimed_sum) =
+            super::gen_interaction_trace(&traces, &crate::relations::Relations::dummy());
+
+        assert!(!claimed_sum.sum().is_zero());
+    }
+
+    #[test]
+    fn mutated_generated_slt_difference_fails_component_constraints() {
+        let mut tracer = crate::e2e::run_test_bin("slt");
+        tracer.lt_reg.difference_0[0] ^= 1;
+        let traces = super::gen_trace(tracer);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::Components::assert_constraints_on_polys(
+                &traces,
+                &crate::relations::Relations::dummy(),
+            );
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mutated_generated_slti_sign_flip_leaves_a_relation_deficit() {
+        let mut tracer = crate::e2e::run_test_bin("slti");
+        tracer.lt_imm.rs1_flipped[0] ^= 1;
+        let traces = super::gen_trace(tracer);
+        let (_, claimed_sum) =
+            super::gen_interaction_trace(&traces, &crate::relations::Relations::dummy());
+
+        assert!(!claimed_sum.sum().is_zero());
+    }
+
+    #[test]
+    fn mutated_generated_beq_difference_fails_component_constraints() {
+        let mut tracer = crate::e2e::run_test_bin("beq");
+        tracer.branch_eq.forward_difference_0[0] ^= 1;
+        let traces = super::gen_trace(tracer);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::Components::assert_constraints_on_polys(
+                &traces,
+                &crate::relations::Relations::dummy(),
+            );
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mutated_generated_blt_sign_flip_leaves_a_relation_deficit() {
+        let mut tracer = crate::e2e::run_test_bin("blt");
+        tracer.branch_lt.rs1_flipped[0] ^= 1;
+        let traces = super::gen_trace(tracer);
+        let (_, claimed_sum) =
+            super::gen_interaction_trace(&traces, &crate::relations::Relations::dummy());
+
+        assert!(!claimed_sum.sum().is_zero());
+    }
+
+    #[test]
+    fn mutated_generated_sll_result_fails_component_constraints() {
+        let mut tracer = crate::e2e::run_test_bin("sll");
+        tracer.shifts_reg.rd_next_0[0] ^= 1;
+        let traces = super::gen_trace(tracer);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::Components::assert_constraints_on_polys(
+                &traces,
+                &crate::relations::Relations::dummy(),
+            );
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mutated_generated_srai_sign_mask_leaves_a_relation_deficit() {
+        let mut tracer = crate::e2e::run_test_bin("srai");
+        tracer.shifts_imm.sign_mask[0] ^= 1;
+        let traces = super::gen_trace(tracer);
+        let (_, claimed_sum) =
+            super::gen_interaction_trace(&traces, &crate::relations::Relations::dummy());
+
+        assert!(!claimed_sum.sum().is_zero());
+    }
+
+    #[test]
+    fn mutated_generated_mul_product_limb_fails_component_constraints() {
+        let mut tracer = crate::e2e::run_test_bin("mul");
+        tracer.mul.step_0_0[0] ^= 1;
+        let traces = super::gen_trace(tracer);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::Components::assert_constraints_on_polys(
+                &traces,
+                &crate::relations::Relations::dummy(),
+            );
+        }));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mutated_generated_mulh_sign_mask_leaves_a_relation_deficit() {
+        let mut tracer = crate::e2e::run_test_bin("mulh");
+        tracer.mulh.rs1_sign_mask[0] ^= 1;
+        let traces = super::gen_trace(tracer);
+        let (_, claimed_sum) =
+            super::gen_interaction_trace(&traces, &crate::relations::Relations::dummy());
+
+        assert!(!claimed_sum.sum().is_zero());
+    }
 }

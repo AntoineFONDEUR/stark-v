@@ -12,6 +12,11 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use tracing::{error, info};
+use tracing_subscriber::Layer as _;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+
+mod recursion_bench;
 
 /// stark-v benchmark CLI
 #[derive(Parser)]
@@ -84,13 +89,47 @@ enum Command {
         metrics_out: Option<PathBuf>,
     },
 
+    /// Prove one execution through the universal recursion tree, then encode
+    /// and verify the constant-size root proof, reporting per-stage timings
+    Recursion {
+        /// Path to the ELF file to execute
+        #[arg(long)]
+        elf: PathBuf,
+
+        /// Path to input data file (raw bytes, optional)
+        #[arg(long)]
+        input: Option<PathBuf>,
+
+        /// Close each segment after this many cycles (exclusive with --max-rows)
+        #[arg(long)]
+        segment_cycles: Option<u32>,
+
+        /// Close each segment at this component-table row budget
+        #[arg(long)]
+        max_rows: Option<u32>,
+
+        /// Maximum number of cycles before aborting
+        #[arg(long, default_value_t = 100_000_000)]
+        max_cycles: u64,
+
+        /// Output path for metrics JSON (printed to stdout when omitted)
+        #[arg(long)]
+        metrics_out: Option<PathBuf>,
+
+        /// Output path for the serialized root proof bytes
+        #[arg(long)]
+        proof_out: Option<PathBuf>,
+    },
+
     /// Measure sizes (ELF as preprocessing size)
     Measure {
         /// Path to the ELF file (for preprocessing size)
         #[arg(long)]
         elf: PathBuf,
 
-        /// Proof size in bytes (passed as argument since we can't serialize proofs)
+        /// Proof size in bytes, as reported by `prove`'s `proof_size_estimate`
+        /// metric (passed through so external harnesses can combine the two
+        /// measurements without re-proving)
         #[arg(long, default_value_t = 0)]
         proof_size: usize,
 
@@ -130,6 +169,48 @@ struct SizeMetrics {
 }
 
 fn main() {
+    let cli = Cli::parse();
+
+    // The recursion benchmark also collects per-stage span timings, so it
+    // composes the timing layer with the same env-filtered log output; every
+    // other command keeps the plain formatted subscriber.
+    let command = match cli.command {
+        Command::Recursion {
+            elf,
+            input,
+            segment_cycles,
+            max_rows,
+            max_cycles,
+            metrics_out,
+            proof_out,
+        } => {
+            let timings = recursion_bench::SpanTimings::default();
+            tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::fmt::layer().with_filter(
+                        tracing_subscriber::EnvFilter::try_from_default_env()
+                            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                    ),
+                )
+                .with(recursion_bench::SpanTimingLayer::new(timings.clone()))
+                .init();
+            recursion_bench::run_recursion_bench(
+                &elf,
+                input.as_ref(),
+                &recursion_bench::Segmentation {
+                    segment_cycles,
+                    max_rows,
+                },
+                max_cycles,
+                metrics_out.as_ref(),
+                proof_out.as_ref(),
+                &timings,
+            );
+            return;
+        }
+        command => command,
+    };
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -137,9 +218,7 @@ fn main() {
         )
         .init();
 
-    let cli = Cli::parse();
-
-    match cli.command {
+    match command {
         Command::Prove {
             elf,
             input,
@@ -179,6 +258,8 @@ fn main() {
                 false,
             );
         }
+
+        Command::Recursion { .. } => unreachable!("handled before subscriber setup"),
 
         Command::Measure {
             elf,
@@ -310,9 +391,8 @@ fn run_prove(
     info!("Generating proof...");
     let proof = prove_rv32im(run_result, config, &preprocessed);
 
-    // The proof size estimate is logged by stwo during proving
-    // We'll use 0 as placeholder since we can't easily serialize the proof
-    let proof_size_estimate = 0;
+    let proof_size_estimate =
+        proof.vm.stark_proof.size_estimate() + proof.poseidon2.stark_proof.size_estimate();
 
     // Verify if not skipped
     let verified = if !skip_verify {

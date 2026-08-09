@@ -23,11 +23,6 @@ postcard = { workspace = true, features = ["alloc"] }
 itertools.workspace = true
 test-log.workspace = true
 rayon.workspace = true
-tikv-jemallocator = { workspace = true, optional = true }
-peak_alloc = { workspace = true, optional = true }
-smalloc = { workspace = true, optional = true }
-mimalloc = { workspace = true, optional = true }
-ctor = { workspace = true, optional = true }
 
 [dev-dependencies]
 divan.workspace = true
@@ -40,10 +35,6 @@ slow-tests = []
 parallel = ["stwo/parallel"]
 track-relations = []
 default = []
-peak-alloc = ["dep:peak_alloc"]
-jemalloc = ["dep:tikv-jemallocator"]
-mimalloc = ["dep:mimalloc"]
-smalloc = ["dep:smalloc", "dep:ctor"]
 
 [[bench]]
 name = "fibonacci"

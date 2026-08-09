@@ -143,6 +143,541 @@ fn test_prove_verify_mulhu_alias() {
     .expect("Verification failed");
 }
 
+/// A COMMIT row closes its program, state, register, and range relations.
+#[test_log::test]
+fn commit_standard_relations_prove_and_verify() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("commit_once");
+    let elf = std::fs::read(&elf_path).expect("read commit_once ELF");
+    let run_result = run(&elf, 10_000).expect("execute one COMMIT call");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
+}
+
+/// One register-ALU chunk closes every generated component relation in a proof.
+#[test_log::test]
+fn base_alu_reg_single_chunk_proves_and_verifies() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("base_alu_reg_output");
+    let elf = std::fs::read(&elf_path).expect("read register-ALU ELF");
+    let run_result = run(&elf, 10_000).expect("execute one register-ALU chunk");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
+}
+
+/// One immediate-ALU chunk closes every generated component relation in a proof.
+#[test_log::test]
+fn base_alu_imm_single_chunk_proves_and_verifies() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("base_alu_imm_output");
+    let elf = std::fs::read(&elf_path).expect("read immediate-ALU ELF");
+    let run_result = run(&elf, 10_000).expect("execute one immediate-ALU chunk");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
+}
+
+/// One register-comparison chunk closes every generated component relation.
+#[test_log::test]
+fn lt_reg_single_chunk_proves_and_verifies() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("lt_reg_output");
+    let elf = std::fs::read(&elf_path).expect("read register-comparison ELF");
+    let run_result = run(&elf, 10_000).expect("execute one register-comparison chunk");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
+}
+
+/// One immediate-comparison chunk closes every generated component relation.
+#[test_log::test]
+fn lt_imm_single_chunk_proves_and_verifies() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("lt_imm_output");
+    let elf = std::fs::read(&elf_path).expect("read immediate-comparison ELF");
+    let run_result = run(&elf, 10_000).expect("execute one immediate-comparison chunk");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
+}
+
+/// One equality-branch chunk closes every generated component relation.
+#[test_log::test]
+fn branch_eq_single_chunk_proves_and_verifies() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("branch_eq_output");
+    let elf = std::fs::read(&elf_path).expect("read equality-branch ELF");
+    let run_result = run(&elf, 10_000).expect("execute one equality-branch chunk");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
+}
+
+/// One ordered-branch chunk closes every generated component relation.
+#[test_log::test]
+fn branch_lt_single_chunk_proves_and_verifies() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("branch_lt_output");
+    let elf = std::fs::read(&elf_path).expect("read ordered-branch ELF");
+    let run_result = run(&elf, 10_000).expect("execute one ordered-branch chunk");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
+}
+
+/// One register-shift chunk closes every generated component relation.
+#[test_log::test]
+fn shifts_reg_single_chunk_proves_and_verifies() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("shifts_reg_output");
+    let elf = std::fs::read(&elf_path).expect("read register-shift ELF");
+    let run_result = run(&elf, 10_000).expect("execute one register-shift chunk");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
+}
+
+/// One immediate-shift chunk closes every generated component relation.
+#[test_log::test]
+fn shifts_imm_single_chunk_proves_and_verifies() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("shifts_imm_output");
+    let elf = std::fs::read(&elf_path).expect("read immediate-shift ELF");
+    let run_result = run(&elf, 10_000).expect("execute one immediate-shift chunk");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
+}
+
+/// Every register-shift row in the single-chunk guest satisfies the aggregate AIR.
+#[test_log::test]
+fn shifts_reg_single_chunk_satisfies_aggregate_constraints() {
+    use prover::components::{self, Components};
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("shifts_reg_output");
+    let elf = std::fs::read(&elf_path).expect("read register-shift ELF");
+    let run_result = run(&elf, 10_000).expect("execute one register-shift chunk");
+    let traces = components::gen_trace(run_result.tracer);
+
+    Components::assert_constraints_on_polys(&traces, &Relations::dummy());
+}
+
+/// Every immediate-shift row in the single-chunk guest satisfies the aggregate AIR.
+#[test_log::test]
+fn shifts_imm_single_chunk_satisfies_aggregate_constraints() {
+    use prover::components::{self, Components};
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("shifts_imm_output");
+    let elf = std::fs::read(&elf_path).expect("read immediate-shift ELF");
+    let run_result = run(&elf, 10_000).expect("execute one immediate-shift chunk");
+    let traces = components::gen_trace(run_result.tracer);
+
+    Components::assert_constraints_on_polys(&traces, &Relations::dummy());
+}
+
+/// One chunk containing byte stores and signed byte loads closes the aggregate AIR.
+#[test_log::test]
+fn load_store_single_chunk_satisfies_aggregate_constraints() {
+    use prover::components::{self, Components};
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("load_store_output");
+    let elf = std::fs::read(&elf_path).expect("read load/store ELF");
+    let run_result = run(&elf, 10_000).expect("execute one load/store chunk");
+    let traces = components::gen_trace(run_result.tracer);
+
+    Components::assert_constraints_on_polys(&traces, &Relations::dummy());
+}
+
+/// One chunk containing byte stores and signed byte loads proves and verifies.
+#[test_log::test]
+fn load_store_single_chunk_proves_and_verifies() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("load_store_output");
+    let elf = std::fs::read(&elf_path).expect("read load/store ELF");
+    let run_result = run(&elf, 10_000).expect("execute one load/store chunk");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
+}
+
+/// A felt-defined LUI row closes its program, state, register, and range relations.
+#[test_log::test]
+fn lui_standard_relations_prove_and_verify() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("lui_output");
+    let elf = std::fs::read(&elf_path).expect("read proof-capable LUI ELF");
+    let run_result = run(&elf, 10_000).expect("execute LUI chunk");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
+}
+
+/// LUI's generated write constraint rejects a destination limb inconsistent with the immediate.
+#[test_log::test]
+fn lui_destination_limb_mutation_fails_component_constraints() {
+    use prover::components::{self, Components};
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::relations::Relations;
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("lui_output");
+    let elf = std::fs::read(&elf_path).expect("read proof-capable LUI ELF");
+    let mut run_result = run(&elf, 10_000).expect("execute LUI chunk");
+    run_result.tracer.lui.rd_next_1[0] ^= 1;
+    let traces = components::gen_trace(run_result.tracer);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Components::assert_constraints_on_polys(&traces, &Relations::dummy());
+    }));
+
+    assert!(result.is_err());
+}
+
+/// A felt-defined AUIPC row closes its program, state, register, and range relations.
+#[test_log::test]
+fn auipc_standard_relations_prove_and_verify() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("auipc_output");
+    let elf = std::fs::read(&elf_path).expect("read proof-capable AUIPC ELF");
+    let run_result = run(&elf, 10_000).expect("execute AUIPC chunk");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
+}
+
+/// A felt-defined JAL row closes its program, state, register, and range relations.
+#[test_log::test]
+fn jal_standard_relations_prove_and_verify() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("jal_output");
+    let elf = std::fs::read(&elf_path).expect("read proof-capable JAL ELF");
+    let run_result = run(&elf, 10_000).expect("execute JAL chunk");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
+}
+
+/// A felt-defined JALR row closes its program, state, register, range, and bitwise relations.
+#[test_log::test]
+fn jalr_standard_relations_prove_and_verify() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("jalr_output");
+    let elf = std::fs::read(&elf_path).expect("read proof-capable JALR ELF");
+    let run_result = run(&elf, 10_000).expect("execute JALR chunk");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_ok());
+}
+
+/// AUIPC's generated split rejects a destination limb inconsistent with PC plus immediate.
+#[test_log::test]
+fn auipc_destination_limb_mutation_fails_component_constraints() {
+    use prover::components::{self, Components};
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::relations::Relations;
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("auipc_output");
+    let elf = std::fs::read(&elf_path).expect("read proof-capable AUIPC ELF");
+    let mut run_result = run(&elf, 10_000).expect("execute AUIPC chunk");
+    run_result.tracer.auipc.rd_value_0[0] ^= 1;
+    let traces = components::gen_trace(run_result.tracer);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        Components::assert_constraints_on_polys(&traces, &Relations::dummy());
+    }));
+
+    assert!(result.is_err());
+}
+
+/// JALR's cleared low bit must match the preprocessed bitwise table.
+#[test_log::test]
+fn jalr_target_lsb_mutation_leaves_a_relation_deficit() {
+    use prover::components::{self, gen_interaction_trace};
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::relations::Relations;
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("jalr_output");
+    let elf = std::fs::read(&elf_path).expect("read proof-capable JALR ELF");
+    let mut run_result = run(&elf, 10_000).expect("execute JALR chunk");
+    run_result.tracer.jalr.target_lsb[0] ^= 1;
+    let traces = components::gen_trace(run_result.tracer);
+    let (_, claimed_sum) = gen_interaction_trace(&traces, &Relations::dummy());
+
+    assert!(!claimed_sum.sum().is_zero());
+}
+
+/// A COMMIT chain cannot place a later execution clock before an earlier one.
+#[test_log::test]
+fn commit_reordered_clock_link_is_rejected_before_proving() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::prove_rv32im;
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("commit_twice");
+    let elf = std::fs::read(&elf_path).expect("read commit_twice ELF");
+    let mut run_result = run(&elf, 10_000).expect("execute two COMMIT calls");
+    run_result.tracer.commit.journal_prev_clock[1] = run_result.tracer.commit.clock[1];
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        prove_rv32im(run_result, config, &preprocessing)
+    }));
+
+    assert!(result.is_err());
+}
+
+/// The VM verifier binds the journal exit digest mixed into its transcript.
+#[test_log::test]
+fn commit_public_final_state_mutation_is_rejected() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("commit_once");
+    let elf = std::fs::read(&elf_path).expect("read commit_once ELF");
+    let run_result = run(&elf, 10_000).expect("execute one COMMIT call");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let mut proof = prove_rv32im(run_result, config, &preprocessing);
+    proof.vm.public_data.final_public_io_state[0] += 1;
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_err());
+}
+
+/// The VM verifier binds the exact number of journal transitions.
+#[test_log::test]
+fn commit_public_count_mutation_is_rejected() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("commit_once");
+    let elf = std::fs::read(&elf_path).expect("read commit_once ELF");
+    let run_result = run(&elf, 10_000).expect("execute one COMMIT call");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let mut proof = prove_rv32im(run_result, config, &preprocessing);
+    proof.vm.public_data.journal_count += 1;
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_err());
+}
+
+/// The VM verifier binds the execution clock that closes the journal chain.
+#[test_log::test]
+fn commit_public_last_clock_mutation_is_rejected() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("commit_once");
+    let elf = std::fs::read(&elf_path).expect("read commit_once ELF");
+    let run_result = run(&elf, 10_000).expect("execute one COMMIT call");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let mut proof = prove_rv32im(run_result, config, &preprocessing);
+    proof.vm.public_data.journal_last_clock += 1;
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_err());
+}
+
+/// A committed word cannot diverge from the authenticated a0 register read.
+#[test_log::test]
+fn commit_word_mutation_is_rejected() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::prove_rv32im;
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("commit_once");
+    let elf = std::fs::read(&elf_path).expect("read commit_once ELF");
+    let mut run_result = run(&elf, 10_000).expect("execute one COMMIT call");
+    run_result.tracer.commit.argument_next[0] ^= 1;
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        prove_rv32im(run_result, config, &preprocessing)
+    }));
+
+    assert!(result.is_err());
+}
+
+/// Removing an executed COMMIT row leaves its execution relations unbalanced.
+#[test_log::test]
+fn commit_dropped_row_is_rejected() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+    let elf_path = guest_bin_dir().join("commit_once");
+    let elf = std::fs::read(&elf_path).expect("read commit_once ELF");
+    let mut run_result = run(&elf, 10_000).expect("execute one COMMIT call");
+    run_result.tracer.commit = Tracer::default().commit;
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    assert!(verify_rv32im(proof, config, &preprocessing).is_err());
+}
+
+/// The supplied preprocessing commitment is part of the verifier-owned statement.
+#[test_log::test]
+fn test_verify_rejects_mismatched_preprocessing_commitment() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+
+    let elf_bytes =
+        std::fs::read(guest_bin_dir().join("mulhu_alias")).expect("Failed to read mulhu_alias ELF");
+    let run_result = run(&elf_bytes, 10_000_000).expect("Failed to run mulhu_alias");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let proof = prove_rv32im(run_result, config, &preprocessing);
+
+    let mut supplied_preprocessing = preprocessing.clone();
+    let mut mismatched_root = proof.vm.stark_proof.commitments[0];
+    mismatched_root.0[0] ^= 1;
+    supplied_preprocessing.merkle_layers[0][0] = mismatched_root;
+
+    let result = verify_rv32im(proof, config, &supplied_preprocessing);
+
+    assert!(matches!(
+        result,
+        Err(prover::VerificationError::PreprocessingCommitmentMismatch)
+    ));
+}
+
+/// Every program-root limb is part of the public statement.
+#[test_log::test]
+fn test_verify_rejects_tampered_program_root_tail() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, verify_rv32im};
+    use runner::run;
+
+    ensure_guest_built();
+
+    let elf_bytes =
+        std::fs::read(guest_bin_dir().join("mulhu_alias")).expect("Failed to read mulhu_alias ELF");
+    let run_result = run(&elf_bytes, 10_000_000).expect("Failed to run mulhu_alias");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+    let mut proof = prove_rv32im(run_result, config, &preprocessing);
+    proof
+        .vm
+        .public_data
+        .program_root
+        .as_mut()
+        .expect("program root is present")[7] ^= 1;
+
+    let result = verify_rv32im(proof, config, &preprocessing);
+
+    assert!(result.is_err());
+}
+
 /// Full end-to-end proof + verification for a single MULHU with rd != rs2.
 #[test_log::test]
 fn test_prove_verify_mulhu_no_alias() {
@@ -323,8 +858,8 @@ fn test_mul_interaction_trace_prev_cur_deltas() {
             cols.len(),
             cols[0].domain.log_size()
         );
-        for col_idx in 0..cols.len() {
-            let values = cols[col_idx].values.to_cpu();
+        for (col_idx, column) in cols.iter().enumerate() {
+            let values = column.values.to_cpu();
             let mut diff_count = 0usize;
             for row in 0..values.len() {
                 let prev = values[(row + values.len() - 1) % values.len()];
@@ -342,9 +877,9 @@ fn test_mul_interaction_trace_prev_cur_deltas() {
             );
         let step = stwo::core::poly::circle::CanonicCoset::new(max_log).step();
         let shifted = point + step.mul_signed(-1).into_ef();
-        for col_idx in 28..32 {
-            let poly = cols[col_idx].clone().interpolate();
-            let fold = max_log - cols[col_idx].domain.log_size();
+        for (col_idx, column) in cols.iter().enumerate().take(32).skip(28) {
+            let poly = column.clone().interpolate();
+            let fold = max_log - column.domain.log_size();
             let v_cur = poly.eval_at_point(point.repeated_double(fold));
             let v_prev = poly.eval_at_point(shifted.repeated_double(fold));
             eprintln!(
@@ -1021,104 +1556,37 @@ fn test_keccak_input_constraints_len_136_drawn_relations() {
     Components::assert_constraints_on_polys(&traces, &relations);
 }
 
-/// Recursion seam check (docs/recursion.md, M1): replaying the Fiat-Shamir
-/// transcript outside the verifier and recomputing the composition value at
-/// the OODS point through the components' `evaluate()` must reproduce the
-/// value claimed by the proof's sampled composition polynomials.
-#[test_log::test]
-fn test_recursion_composition_oods_replay() {
-    use prover::e2e::{ensure_guest_built, guest_bin_dir};
-    use prover::prove_rv32im;
-    use prover::recursion::transcript::replay_composition_oods;
-    use runner::run;
-
-    ensure_guest_built();
-
-    let elf_path = guest_bin_dir().join("mulhu_alias");
-    let elf_bytes = std::fs::read(&elf_path).expect("Failed to read mulhu_alias ELF");
-    let run_result = run(&elf_bytes, 10_000_000).expect("Failed to run mulhu_alias");
-
-    let preprocessing = prover::preprocess(PcsConfig::default());
-    let proof = prove_rv32im(run_result, PcsConfig::default(), &preprocessing);
-
-    let check = replay_composition_oods(&proof, PcsConfig::default(), &preprocessing)
-        .expect("transcript replay failed");
-    assert!(
-        check.holds(),
-        "composition OODS mismatch: claimed {:?} != replayed {:?}",
-        check.claimed,
-        check.replayed
-    );
+/// Output anchoring consumes each output word's access within the final
+/// segment's trace, so the runner must place the whole output tail there no
+/// matter where the cycle budget would have cut: the first output-region
+/// store forces a boundary just before it. One test per split factor.
+macro_rules! output_tail_test {
+    ($name:ident, $divisor:expr) => {
+        #[test_log::test]
+        fn $name() {
+            use prover::e2e::{ensure_guest_built, guest_bin_dir};
+            ensure_guest_built();
+            let elf_bytes = std::fs::read(guest_bin_dir().join("fib")).expect("read fib ELF");
+            let cycles = runner::run(&elf_bytes, 10_000_000).expect("run fib").cycles;
+            let segment_cycles = u32::try_from(cycles / $divisor + 1).expect("fits u32");
+            let segments =
+                runner::run_segments_with_input(&elf_bytes, &[], Some(segment_cycles), 10_000_000)
+                    .expect("segmented run failed");
+            let last = segments.last().expect("at least one segment");
+            assert!(
+                last.output_words
+                    .iter()
+                    .all(|w| last.tracer.mem_clock.contains_key(&w.addr)),
+                "an output word was written outside the final segment"
+            );
+        }
+    };
 }
 
-/// Segmented proving (docs/recursion.md, M2): split a run into bounded
-/// segments, prove each independently, and verify the chain — per-segment
-/// STARK verification plus boundary equality of (pc, registers, memory root).
-#[test_log::test]
-fn test_prove_verify_segmented_run() {
-    use prover::e2e::{ensure_guest_built, guest_bin_dir};
-    use prover::recursion::segments::{prove_segments, verify_segments};
-    use runner::run_segments_with_input;
+output_tail_test!(test_output_tail_lands_in_final_segment_split_5, 5);
+output_tail_test!(test_output_tail_lands_in_final_segment_split_7, 7);
 
-    ensure_guest_built();
-
-    let elf_path = guest_bin_dir().join("mulhu_alias");
-    let elf_bytes = std::fs::read(&elf_path).expect("Failed to read mulhu_alias ELF");
-
-    // Size segments to split the run in two: a fixed tiny segment size would
-    // make as many proofs as there are segments and blow up the test runtime.
-    let cycles = runner::run(&elf_bytes, 10_000_000)
-        .expect("Failed to run mulhu_alias")
-        .cycles;
-    let segment_cycles = u32::try_from(cycles / 2 + 1).expect("cycle count fits u32");
-    let segments = run_segments_with_input(&elf_bytes, &[], Some(segment_cycles), 10_000_000)
-        .expect("Failed to run mulhu_alias segmented");
-    assert_eq!(segments.len(), 2, "expected exactly 2 segments");
-
-    // Boundary invariants hold by construction on the runner side.
-    for pair in segments.windows(2) {
-        assert_eq!(pair[0].final_pc, pair[1].initial_pc);
-        assert_eq!(pair[0].final_regs, pair[1].initial_regs);
-    }
-
-    let preprocessing = prover::preprocess(PcsConfig::default());
-    let proofs = prove_segments(segments, PcsConfig::default(), &preprocessing);
-    verify_segments(proofs, PcsConfig::default(), &preprocessing)
-        .expect("segmented verification failed");
-}
-
-/// 2-to-1 aggregation tree (docs/recursion.md, M6 structure): segment proofs
-/// fold pairwise up a binary tree; the root boundary must span the whole
-/// execution exactly as an unsegmented run does.
-#[test_log::test]
-fn test_aggregate_segments_root_spans_execution() {
-    use prover::e2e::{ensure_guest_built, guest_bin_dir};
-    use prover::recursion::aggregate::aggregate_segments;
-    use prover::recursion::segments::prove_segments;
-    use runner::run_segments_with_input;
-
-    ensure_guest_built();
-
-    let elf_path = guest_bin_dir().join("mulhu_alias");
-    let elf_bytes = std::fs::read(&elf_path).expect("Failed to read mulhu_alias ELF");
-
-    let reference = runner::run(&elf_bytes, 10_000_000).expect("Failed to run mulhu_alias");
-    let segment_cycles = u32::try_from(reference.cycles / 4 + 1).expect("cycle count fits u32");
-    let segments = run_segments_with_input(&elf_bytes, &[], Some(segment_cycles), 10_000_000)
-        .expect("Failed to run mulhu_alias segmented");
-    assert!(segments.len() >= 3, "expected a multi-level tree");
-
-    let preprocessing = prover::preprocess(PcsConfig::default());
-    let proofs = prove_segments(segments, PcsConfig::default(), &preprocessing);
-
-    let root = aggregate_segments(proofs, PcsConfig::default(), &preprocessing)
-        .expect("aggregation failed");
-    assert_eq!(root.entry_pc, reference.initial_pc);
-    assert_eq!(root.exit_pc, reference.final_pc);
-    assert_eq!(root.exit_regs, reference.final_regs);
-}
-
-/// Full inner proof over the Poseidon2-M31 channel (docs/recursion.md, M4):
+/// Full VM proof over the Poseidon2-M31 channel:
 /// the entire stark-v pipeline — preprocessing, proving, verification —
 /// committed with the hash the recursion verifier AIR proves.
 #[test_log::test]
@@ -1140,6 +1608,7 @@ fn test_prove_verify_poseidon2_channel() {
         PcsConfig::default(),
         &preprocessing,
     );
+    assert!(proof.vm.stark_aux.is_none() && proof.poseidon2.stark_aux.is_none());
     verify_rv32im_with_channel::<Poseidon2M31MerkleChannel>(
         proof,
         PcsConfig::default(),

@@ -116,6 +116,6 @@ mod tests {
         // Stwo's built-in formula: pow_bits + log_blowup * n_queries = 16 + 1 * 193 = 209.
         // This uses the conjectured 1 bit/query; proven UDR security is 96 bits
         // (each query gives ~0.415 bits at rate 1/2 over QM31).
-        assert_eq!(config.security_bits(), 16 + 1 * 193);
+        assert_eq!(config.security_bits(), 16 + 193);
     }
 }

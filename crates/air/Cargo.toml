@@ -16,3 +16,4 @@ stwo-macros.workspace = true
 
 [dev-dependencies]
 rand.workspace = true
+rstest.workspace = true

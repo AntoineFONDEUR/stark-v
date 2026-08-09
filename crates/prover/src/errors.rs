@@ -3,16 +3,20 @@ use thiserror::Error;
 
 #[derive(Clone, Debug, Error)]
 pub enum VerificationError {
+    #[error("Proof has no preprocessing commitment.")]
+    MissingProofPreprocessingCommitment,
+    #[error("Verifier preprocessing has no commitment root.")]
+    MissingVerifierPreprocessingCommitment,
+    #[error("Proof preprocessing commitment does not match verifier preprocessing.")]
+    PreprocessingCommitmentMismatch,
     #[error("Invalid logup sum.")]
     InvalidLogupSum,
+    #[error("VM shared-relation claim does not match its committed interactions.")]
+    InvalidSharedRelationClaim,
+    #[error("VM and Poseidon2 shared-relation claims do not cancel.")]
+    SharedRelationMismatch,
     #[error("Interaction proof of work failed.")]
     InteractionProofOfWork,
-    #[error("Segment boundary mismatch between segments {prev} and {next}: {what}.")]
-    SegmentChainMismatch {
-        prev: usize,
-        next: usize,
-        what: &'static str,
-    },
     #[error(transparent)]
     Stwo(#[from] StwoVerificationError),
 }

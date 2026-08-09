@@ -11,16 +11,18 @@ use stwo::core::fields::m31::{M31, P as M31_P};
 use stwo::core::fields::qm31::QM31;
 use stwo_constraint_framework::Relation;
 
+use air::poseidon2::Poseidon2Digest;
+
 use crate::relations::Relations;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutputWord {
     pub addr: u32,
     pub value: u32,
     pub clock: u32,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IoEntries {
     /// Input region start address.
     pub input_start: u32,
@@ -39,7 +41,7 @@ pub struct IoEntries {
 }
 
 /// Public data required to verify an RV32IM proof.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicData {
     /// Entry PC at start of execution.
     pub initial_pc: u32,
@@ -51,14 +53,22 @@ pub struct PublicData {
     pub initial_regs: [u32; 32],
     /// Register values at end (x0..x31).
     pub final_regs: [u32; 32],
+    /// Proof-bound journal digest at segment entry.
+    pub initial_public_io_state: Poseidon2Digest,
+    /// Proof-bound journal digest at segment exit.
+    pub final_public_io_state: Poseidon2Digest,
+    /// Number of journal transitions in this segment.
+    pub journal_count: u32,
+    /// Execution clock of the segment's last journal transition, or zero.
+    pub journal_last_clock: u32,
     /// Last access clock per register (0 if never accessed).
     pub reg_last_clock: [u32; 32],
     /// Program tree root (if program table is non-empty).
-    pub program_root: Option<u32>,
+    pub program_root: Option<Poseidon2Digest>,
     /// RW initial memory tree root (if memory table is non-empty).
-    pub initial_rw_root: Option<u32>,
+    pub initial_rw_root: Option<Poseidon2Digest>,
     /// RW final memory tree root (if memory table is non-empty).
-    pub final_rw_root: Option<u32>,
+    pub final_rw_root: Option<Poseidon2Digest>,
     /// Input/output related data.
     pub io_entries: IoEntries,
 }
@@ -67,21 +77,37 @@ impl PublicData {
     pub fn new(run_result: &runner::RunResult) -> Self {
         let tracer = &run_result.tracer;
 
-        let program_root = tracer.program.root.first().copied();
+        let program_root = tracer.program.root_0.first().map(|_| {
+            [
+                tracer.program.root_0[0],
+                tracer.program.root_1[0],
+                tracer.program.root_2[0],
+                tracer.program.root_3[0],
+                tracer.program.root_4[0],
+                tracer.program.root_5[0],
+                tracer.program.root_6[0],
+                tracer.program.root_7[0],
+            ]
+        });
 
         let mut initial_rw_root = None;
         let mut final_rw_root = None;
-        for (root, mult) in tracer
-            .memory
-            .root
-            .iter()
-            .zip(tracer.memory.multiplicity.iter())
-        {
+        for (row, mult) in tracer.memory.multiplicity.iter().enumerate() {
+            let root = [
+                tracer.memory.root_0[row],
+                tracer.memory.root_1[row],
+                tracer.memory.root_2[row],
+                tracer.memory.root_3[row],
+                tracer.memory.root_4[row],
+                tracer.memory.root_5[row],
+                tracer.memory.root_6[row],
+                tracer.memory.root_7[row],
+            ];
             if *mult == 1 && initial_rw_root.is_none() {
-                initial_rw_root = Some(*root);
+                initial_rw_root = Some(root);
             }
             if *mult == M31_P - 1 && final_rw_root.is_none() {
-                final_rw_root = Some(*root);
+                final_rw_root = Some(root);
             }
             if initial_rw_root.is_some() && final_rw_root.is_some() {
                 break;
@@ -126,6 +152,10 @@ impl PublicData {
             clock,
             initial_regs: run_result.initial_regs,
             final_regs: run_result.final_regs,
+            initial_public_io_state: run_result.initial_public_io_state,
+            final_public_io_state: run_result.final_public_io_state,
+            journal_count: run_result.journal_count,
+            journal_last_clock: run_result.journal_last_clock,
             reg_last_clock: tracer.reg_clock,
             program_root,
             initial_rw_root,
@@ -139,6 +169,9 @@ impl PublicData {
         channel.mix_u32s(&[self.initial_pc, self.final_pc, self.clock]);
         channel.mix_u32s(&self.initial_regs);
         channel.mix_u32s(&self.final_regs);
+        channel.mix_u32s(&self.initial_public_io_state);
+        channel.mix_u32s(&self.final_public_io_state);
+        channel.mix_u32s(&[self.journal_count, self.journal_last_clock]);
         channel.mix_u32s(&self.reg_last_clock);
 
         let root_flags = [
@@ -147,12 +180,9 @@ impl PublicData {
             self.final_rw_root.is_some() as u32,
         ];
         channel.mix_u32s(&root_flags);
-        let roots = [
-            self.program_root.unwrap_or(0),
-            self.initial_rw_root.unwrap_or(0),
-            self.final_rw_root.unwrap_or(0),
-        ];
-        channel.mix_u32s(&roots);
+        for root in [self.program_root, self.initial_rw_root, self.final_rw_root] {
+            channel.mix_u32s(&root.unwrap_or([0; 8]));
+        }
 
         channel.mix_u32s(&[
             self.io_entries.input_start,
@@ -189,6 +219,27 @@ impl PublicData {
             .combine(&[M31::from(self.final_pc), final_clock]);
         values_to_inverse.push(-final_state);
 
+        // Journal chain: emit the public entry and consume the public exit.
+        let mut initial_journal = [M31::zero(); 10];
+        for (target, value) in initial_journal[2..]
+            .iter_mut()
+            .zip(self.initial_public_io_state)
+        {
+            *target = M31::from(value);
+        }
+        values_to_inverse.push(relations.journal.combine(&initial_journal));
+        let mut final_journal = [M31::zero(); 10];
+        final_journal[0] = M31::from(self.journal_count);
+        final_journal[1] = M31::from(self.journal_last_clock);
+        for (target, value) in final_journal[2..]
+            .iter_mut()
+            .zip(self.final_public_io_state)
+        {
+            *target = M31::from(value);
+        }
+        let final_journal: QM31 = relations.journal.combine(&final_journal);
+        values_to_inverse.push(-final_journal);
+
         // Merkle roots: emit each tree root once.
         for root in [self.program_root, self.initial_rw_root, self.final_rw_root]
             .into_iter()
@@ -197,8 +248,22 @@ impl PublicData {
             values_to_inverse.push(relations.merkle.combine(&[
                 M31::zero(),
                 M31::zero(),
-                M31::from(root),
-                M31::from(root),
+                M31::from(root[0]),
+                M31::from(root[1]),
+                M31::from(root[2]),
+                M31::from(root[3]),
+                M31::from(root[4]),
+                M31::from(root[5]),
+                M31::from(root[6]),
+                M31::from(root[7]),
+                M31::from(root[0]),
+                M31::from(root[1]),
+                M31::from(root[2]),
+                M31::from(root[3]),
+                M31::from(root[4]),
+                M31::from(root[5]),
+                M31::from(root[6]),
+                M31::from(root[7]),
             ]));
         }
 
@@ -294,6 +359,7 @@ mod tests {
     use super::*;
     use crate::relations::Relations;
     use runner::{IoWord, RunResult, Tracer};
+    use stwo::core::channel::Blake2sChannel;
 
     fn empty_public_data() -> PublicData {
         PublicData {
@@ -302,6 +368,10 @@ mod tests {
             clock: 0,
             initial_regs: [0; 32],
             final_regs: [0; 32],
+            initial_public_io_state: [0; 8],
+            final_public_io_state: [0; 8],
+            journal_count: 0,
+            journal_last_clock: 0,
             reg_last_clock: [0; 32],
             program_root: None,
             initial_rw_root: None,
@@ -331,6 +401,10 @@ mod tests {
             final_pc: 0,
             initial_regs: [0; 32],
             final_regs: [0; 32],
+            initial_public_io_state: [0; 8],
+            final_public_io_state: [0; 8],
+            journal_count: 0,
+            journal_last_clock: 0,
             output: Some(vec![1, 2, 3, 4]),
             input: vec![],
             input_start: 0,
@@ -396,8 +470,39 @@ mod tests {
     fn new_accepts_output_len_word_clock_when_present() {
         let run_result = output_clock_run_result(true);
         let public_data = PublicData::new(&run_result);
-        assert_eq!(public_data.io_entries.output_words.len(), 2);
-        assert_eq!(public_data.io_entries.output_words[0].addr, 0x1004);
-        assert_eq!(public_data.io_entries.output_words[0].clock, 3);
+        assert_eq!(
+            (
+                public_data.io_entries.output_words.len(),
+                public_data.io_entries.output_words[0].addr,
+                public_data.io_entries.output_words[0].clock,
+            ),
+            (2, 0x1004, 3),
+        );
+    }
+
+    #[test]
+    fn transcript_binds_the_last_program_root_word() {
+        let mut left = empty_public_data();
+        left.program_root = Some([0; 8]);
+        let mut right = left.clone();
+        right.program_root.as_mut().expect("root is present")[7] = 1;
+
+        let mut left_channel = Blake2sChannel::default();
+        left.mix_into(&mut left_channel);
+        let mut right_channel = Blake2sChannel::default();
+        right.mix_into(&mut right_channel);
+
+        assert_ne!(left_channel.digest(), right_channel.digest());
+    }
+
+    #[test]
+    fn logup_binds_the_last_program_root_word() {
+        let relations = Relations::dummy();
+        let mut left = empty_public_data();
+        left.program_root = Some([0; 8]);
+        let mut right = left.clone();
+        right.program_root.as_mut().expect("root is present")[7] = 1;
+
+        assert_ne!(left.logup_sum(&relations), right.logup_sum(&relations));
     }
 }

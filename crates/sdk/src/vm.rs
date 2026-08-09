@@ -159,10 +159,11 @@ impl zkVM for StarkV {
             ));
         };
 
-        let proof: prover::Proof<Blake2sMerkleHasher> = postcard::from_bytes(proof_bytes)
+        let proof: prover::SegmentProof<Blake2sMerkleHasher> = postcard::from_bytes(proof_bytes)
             .map_err(|err| CommonError::deserialize("proof", "postcard", err))?;
 
         let output_words = proof
+            .vm
             .public_data
             .io_entries
             .output_words
@@ -170,8 +171,8 @@ impl zkVM for StarkV {
             .map(|word| (word.addr, word.value))
             .collect::<Vec<_>>();
         let output = extract_output_payload_bytes(
-            proof.public_data.io_entries.output_data_addr,
-            proof.public_data.io_entries.output_len,
+            proof.vm.public_data.io_entries.output_data_addr,
+            proof.vm.public_data.io_entries.output_len,
             &output_words,
         )?;
 

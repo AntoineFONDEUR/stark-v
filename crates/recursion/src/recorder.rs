@@ -1,17 +1,18 @@
 //! Operation recorder: compiles an inner AIR's `evaluate()` into an
-//! arithmetic-operation arena (docs/recursion.md, M5).
+//! arithmetic-operation arena.
 //!
 //! `Recorder` implements `EvalAtRow` with a handle field type, so running any
 //! component's `FrameworkEval::evaluate` — the same single-source code the
 //! prover and verifier execute — records the composition-polynomial
 //! computation as explicit QM31 operations over mask inputs. The arena is the
 //! circuit the composition-check component lowers into recursion-AIR rows
-//! (mul/inv via the existing components, wiring via relations); an edit to
-//! `define_trace_tables!` changes the recorded circuit in the same
-//! compilation, with no constraint copy.
+//! (mul/inv via the existing components, wiring via relations); an edit to an
+//! owning `define_air!` or `define_air_fns!` constraint changes the recorded
+//! circuit in the same compilation, with no constraint copy.
 
 use core::cell::RefCell;
 use core::ops::{Add, AddAssign, Mul, Neg, Sub};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use num_traits::{One, Zero};
@@ -22,7 +23,7 @@ use stwo_constraint_framework::logup::LogupAtRow;
 use stwo_constraint_framework::{EvalAtRow, INTERACTION_TRACE_IDX};
 
 /// One recorded operation over arena nodes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum Op {
     /// A mask input (interaction, column, offset slot).
     Input,
@@ -43,19 +44,100 @@ pub struct Node {
 }
 
 /// The growing list of operations.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+enum OpKey {
+    Const([u32; 4]),
+    Add(usize, usize),
+    Sub(usize, usize),
+    Mul(usize, usize),
+    Neg(usize),
+    Inverse(usize),
+}
+
 #[derive(Default, Debug)]
 pub struct Arena {
     pub nodes: Vec<Node>,
+    // A canonical DAG keeps repeated AIR subexpressions from multiplying the
+    // trusted operation schedule and its recursion preprocessing footprint.
+    interned: HashMap<OpKey, usize>,
 }
 
 impl Arena {
     fn push(&mut self, op: Op, value: SecureField) -> usize {
+        let key = match op {
+            Op::Input => None,
+            Op::Const => Some(OpKey::Const(value.to_m31_array().map(|limb| limb.0))),
+            Op::Add(lhs, rhs) => Some(OpKey::Add(lhs.min(rhs), lhs.max(rhs))),
+            Op::Sub(lhs, rhs) => Some(OpKey::Sub(lhs, rhs)),
+            Op::Mul(lhs, rhs) => Some(OpKey::Mul(lhs.min(rhs), lhs.max(rhs))),
+            Op::Neg(lhs) => Some(OpKey::Neg(lhs)),
+            Op::Inverse(lhs) => Some(OpKey::Inverse(lhs)),
+        };
+        if let Some(key) = key {
+            if let Some(node_id) = self.interned.get(&key).copied() {
+                return node_id;
+            }
+        }
         self.nodes.push(Node { op, value });
-        self.nodes.len() - 1
+        let node_id = self.nodes.len() - 1;
+        if let Some(key) = key {
+            self.interned.insert(key, node_id);
+        }
+        node_id
     }
 }
 
 type SharedArena = Rc<RefCell<Arena>>;
+
+/// Fixed arithmetic circuit whose designated outputs must all be zero.
+#[derive(Debug)]
+pub struct ConstraintCircuit {
+    arena: SharedArena,
+    outputs: Vec<usize>,
+}
+
+impl ConstraintCircuit {
+    pub fn arena(&self) -> core::cell::Ref<'_, Arena> {
+        self.arena.borrow()
+    }
+
+    pub fn outputs(&self) -> &[usize] {
+        &self.outputs
+    }
+}
+
+/// Value-aware builder for fixed zero-constraint circuits.
+#[derive(Debug, Default)]
+pub struct CircuitBuilder {
+    arena: SharedArena,
+    outputs: Vec<usize>,
+}
+
+impl CircuitBuilder {
+    pub fn input(&mut self, value: SecureField) -> (usize, Rec) {
+        let id = self.arena.borrow_mut().push(Op::Input, value);
+        (
+            id,
+            Rec::Node {
+                id,
+                value,
+                arena: self.arena.clone(),
+            },
+        )
+    }
+
+    pub fn constrain_zero(&mut self, constraint: Rec) {
+        let output = constraint.node_id(&self.arena);
+        self.outputs.push(output);
+    }
+
+    pub fn finish(self) -> ConstraintCircuit {
+        ConstraintCircuit {
+            arena: self.arena,
+            outputs: self.outputs,
+        }
+    }
+}
 
 /// A value handle: either a pure constant or a node in the shared arena.
 ///
@@ -82,7 +164,19 @@ impl Rec {
     fn node_id(&self, arena: &SharedArena) -> usize {
         match self {
             Rec::Const(value) => arena.borrow_mut().push(Op::Const, *value),
-            Rec::Node { id, .. } => *id,
+            Rec::Node {
+                id,
+                arena: node_arena,
+                ..
+            } => {
+                // Node identifiers are local to one arena; accepting a foreign
+                // identifier would silently connect the operation to another node.
+                assert!(
+                    Rc::ptr_eq(node_arena, arena),
+                    "recursion circuit values must belong to the same arena"
+                );
+                *id
+            }
         }
     }
 
@@ -358,64 +452,7 @@ impl EvalAtRow for Recorder {
         v0 + v1 * u_0 + v2 * u_1 + v3 * u_2
     }
 
-    fn write_logup_frac(&mut self, fraction: stwo::core::Fraction<Self::EF, Self::EF>) {
-        if self.logup.fracs.is_empty() {
-            self.logup.is_finalized = false;
-        }
-        self.logup.fracs.push(fraction);
-    }
-
-    /// Same batching semantics as the framework's `logup_proxy!` (which is
-    /// crate-private): per-fraction batch assignments, batches summed in
-    /// order with cumulative-sum columns from the interaction masks, the
-    /// shifted check on the last batch.
-    fn finalize_logup_batched(&mut self, batching: &Vec<usize>) {
-        assert!(!self.logup.is_finalized, "LogupAtRow was already finalized");
-        let fracs = core::mem::take(&mut self.logup.fracs);
-        assert_eq!(
-            batching.len(),
-            fracs.len(),
-            "Batching must be of the same length as the number of entries"
-        );
-        let last_batch = *batching.iter().max().expect("at least one fraction");
-
-        let mut fracs_by_batch: Vec<Vec<stwo::core::Fraction<Self::EF, Self::EF>>> =
-            vec![Vec::new(); last_batch + 1];
-        for (&batch, frac) in batching.iter().zip(fracs.iter()) {
-            fracs_by_batch[batch].push(frac.clone());
-        }
-        assert!(
-            fracs_by_batch.iter().all(|batch| !batch.is_empty()),
-            "Batching must contain all consecutive batches"
-        );
-
-        let mut prev_col_cumsum = <Self::EF as Zero>::zero();
-        for batch in &fracs_by_batch[..last_batch] {
-            let cur_frac: stwo::core::Fraction<Self::EF, Self::EF> = batch.iter().cloned().sum();
-            let [cur_cumsum] = self.next_extension_interaction_mask(self.logup.interaction, [0]);
-            let diff = cur_cumsum.clone() - prev_col_cumsum.clone();
-            prev_col_cumsum = cur_cumsum;
-            self.add_constraint(diff * cur_frac.denominator - cur_frac.numerator);
-        }
-        let cur_frac: stwo::core::Fraction<Self::EF, Self::EF> =
-            fracs_by_batch[last_batch].iter().cloned().sum();
-        let [prev_row_cumsum, cur_cumsum] =
-            self.next_extension_interaction_mask(self.logup.interaction, [-1, 0]);
-        let diff = cur_cumsum - prev_row_cumsum - prev_col_cumsum.clone();
-        let shifted_diff = diff + self.logup.cumsum_shift;
-        self.add_constraint(shifted_diff * cur_frac.denominator - cur_frac.numerator);
-        self.logup.is_finalized = true;
-    }
-
-    fn finalize_logup(&mut self) {
-        let batches = (0..self.logup.fracs.len()).collect();
-        self.finalize_logup_batched(&batches)
-    }
-
-    fn finalize_logup_in_pairs(&mut self) {
-        let batches = (0..self.logup.fracs.len()).map(|n| n / 2).collect();
-        self.finalize_logup_batched(&batches)
-    }
+    crate::dynamic_logup::recursion_logup_proxy!();
 }
 
 #[cfg(test)]
@@ -583,5 +620,29 @@ mod tests {
         // The circuit has inputs and arithmetic: a faithful compilation of
         // the inner constraints, produced by running the same evaluate().
         assert!(arena.nodes.iter().any(|n| matches!(n.op, Op::Mul(_, _))));
+    }
+
+    #[test]
+    fn constraint_builder_keeps_each_zero_check_as_a_distinct_output() {
+        let mut builder = CircuitBuilder::default();
+        let (_, three) = builder.input(SecureField::from(BaseField::from(3)));
+        let (_, four) = builder.input(SecureField::from(BaseField::from(4)));
+        builder.constrain_zero(three + four - Rec::from(BaseField::from(7)));
+        let circuit = builder.finish();
+        let output = circuit.outputs()[0];
+        assert_eq!(
+            (circuit.outputs().len(), circuit.arena().nodes[output].value),
+            (1, SecureField::zero())
+        );
+    }
+
+    #[test]
+    fn values_from_different_circuit_arenas_are_rejected() {
+        let mut first_builder = CircuitBuilder::default();
+        let mut second_builder = CircuitBuilder::default();
+        let first = first_builder.input(SecureField::one()).1;
+        let second = second_builder.input(SecureField::one()).1;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| first + second));
+        assert!(result.is_err());
     }
 }

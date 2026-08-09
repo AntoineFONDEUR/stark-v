@@ -6,19 +6,33 @@ MEMORY {
     DATA (rw) : ORIGIN = 0x00200000, LENGTH = 0x00100000
 }
 
-__stack_size = 0x00000400; /* 1 KiB */
+/* Stack grows down from __stack_top toward __stack_bottom. A guard gap of
+ * unmapped addresses sits below it so an overflow lands on memory nothing
+ * else uses (a contained fault) instead of corrupting the output region. */
+__stack_size = 0x00010000; /* 64 KiB */
 __stack_top = 0x00200000;
 __stack_bottom = __stack_top - __stack_size;
+__stack_guard = 0x00001000; /* 4 KiB unmapped below the stack */
 
-/* I/O region - between TEXT end and STACK bottom */
+/* I/O region between TEXT end and the stack guard.
+ *
+ * Layout, low to high:
+ *   [__input_len : u32] actual input byte count (host-written)
+ *   [__input_start .. __input_end] input buffer
+ *   [__halt_flag : u32]
+ *   [__output_len : u32]
+ *   [__output_data .. __output_end] output buffer
+ * followed by the stack guard, then the stack.
+ */
 __io_start = 0x00100000;
-__input_len = 0x00001000; /* 4 KiB input buffer */
-__input_start = __io_start;
-__input_end = __input_start + __input_len;
+__input_len = __io_start;
+__input_start = __input_len + 4;
+__input_capacity = 0x00010000; /* 64 KiB input buffer */
+__input_end = __input_start + __input_capacity;
 __halt_flag = __input_end;
 __output_len = __halt_flag + 4;
 __output_data = __halt_flag + 8;
-__output_end = __stack_bottom;
+__output_end = __stack_bottom - __stack_guard;
 
 SECTIONS {
     .text : ALIGN(4) {

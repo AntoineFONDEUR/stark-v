@@ -8,14 +8,7 @@
 //!
 //! Usage:
 //! ```bash
-//! # Default allocator
-//! cargo bench --package prover --bench fibonacci --features parallel
-//!
-//! # With peak-alloc to track memory
-//! cargo bench --package prover --bench fibonacci --features "parallel,peak-alloc"
-//!
-//! # With jemalloc
-//! cargo bench --package prover --bench fibonacci --features "parallel,jemalloc"
+//! cargo bench --release --package prover --bench fibonacci --features parallel
 //! ```
 
 use divan::counter::ItemsCount;
@@ -50,38 +43,28 @@ fn bench_fibonacci<const N: u32>(bencher: divan::Bencher, par_iter: usize) {
     // Total cycles processed per benchmark iteration
     let total_cycles = cycles * par_iter as u64;
 
-    // Clone ELF bytes for use in closure
-    let elf_bytes = elf_bytes.clone();
+    let config = PcsConfig {
+        pow_bits: 24,
+        fri_config: FriConfig::new(0, 1, 70, 1),
+        lifting_log_size: None,
+    };
+    // Preprocessing is a cached artifact shared across proofs; keep it out of
+    // the timed section so the bench measures proving, not preprocessing.
+    let preprocessing = prover::preprocess(config);
 
     bencher
         // Report cycles as throughput counter - divan will show cycles/sec
         .counter(ItemsCount::new(total_cycles as usize))
         .bench(|| {
-            #[cfg(feature = "peak-alloc")]
-            prover::PEAK_ALLOC.reset_peak_usage();
-
-            let config = PcsConfig {
-                pow_bits: 24,
-                fri_config: FriConfig::new(0, 1, 70, 1),
-                lifting_log_size: None,
-            };
-
             // Run VM and prove in parallel - each iteration gets its own RunResult
             let proofs: Vec<_> = (0..par_iter)
                 .into_par_iter()
                 .map(|_| {
                     let run_result = run_with_input(&elf_bytes, &input, 100_000_000)
                         .expect("Failed to run fib_input");
-                    prove_rv32im(run_result, config, &prover::preprocess(config))
+                    prove_rv32im(run_result, config, &preprocessing)
                 })
                 .collect();
-
-            #[cfg(feature = "peak-alloc")]
-            {
-                let peak_bytes = prover::PEAK_ALLOC.peak_usage_as_mb();
-                println!("Peak memory: {peak_bytes} MB");
-                divan::black_box(peak_bytes);
-            }
 
             divan::black_box(proofs)
         });

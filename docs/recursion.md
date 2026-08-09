@@ -1,224 +1,208 @@
-# 2-to-1 Recursion Design (native stwo verifier AIR)
+# Recursive proving
 
-Goal: prove unlimited program lengths by splitting execution into fixed-size
-segments (e.g. 100k or 1M steps, configurable), proving each segment, then
-aggregating proofs pairwise (2-to-1) up a binary tree until a single root proof
-remains.
+## Terminology and crate boundary
 
-The aggregator is **not** a RISC-V guest re-executing a Rust verifier. It is a
-**native stwo AIR**: a set of stwo components whose constraints assert "these
-two stark-v proofs verify, and their boundaries chain". The recursion prover
-takes two stwo proofs as witness input and produces a stwo proof of their
-verification.
+`continuation` and `recursion` solve different problems:
 
-Working in our favor: the inner and outer proofs share the same field
-(M31/QM31), so no field emulation is needed anywhere — channel, FRI, and
-composition arithmetic are all native.
+- `continuation` proves every execution segment independently and verifies all
+  resulting proofs on the host. It also checks that adjacent public machine
+  states match. A run with `n` segments produces `n` proofs, and both proof
+  bytes and verification work grow with `n`. This is not recursion.
+- `recursion` defines a universal AIR with a segment-leaf branch and a binary
+  node branch. Its tree driver repeatedly replaces two child proofs with one
+  proof of the same protocol and shape until only the root remains. Only this
+  path can produce one constant-size root proof.
 
-## Single source of definition
+The recursion crate has no version suffix. Its root modules are the only active
+recursion design.
 
-The hard requirement: **no copy of any constraint, ever**. Editing
-`define_trace_tables!` must flow through to the recursive verifier.
+## Current status
 
-The mechanism is `EvalAtRow` genericity, and it is already load-bearing in stwo:
+The recursion crate exposes a manifest-bound outer prover and verifier for
+segment leaves, canonical empty leaves, and binary parents that verify two
+recursion proofs. Its level-ordered tree driver proves finalized VM segments,
+adds canonical padding, and returns only one root statement and root proof. The
+application root verifier binds that proof to a caller-supplied complete
+execution. Every successfully produced canonical root proof encodes through the
+frozen 3,479,096-byte proof wire and uses the same profile-owned 4,945-step
+verifier plan.
 
-- The prover instantiates each component's
-  `FrameworkEval::evaluate<E: EvalAtRow>` with a SIMD trace evaluator.
-- The verifier instantiates the same function with `PointEvaluator`
-  (`constraint-framework/src/point.rs`) to evaluate the composition polynomial
-  at the OODS point from sampled mask values.
-- `ExprEvaluator` (`constraint-framework/src/expr/`) instantiates it with
-  `F = BaseExpr, EF = ExtExpr`, turning the constraint set into expression
-  _data_ — including formal LogUp parameters — without any transcription.
+The implemented foundation includes:
 
-The verifier AIR uses the same seam: its composition-check sub-circuit is driven
-by the inner components' `evaluate()` — either executed at witness generation
-time with `PointEvaluator`-style QM31 values, or instantiated with an evaluator
-whose field type is the verifier AIR's own cell/variable type. Either way, a
-macro edit changes the inner AIR and the recursive verifier in the same
-compilation, with zero copies.
+- a canonical protocol manifest and fixed-width proof wire;
+- one frozen protocol profile without a version suffix, derived from the VM,
+  detached Poseidon2, and universal generated AIR programs, with 193 FRI
+  queries, 4 KiB public-input and public-output capacities, and an exact
+  3,479,096-byte universal proof wire;
+- fixed segment trace generation that pads ordinary VM instruction and access
+  tables to log size 6, the finalized program, memory, and Merkle tables to log
+  size 11, and the detached Poseidon2 table to its independent fixed geometry,
+  rejecting a segment instead of changing verifier-owned geometry;
+- checked adaptation of one complete in-memory `SegmentProof` into the fixed
+  leaf wire, including separate VM and Poseidon2 proof lanes, their joint
+  interaction nonce and shared-relation sum, and expansion of deduplicated query
+  values, Merkle siblings, and FRI cosets from prover-retained authentication
+  data;
+- typed complete-execution, job, slot, executed-span, and empty-span statements;
+- a fixed verifier control plan shared by the manifest-bound recursion-targeted
+  prover, fixed verifier execution, and AIR tables; ordinary segment proving
+  retains the public prover's native constituent transcripts;
+- canonical transcript recording, payload ownership, digest-state chaining,
+  proof-of-work checks, and relation-challenge binding;
+- VM public-claim decoding and hashing;
+- statement semantics for segment leaves, empty leaves, and binary folds;
+- VM AIR composition evaluation generated from the prover component roster and
+  independent composition evaluation for the detached DSL-owned Poseidon2 AIR;
+- DEEP quotient, trace-Merkle, FRI-Merkle, FRI-fold, last-layer, and query
+  position constraints;
+- deterministic segment-leaf and canonical empty-leaf witness assembly across
+  all 36 universal components, including preprocessing, committed traces,
+  interactions, public relation terms, exact global LogUp closure, and direct
+  constraint acceptance;
+- complete segment-leaf replay of both constituent proofs through VM claim
+  semantics, both AIR compositions, the joint relation draw and exact shared-sum
+  cancellation, trace and FRI authentication, DEEP quotient evaluation, proofs
+  of work, and the last-layer polynomial checks;
+- proof-free empty-leaf assembly that binds one checked height-zero padding
+  statement and materializes every inactive verifier lane as zero;
+- manifest-bound outer preprocessing, proving, and verification for segment,
+  empty, and binary witnesses over the complete 36-component roster;
+- an AIR self-program for verifying a recursion child;
+- checked adaptation of an outer recursion proof into the fixed child wire,
+  including raw-query expansion from prover-retained authentication data;
+- two independent recursion-child verifier lanes whose transcript, claimed sums,
+  composition, openings, DEEP quotient, FRI, and final polynomial checks close
+  inside one binary-parent witness;
+- a level-ordered tree driver that derives the complete execution job, proves
+  executed and canonical empty leaves, reduces adjacent children in bounded
+  same-level waves with worker-owned preprocessing, and discards descendants
+  after each level;
+- shared QM31 multiplication, inversion, linear-operation, and Merkle-path trace
+  tables;
+- component, malformed-witness, relation-closure, and leaf-binding tests.
 
-## What the verifier AIR must assert
+The supported parallel profile proves at most two independent tree jobs in an
+outer Rayon wave and retains STWO proof-kernel parallelism in the same pool. An
+outer-only active-profile binary root was 20.10% slower and used 0.55 GB more
+peak RSS, so independent-job parallelism does not replace inner parallelism once
+the tree reaches its single root proof.
 
-Mirroring `prover::verifier::verify_rv32im` + `stwo::core::verifier::verify`,
-for each of the two child proofs:
+Segment, empty, and binary witnesses produce recursion proofs that bind the
+expected protocol, statement, component claims, interaction claims, and STWO
+proof. A real recursion proof can be encoded and verified as either binary
+child. Swapped, duplicated, gapped, overlapping, and job-mismatched child pairs
+are rejected at the unique fold boundary. The earlier integrated-Poseidon
+profile produced and verified roots for runs with 1, 2, 3, 4, and 8 executed
+segments. The active split-proof profile has revalidated real one-segment,
+binary, and padded roots. These cover the leaf, exact binary, and non-power-of-
+two padding boundaries; larger exact powers repeat the binary reduction shape.
 
-1. **Fiat-Shamir channel replay** (Blake2s): mix public data, commitments,
-   claims; draw `Relations`, OODS point, FRI alphas, query positions. Requires a
-   Blake2s hash component (stwo has a Blake AIR example as reference).
-2. **Proof of work** checks (interaction PoW + FRI PoW).
-3. **LogUp sum check**: total claimed sum + public data logup sum = 0. The
-   public-data logup terms reuse the same `Relations::combine` code.
-4. **Composition check at OODS**: recompute the composition polynomial value
-   from the sampled mask values via the inner components' `evaluate()` — the
-   single-source seam described above.
-5. **Merkle decommitments** (Blake2s) of the queried positions against the
-   commitments for every trace tree.
-6. **FRI verification**: fold query evaluations through all FRI layers and check
-   consistency with the last-layer polynomial.
-7. **Boundary chaining** (aggregation logic): `child_0.exit == child_1.entry` on
-   `(pc, clock, memory/register state)` public data, and exposure of
-   `(child_0.entry, child_1.exit)` as the aggregate's public data.
+`root::verify_recursive_root` accepts a segmentation-free
+`CompleteExecutionStatement` and exactly one `RecursionProof`. It requires the
+proof statement to be the canonical complete root, compares the expected
+protocol, program, initial and final machine states, public input, public
+output, and total cycles, then runs the manifest-bound recursion verifier. The
+active split-proof profile encodes and verifies actual segment-leaf, binary, and
+padded roots. Its fixed wire type and verifier-plan digest are independent of
+the executed segment count by construction.
 
-The output proof must be verifiable by the same verifier AIR (fixed-point proof
-shape), so aggregation composes up the tree.
+The live universal roster has 36 components. Every recursion-local component is
+authored directly through `define_air_fns!`; Poseidon2 uses the same macro, and
+the range-check and other inner VM components are generated through
+`define_air!`. The structural guard in `crates/recursion/tests/air_dsl_guard.rs`
+pins the universal and inner VM rosters, their owning source files, and their
+accepted macro counts. It rejects hand-written `FrameworkEval` implementations,
+standalone `define_component_tables!` declarations, and wrapper macros in those
+sources.
 
-## Milestones
+The host continuation remains available for linear proof chains, but it is not
+the recursive application-verification API. Its public data does not bind
+segment roles, and its verifier does not accept an application-supplied
+complete-execution statement. Callers must not treat those helpers as a
+constant-size or fully statement-bound proof system.
 
-- **M1 — constraints as data (seam validation)**: expose the full stark-v
-  constraint system programmatically through `ExprEvaluator`/`PointEvaluator`
-  from the existing components; test that composition replay from a real proof's
-  sampled values matches the verifier. This validates the no-copy seam the
-  verifier AIR builds on.
-- **M2 — segmentation**: runner support for stopping at N steps with entry/exit
-  boundary public data; prove/verify a 2-segment run on the host (no recursion
-  yet). Boundary soundness comes from the existing `registers_state` /
-  `memory_access` relations plus Merkle-root chaining:
-  `final_rw_root(k) == initial_rw_root(k + 1)`. Chaining works because the
-  partial Merkle trees use zero-valued default leaves, so an address first
-  written in segment `k + 1` (present in its initial tree as 0) hashes
-  identically to its absence from segment `k`'s final tree. IO special-casing is
-  gated by `runner::SegmentRole`: inputs are LogUp-anchored in the first segment
-  only, public outputs consumed in the last only; middle segments treat the IO
-  regions as ordinary RW memory. Constraint: a guest taking input must access
-  every input word within the first segment (unconsumed input emissions make
-  segment 1's LogUp sum non-zero — verification fails safe, but the run is
-  unprovable).
-- **M3 — QM31 arithmetic components** (started): verifier-AIR building blocks
-  for QM31 mul/inverse, point operations, and FRI folding steps. Lives in
-  `crates/recursion`, built on `define_component_tables!` (the trace-table DSL
-  without the zkVM `Tracer`), so recursion constraints share the single-source
-  pipeline. First component: `qm31_mul` (c = a·b over the extension tower, 4
-  degree-2 limb constraints, tested against stwo's field arithmetic).
-- **M4 — channel + Merkle components**: hash sub-AIR and decommitment paths;
-  channel state replay as a trace. Direction: a Poseidon2-M31 `MerkleChannel` so
-  inner proofs commit with the hash the existing `poseidon2`/`merkle` components
-  already prove — in-AIR Merkle verification becomes component reuse with zero
-  new hash constraints. Crucially this needs **no fork changes**: `Channel`,
-  `MerkleChannel`, `MerkleHasherLifted`, `MerkleOps`, and
-  `BackendForChannel<MC>` are public stwo traits, and the orphan rules permit
-  implementing them all for stark-v-local types
-  (`impl BackendForChannel<LocalChannel> for SimdBackend` is a legal
-  local-type-parameter impl). The permutation already exists in
-  `runner::poseidon2`.
-- **M5 — composition-check component**: wire the inner `evaluate()` into the
-  verifier AIR (witness side via `PointEvaluator` values; constraint side via
-  the generic seam).
-- **M6 — full verifier AIR + 2-to-1 aggregation**: assemble 1–7, fixed-point
-  proof shape, SDK wiring for the aggregation tree.
+## Recursive statement
 
-## M4 remaining: proof-tree Merkle paths (integration design)
+`CompleteExecutionStatement` is the application claim. It binds:
 
-The existing `merkle` + `poseidon2` components prove the memory-commitment
-trees, whose node values are single M31 words. Proof commitment trees use 8-word
-digests (`Poseidon2M31Hash`), so:
+- protocol identity;
+- program digest;
+- initial and final machine state;
+- public input and output digests;
+- total cycle count.
 
-1. The 16-wide `poseidon2` relation already covers both digest widths: `combine`
-   zero-pads short tuples, so the memory trees' `(l, r)` inputs and the proof
-   trees' `(l_0..l_7, r_0..r_7)` inputs share the relation, as do the `(out_0)`
-   and `(out_0..out_7)` outputs. No new relation.
-2. Add a `wide` flag column to the `poseidon2` component: emit `(out_0)` with
-   multiplicity `(1 - wide) * enabler` and `(out_0..out_7)` with
-   `wide * enabler` (degree-2 numerators keep the same batch degree as the
-   existing pairs). One edit to the one existing component — no copy.
-3. A recursion `merkle_path` table walks a decommitment path: each row emits
-   `(left || right)` (16 words) and consumes `(parent_0..parent_7)` through the
-   poseidon2 relation, chains parent into the next row's child slot, and exposes
-   the root for binding against the channel-replayed commitment.
-4. `prove_recursion` draws the stark-v `Relations` (the recursion crate gains a
-   real `prover` dependency; no cycle) and instantiates the reused `poseidon2`
-   component with a second table fed from the proofs' decommitment paths.
+`JobContext` adds the prover-internal segment count and derives the unique
+minimal binary-tree height. `SpanStatement` binds one exact slot range inside
+that tree. An executed span carries its first segment, number of segments, first
+cycle, number of cycles, entry and exit state, and optional input/output edge
+claims. An empty span has one canonical representation.
 
-## Channel replay (design) and a soundness observation
+A valid binary node has two adjacent children of equal height. They must share
+one job, occupy the exact left and right child slots, and agree at their
+machine-state boundary. Folding them yields the unique parent span. Padding is
+represented by canonical empty leaves, not by omitted children or proof-selected
+tree shapes.
 
-The Poseidon2-M31 channel is a sponge: every mix/draw is a chain of permutations
-where the full 16-word state carries between chunks. Replaying it in-AIR
-therefore needs each replay row bound to a permutation's **input and output
-atomically**. The current poseidon2 relation emits inputs and outputs as
-separate tuples, and LogUp multiset equality alone does not pair them: with two
-permutation rows, a malicious witness could consume the inputs and outputs in
-swapped combination.
+## Universal verifier
 
-- **Soundness review item (pre-existing pattern):** the memory-tree `merkle`
-  component uses the same split shape — emit `(l, r)`, consume `(out)` as
-  independent poseidon2-relation entries. Whether output-swapping is exploitable
-  there depends on the surrounding tree chaining; it deserves a dedicated
-  review.
-- **Channel-replay design:** add a `poseidon2_io: in_0..in_15, out_0..out_15`
-  relation (32 elements) to the `relations!` set, emitted by the poseidon2
-  component under a third flag (`io`), binding each permutation's ends
-  atomically. Replay rows then: consume `(prev_state, prev_out)` pairs along a
-  `sponge_step(channel_id, step, state16)` chain (mirroring `merkle_node`), add
-  the absorbed chunk into the rate in-row (degree-1 arithmetic), and anchor the
-  final digest against the channel claim. Mixed-data binding (what gets
-  absorbed: commitments, claims) comes from the recursion proof's public claim,
-  exactly like `RootClaim`.
+The proof kind selects one of three branches:
 
-## The single final proof (`recursion::final_proof`)
+- `SegmentLeaf`: verify one segment artifact containing separate VM and
+  Poseidon2 STARK proofs, require their joint transcript and shared-relation
+  sums to match, and derive its height-zero statement;
+- `BinaryNode`: verify two proofs produced by this recursion AIR and fold their
+  statements;
+- `EmptyLeaf`: prove the canonical unused slot required to complete the tree.
 
-A segmented execution of any length is proven as ONE artifact:
+The protocol manifest fixes PCS parameters and the exact proof shapes for the VM
+and recursion lanes. `VerifierControlPlan` derives the mandatory verifier
+schedule from that trusted manifest. Proof bytes supply values only; they do not
+choose operation counts, transcript phases, Merkle depths, FRI widths, or
+relation closures.
 
-```text
-prove_segments_with_channel::<Poseidon2M31MerkleChannel>  (one proof per segment)
-        |
-prove_final ──────────────► FinalProof {
-   per segment:                recursion_proof   (ONE stwo proof)
-   - composition circuit       segments          (public bodies,
-     (CompositionRecorder       NO decommitments anywhere)
-      → lower_arena)         }
-   - every Merkle opening
-     (openings::replay_pcs_openings
-      → merkle_path rows + poseidon2 rows)
-```
+The universal relation registry fixes relation draw order. The VM relation
+bundle comes first so shared VM components preserve their established challenge
+layout. Recursion-local relations then connect control, transcript, statement,
+arithmetic, query, Merkle, DEEP, and FRI tables. Every branch rejects a nonzero
+global LogUp sum across the complete roster. The outer proof carries the same
+component claims and public terms, and verification recomputes the public
+relation sum before accepting the STWO proof.
 
-`verify_final` is the only verification step. Its work splits in two:
+## Soundness invariants
 
-- **Public-data recomputation** (deterministic, no trust): replay each segment's
-  Fiat-Shamir transcript natively (the bodies are the final proof's public input
-  — hashing them is the cost of reading the proof), re-record the canonical
-  composition circuits from the same `evaluate()`, recompute DEEP quotients
-  (`stwo`'s `fri_answers`), the FRI fold chain, last-layer evaluations, proofs
-  of work, LogUp sums, and the boundary chain across segments.
-- **ONE stwo verification** of the recursion proof, which attests the two things
-  public data cannot: that the composition circuits evaluate to the claimed OODS
-  values (every inner constraint, through the single-source seam), and that the
-  queried values open against the committed roots — the decommitment paths are
-  witness to the recursion proof and absent from the artifact. Leaf digests
-  anchor as public `LeafClaim`s (recomputed by the verifier from queried
-  values), roots as `RootClaim`s (equal to the in-transcript commitments), one
-  path per opened position per tree — trace trees and every FRI layer tree.
+The finished system must preserve all of these properties:
 
-Shared upper path rows of converging queries are simply pushed once per path:
-each duplicated row consumes its own node claim and re-emits its child's, so the
-multiset telescopes with `RootClaim.n_paths` at the top.
+- The verifier schedule is derived from a trusted manifest and cannot be
+  shortened or reordered by proof bytes.
+- Every wire integer and field word has one canonical encoding; inactive
+  fixed-capacity slots are all zero.
+- The transcript absorbs the protocol, statement, PCS parameters, commitments,
+  claims, sampled values, FRI data, and proof-of-work nonces in the same order
+  in the manifest-bound prover, fixed verifier executor, and AIR.
+- Every VM or recursion AIR constraint contributes to the composition value.
+- Every opened value is bound to an authenticated trace or FRI path.
+- Every public LogUp term is accumulated, and the global relation sum is zero.
+- A segment leaf binds the VM public claim to exactly one height-zero span.
+- A binary node verifies both children, checks adjacency, and exposes only the
+  unique folded parent statement.
+- Empty leaves can only pad slots beyond the declared segment count.
+- The root statement equals the application-supplied complete-execution
+  statement.
+- Recursive proof shape and root verification work are independent of the number
+  of segment leaves supported by the fixed protocol profile.
 
-Validated end to end by `tests/final_proof.rs`: a 2-segment roundtrip with
-tamper vectors (forged queried value, forged root claim, broken boundary), and
-`test_final_proof_of_10m_cycle_run` — the 10.8M-cycle `long_run` guest, 11
-segments, proven as one final proof in ~220s (release, `parallel`).
+## Implementation ledger
 
-### Remaining deepening (succinctness, not soundness)
+[`docs/roadmap.md`](roadmap.md) is the single execution ledger. It owns stable
+task IDs, dependencies, task status, acceptance gates, and test evidence for the
+macro migration and recursive proving pipeline. This document remains the
+technical design and soundness specification; it does not maintain a second task
+list that can drift from the implementation order.
 
-The trust structure above is complete; what remains shrinks the public remainder
-so `verify_final` approaches statement-size work:
+## Finish-line definition
 
-1. Record the FRI quotient/fold formulas as Rec circuits (protocol arithmetic,
-   not constraint copy) so queried values can become witness.
-2. Replay the inner transcripts through the in-AIR channel (machinery exists and
-   is validated against the real channel) with absorbed chunks as witness, drawn
-   values and query-index bits bound by wires.
-3. Circuit structure as preprocessed columns (removes the per-proof re-record),
-   then true 2-to-1 node compression (a recursion proof attesting two child
-   recursion proofs) for unbounded depth at constant artifact size.
-
-## Notes
-
-- stwo's `examples/` contain Blake and Poseidon AIRs to draw on for M4; a
-  Poseidon-based channel variant may be cheaper inside the AIR than Blake2s and
-  is worth evaluating early (it changes the channel of the _inner_ proofs, a
-  config choice, not a constraint copy).
-- The remaining single-source gap inside stark-v itself: LogUp relation entries
-  are written in both `air.rs` (`add_to_relation!`) and `witness.rs`
-  (`combine!`/`write_pair!`). Extending `define_trace_tables!` with a
-  `relations:` block closes it; the verifier AIR is unaffected either way since
-  it consumes `evaluate()`.
+The project reaches the recursion finish line only when an application can
+submit one expected complete-execution statement and one root proof, the root
+verifier checks that statement without descendant proofs, and the serialized
+proof size is unchanged across the supported segment counts of the frozen
+profile. Passing component tests alone is not completion.

@@ -1,4 +1,4 @@
-//! Poseidon2-M31 Fiat-Shamir channel and Merkle hasher (docs/recursion.md, M4).
+//! Poseidon2-M31 Fiat-Shamir channel and Merkle hasher.
 //!
 //! Inner stark-v proofs committed with this channel hash with the same
 //! Poseidon2 permutation the `poseidon2`/`merkle` AIR components already
@@ -18,6 +18,7 @@
 //!   child digests; leaf hashing runs the sponge with a tagged capacity word
 //!   for domain separation from node hashing.
 
+use air::digest::{Digest8, M31Word};
 use runner::poseidon2::{T, poseidon2_permutation};
 use serde::{Deserialize, Serialize};
 use stwo::core::channel::{Channel, MerkleChannel};
@@ -76,6 +77,17 @@ fn hash_words(words: &[u32], capacity_tag: u32) -> Poseidon2M31Hash {
         poseidon2_permutation(&mut state);
     }
     Poseidon2M31Hash(state[..RATE].try_into().expect("rate slice"))
+}
+
+/// Hashes canonical M31 words with a capacity-domain tag into a full digest.
+///
+/// Protocol identities use this entry point so their encoding cannot pass
+/// through `mix_u32s`, whose 16-bit split intentionally has different
+/// semantics for unrestricted machine words.
+pub fn poseidon2_hash_m31_words(words: &[M31Word], domain: M31Word) -> Digest8 {
+    let words: Vec<u32> = words.iter().map(|word| word.as_u32()).collect();
+    let digest = hash_words(&words, domain.as_u32());
+    Digest8::try_from(digest.0).expect("Poseidon2 outputs canonical M31 words")
 }
 
 /// Split u32s into 16-bit halves so every absorbed word is a canonical M31.
@@ -275,6 +287,8 @@ impl stwo::prover::backend::BackendForChannel<Poseidon2M31MerkleChannel> for Sim
 
 #[cfg(test)]
 mod tests {
+    use air::digest::M31Word;
+
     use super::*;
 
     #[test]
@@ -334,6 +348,34 @@ mod tests {
             .collect();
         leaf_hasher.update_leaf(&words);
         assert_ne!(leaf_hasher.finalize(), node);
+    }
+
+    #[test]
+    fn test_canonical_word_hash_is_domain_separated() {
+        let words = [M31Word::from(1), M31Word::from(2)];
+        assert_ne!(
+            poseidon2_hash_m31_words(&words, M31Word::from(10)),
+            poseidon2_hash_m31_words(&words, M31Word::from(11))
+        );
+    }
+
+    #[test]
+    fn test_canonical_word_hash_matches_conformance_vector() {
+        let words = [M31Word::from(1), M31Word::from(2)];
+        assert_eq!(
+            poseidon2_hash_m31_words(&words, M31Word::from(10)),
+            Digest8::try_from([
+                1_683_618_890,
+                22_281_548,
+                1_108_016_194,
+                1_368_459_274,
+                926_884_817,
+                1_781_577_565,
+                1_099_953_524,
+                427_524_185,
+            ])
+            .expect("the conformance digest words are canonical")
+        );
     }
 
     #[test]

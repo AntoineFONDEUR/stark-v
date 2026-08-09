@@ -7,19 +7,13 @@
 
 use stwo::core::fields::m31::M31;
 
-/// Default Poseidon2 Merkle hashes for the widest binary tree whose leaf indices fit in M31.
-///
-/// The array index is the Merkle depth; depth 30 is the zero leaf value.
-pub const POSEIDON2_DEFAULT_HASHES_DEPTH_30: [u32; 31] = [
-    1780222652, 1930688578, 303118306, 97239919, 1601728603, 1416594325, 1406687439, 1363155510,
-    1886023926, 1217577584, 378597429, 1556938811, 474559429, 423443822, 662201576, 1930942541,
-    2117464092, 770448190, 1902191074, 1556109289, 776362864, 1750512713, 1171333637, 1423473161,
-    372035035, 1457616685, 1303178213, 1563153690, 1383248003, 1183174448, 0,
-];
-
 pub const T: usize = 16;
+pub const DIGEST_WORDS: usize = T / 2;
 pub const FULL_ROUNDS: usize = 8;
 pub const PARTIAL_ROUNDS: usize = 14;
+
+/// Full-width digest used by Poseidon2 Merkle trees.
+pub type Poseidon2Digest = [u32; DIGEST_WORDS];
 
 pub const EXTERNAL_ROUND_CONSTS: [[u32; 16]; 8] = [
     [
@@ -143,7 +137,7 @@ fn apply_internal_round_matrix(state: &mut [u32; 16]) {
 
 /// The plain Poseidon2 permutation over `[M31; 16]`, without trace recording.
 ///
-/// Same rounds, constants, and matrices as [`poseidon2_traced`]; used by the
+/// Same rounds, constants, and matrices as [`poseidon2_traced_state`]; used by the
 /// proof-system channel and Merkle hasher where no AIR trace is needed.
 pub fn poseidon2_permutation(state: &mut [u32; T]) {
     apply_external_round_matrix(state);
@@ -182,6 +176,33 @@ pub fn poseidon2_permutation(state: &mut [u32; T]) {
         }
         apply_external_round_matrix(state);
     }
+}
+
+/// Hash two full-width child digests and return the complete permutation output.
+pub fn poseidon2_hash(left: Poseidon2Digest, right: Poseidon2Digest) -> [u32; T] {
+    let mut state = [0; T];
+    state[..DIGEST_WORDS].copy_from_slice(&left);
+    state[DIGEST_WORDS..].copy_from_slice(&right);
+    poseidon2_permutation(&mut state);
+    state
+}
+
+/// Full-width digest of two Merkle children.
+pub fn poseidon2_hash_digest(left: Poseidon2Digest, right: Poseidon2Digest) -> Poseidon2Digest {
+    poseidon2_hash(left, right)[..DIGEST_WORDS]
+        .try_into()
+        .expect("digest width is half the permutation state")
+}
+
+/// Default digests by depth for the M31-addressed sparse Merkle tree.
+///
+/// The array index is the Merkle depth; the final entry is the all-zero leaf.
+pub fn poseidon2_default_hashes() -> [Poseidon2Digest; crate::MAX_TREE_HEIGHT as usize] {
+    let mut defaults = [[0; DIGEST_WORDS]; crate::MAX_TREE_HEIGHT as usize];
+    for depth in (0..defaults.len() - 1).rev() {
+        defaults[depth] = poseidon2_hash_digest(defaults[depth + 1], defaults[depth + 1]);
+    }
+    defaults
 }
 
 // The Poseidon2 permutation as a felt function: the table, the columns
@@ -261,12 +282,16 @@ pub fn poseidon2_traced_state(
     outputs.map(|v| v.0)
 }
 
-/// Trace the hash of a `(left, right)` pair (memory commitment trees).
-pub fn poseidon2_traced(table: &mut Poseidon2Table, left: u32, right: u32) -> [u32; T] {
-    let mut state = [0u32; T];
-    state[0] = M31::from(left).0;
-    state[1] = M31::from(right).0;
-    poseidon2_traced_state(table, state, false, false)
+/// Trace one full-width Merkle hash as an atomic input/output permutation call.
+pub fn poseidon2_traced_digest(
+    table: &mut Poseidon2Table,
+    left: Poseidon2Digest,
+    right: Poseidon2Digest,
+) -> [u32; T] {
+    let mut state = [0; T];
+    state[..DIGEST_WORDS].copy_from_slice(&left);
+    state[DIGEST_WORDS..].copy_from_slice(&right);
+    poseidon2_traced_state(table, state, false, true)
 }
 
 #[cfg(test)]
@@ -287,17 +312,27 @@ mod permutation_tests {
 
     #[test]
     fn test_default_hashes_match_permutation_chain() {
-        // Each depth's default hash is the permutation of two copies of the
+        // Each depth's default digest is the permutation of two copies of the
         // depth below, anchored at the zero leaf.
-        let mut expected = [0u32; POSEIDON2_DEFAULT_HASHES_DEPTH_30.len()];
+        let actual = poseidon2_default_hashes();
+        let mut expected = [[0; DIGEST_WORDS]; crate::MAX_TREE_HEIGHT as usize];
         for depth in (0..expected.len() - 1).rev() {
             let child = expected[depth + 1];
-            let mut state = [0u32; T];
-            state[0] = child;
-            state[1] = child;
-            poseidon2_permutation(&mut state);
-            expected[depth] = state[0];
+            expected[depth] = poseidon2_hash(child, child)[..DIGEST_WORDS]
+                .try_into()
+                .expect("digest width");
         }
-        assert_eq!(POSEIDON2_DEFAULT_HASHES_DEPTH_30, expected);
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn test_traced_digest_matches_plain_full_output() {
+        let left = core::array::from_fn(|index| 100 + index as u32);
+        let right = core::array::from_fn(|index| 200 + index as u32);
+        let mut table = Poseidon2Table::new();
+        assert_eq!(
+            poseidon2_traced_digest(&mut table, left, right),
+            poseidon2_hash(left, right)
+        );
     }
 }

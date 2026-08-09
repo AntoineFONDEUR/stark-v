@@ -8,3 +8,15 @@ max-threads = 1
 [[profile.default.overrides]]
 filter = 'test(recursive_proof::tests::) | test(tree::tests::) | test(root::tests::) | test(segment_leaf::tests::)'
 test-group = 'heavy-proofs'
+
+# CI profile for GitHub-hosted runners (4 vCPU / 16 GiB): the heavy-proofs
+# modules need tens of GiB and hours per test, so they only run locally under
+# the guarded release procedure recorded in docs/roadmap.md (REL-001).
+[profile.ci]
+default-filter = 'not (test(recursive_proof::tests::) | test(tree::tests::) | test(root::tests::) | test(segment_leaf::tests::))'
+
+# Universal-witness assembly tests peak at 6-9 GiB each (measured); reserving
+# every worker slot runs each one alone so two spikes never share the runner.
+[[profile.ci.overrides]]
+filter = 'test(universal_witness::tests::)'
+threads-required = "num-cpus"

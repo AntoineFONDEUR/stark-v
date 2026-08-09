@@ -26,6 +26,7 @@ words:
   - codegen
   - coeff
   - condvar
+  - cpus
   - csrrw
   - cumsum
   - dashmap
@@ -39,6 +40,7 @@ words:
   - divu
   - docstrings
   - doctest
+  - doctests
   - doubleword
   - dtolnay
   - ebreak
@@ -174,6 +176,7 @@ words:
   - subi
   - swatinem
   - syms
+  - taiki
   - thiserror
   - tikv
   - trac

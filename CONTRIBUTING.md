@@ -25,8 +25,13 @@ git submodule under `external/`.
 git clone --recursive https://github.com/starkware-libs/stark-v.git
 cd stark-v
 cargo build --release --workspace
-cargo test --release --workspace
+cargo nextest run --release --workspace --profile ci
 ```
+
+The `ci` nextest profile (`.config/nextest.toml`) excludes the heavy-proofs
+recursion modules, whose tests each need tens of GiB and hours of proving. Run
+those only on a large host via the default profile, which serializes them:
+`cargo nextest run --release --workspace --test-threads 4`.
 
 If you cloned without `--recursive`:
 
@@ -66,7 +71,9 @@ disabling the rule.
 
 1. Fork the repository and create a topic branch.
 2. Make your change, with tests.
-3. Run `prek run --all-files` and `cargo test --release --workspace`.
+3. Run `prek run --all-files` and
+   `cargo nextest run --release --workspace --profile ci` (plus the heavy
+   default profile on a large host when touching recursion proving).
 4. Open a pull request. In the description, explain _why_ the change is needed;
    the diff already shows the _what_.
 5. CI will run the same checks on a clean machine. If it fails on something that

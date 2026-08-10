@@ -5,13 +5,17 @@ use crate::relations::PreProcessedTrace;
 #[cfg(feature = "track-relations")]
 use num_traits::Zero;
 use stwo::core::channel::{Channel, MerkleChannel};
+use stwo::core::fields::m31::BaseField;
 use stwo::core::pcs::PcsConfig;
 use stwo::core::poly::circle::CanonicCoset;
 use stwo::core::proof_of_work::GrindOps;
 use stwo::core::vcs_lifted::blake2_merkle::{Blake2sMerkleChannel, Blake2sMerkleHasher};
 use stwo::prover::backend::simd::SimdBackend;
-use stwo::prover::poly::circle::PolyOps;
-use stwo::prover::{CommitmentSchemeProver, CommitmentTreeProver, prove};
+use stwo::prover::backend::{BackendForChannel, CpuBackend};
+use stwo::prover::poly::BitReversedOrder;
+use stwo::prover::poly::circle::CircleEvaluation;
+use stwo::prover::vcs_lifted::prover::MerkleProverLifted;
+use stwo::prover::{CommitmentSchemeProver, CommitmentTreeProver, ComponentProver, Poly, prove};
 use stwo_constraint_framework::TraceLocationAllocator;
 use tracing::{Level, info, span};
 
@@ -19,6 +23,12 @@ use crate::components::{Components, gen_interaction_trace, gen_trace};
 use crate::public_data::PublicData;
 use crate::relations::{INTERACTION_POW_BITS, Relations};
 use crate::{InteractionClaim, Preprocessing, Proof};
+
+type BaseEvaluation<B> = CircleEvaluation<B, BaseField, BitReversedOrder>;
+type EvaluationConverter<B> = fn(Vec<BaseEvaluation<SimdBackend>>) -> Vec<BaseEvaluation<B>>;
+type CachedCommitment<B, H> = (Vec<Poly<B>>, MerkleProverLifted<B, H>);
+type PreprocessingReconstructor<B, MC> =
+    fn(&Preprocessing<<MC as MerkleChannel>::H>) -> CachedCommitment<B, <MC as MerkleChannel>::H>;
 
 /// Prove execution of an RV32IM program.
 ///
@@ -38,6 +48,25 @@ pub fn prove_rv32im(
     prove_rv32im_with_channel::<Blake2sMerkleChannel>(run_result, config, preprocessing)
 }
 
+/// Prove an RV32IM execution with the scalar CPU backend.
+///
+/// This entry point is explicit so the backend is fixed before the Fiat-Shamir
+/// transcript is initialized. [`prove_rv32im`] remains the default SIMD path.
+pub fn prove_rv32im_cpu(
+    run_result: runner::RunResult,
+    config: PcsConfig,
+    preprocessing: &Preprocessing,
+) -> Proof<Blake2sMerkleHasher> {
+    prove_rv32im_backend::<CpuBackend, Blake2sMerkleChannel>(
+        run_result,
+        config,
+        preprocessing,
+        crate::backend_bridge::simd_circle_evaluations_to_cpu,
+        Preprocessing::to_cpu_commitment_tree,
+        Components::cpu_provers,
+    )
+}
+
 /// Prove an RV32IM execution with any Merkle channel — in particular the
 /// Poseidon2-M31 channel whose hash the recursion verifier AIR proves.
 pub fn prove_rv32im_with_channel<MC: MerkleChannel>(
@@ -53,6 +82,29 @@ where
                 <MC::H as stwo::core::vcs_lifted::merkle_hasher::MerkleHasherLifted>::Hash,
             >,
         >,
+{
+    prove_rv32im_backend::<SimdBackend, MC>(
+        run_result,
+        config,
+        preprocessing,
+        |evaluations| evaluations,
+        Preprocessing::to_commitment_tree,
+        Components::provers,
+    )
+}
+
+fn prove_rv32im_backend<B, MC>(
+    run_result: runner::RunResult,
+    config: PcsConfig,
+    preprocessing: &Preprocessing<MC::H>,
+    convert_evaluations: EvaluationConverter<B>,
+    reconstruct_preprocessing: PreprocessingReconstructor<B, MC>,
+    component_provers: for<'a> fn(&'a Components) -> Vec<&'a dyn ComponentProver<B>>,
+) -> Proof<MC::H>
+where
+    B: BackendForChannel<MC>,
+    MC: MerkleChannel,
+    SimdBackend: GrindOps<MC::C>,
 {
     let public_data = PublicData::new(&run_result);
 
@@ -74,7 +126,7 @@ where
         .max()
         .unwrap_or(0);
     let twiddles_log_size = log_size.max(max_preprocessed_log_size);
-    let twiddles = SimdBackend::precompute_twiddles(
+    let twiddles = B::precompute_twiddles(
         // See https://github.com/starkware-libs/stwo-cairo/blob/main/stwo_cairo_prover/crates/prover/src/prover.rs#L46-L47
         CanonicCoset::new(twiddles_log_size + 2 + config.fri_config.log_blowup_factor)
             .circle_domain()
@@ -95,8 +147,8 @@ where
     let preprocessed_ids = preprocessing.column_ids();
     info!("Preprocessed trace ids len: {}", preprocessed_ids.len());
 
-    let (polynomials, merkle_prover) = preprocessing.to_commitment_tree();
-    let root = merkle_prover.layers[0][0];
+    let (polynomials, merkle_prover) = reconstruct_preprocessing(preprocessing);
+    let root = stwo::prover::backend::Column::at(&merkle_prover.layers[0], 0);
     commitment_scheme
         .trees
         .push(stwo::core::utils::MaybeOwned::Owned(CommitmentTreeProver {
@@ -109,7 +161,7 @@ where
     // 6. Main execution trace (opcode + multiplicity columns)
     let span = span!(Level::INFO, "Main trace").entered();
     let claim: crate::components::Claim = (&traces).into();
-    let columns = traces.columns_cloned();
+    let columns = convert_evaluations(traces.columns_cloned());
     info!("Main trace columns committed: {}", columns.len());
 
     let mut tree_builder = commitment_scheme.tree_builder();
@@ -144,7 +196,7 @@ where
     interaction_claim.mix_into(channel);
     if !interaction_trace.is_empty() {
         let mut tree_builder = commitment_scheme.tree_builder();
-        tree_builder.extend_evals(interaction_trace);
+        tree_builder.extend_evals(convert_evaluations(interaction_trace));
         tree_builder.commit(channel);
     }
     span.exit();
@@ -185,8 +237,8 @@ where
 
     // 13. Generate proof
     let span = span!(Level::INFO, "Prove").entered();
-    let proof =
-        prove(&components.provers(), channel, commitment_scheme).expect("Proof generation failed");
+    let proof = prove(&component_provers(&components), channel, commitment_scheme)
+        .expect("Proof generation failed");
     span.exit();
 
     Proof {

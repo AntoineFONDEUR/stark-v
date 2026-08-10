@@ -46,6 +46,8 @@ pub fn print_enabled_features() {
         "parallel",
         #[cfg(not(feature = "parallel"))]
         "non-parallel",
+        #[cfg(feature = "metal")]
+        "metal",
         #[cfg(feature = "peak-alloc")]
         "peak-alloc",
         #[cfg(feature = "jemalloc")]
@@ -63,6 +65,7 @@ pub fn print_enabled_features() {
     }
 }
 
+pub mod backend_selection;
 pub mod components;
 pub mod errors;
 pub mod poseidon2_channel;
@@ -73,9 +76,15 @@ pub mod recursion;
 pub mod relations;
 pub mod verifier;
 
+mod backend_bridge;
+
+pub use backend_selection::{
+    ActualProverBackend, BackendReport, BackendSelectionError, ProveOutcome, ProverBackend,
+    prove_rv32im_with_backend,
+};
 pub use errors::VerificationError;
 pub use preprocessed::{Preprocessing, preprocess, preprocess_with_channel};
-pub use prover::{prove_rv32im, prove_rv32im_with_channel};
+pub use prover::{prove_rv32im, prove_rv32im_cpu, prove_rv32im_with_channel};
 pub use public_data::PublicData;
 pub use verifier::{verify_rv32im, verify_rv32im_with_channel};
 

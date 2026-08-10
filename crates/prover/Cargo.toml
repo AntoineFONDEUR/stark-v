@@ -38,6 +38,7 @@ sha2 = { version = "0.10", default-features = false }
 [features]
 slow-tests = []
 parallel = ["stwo/parallel"]
+metal = ["stwo/metal", "stwo-constraint-framework/metal"]
 track-relations = []
 default = []
 peak-alloc = ["dep:peak_alloc"]

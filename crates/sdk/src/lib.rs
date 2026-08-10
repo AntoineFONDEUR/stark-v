@@ -40,7 +40,7 @@ pub use prover;
 pub use runner;
 
 // Re-export key types for convenience
-pub use prover::{FriConfig, PcsConfig, Proof};
+pub use prover::{FriConfig, PcsConfig, Proof, ProverBackend};
 pub use runner::{RunError, RunResult};
 
 mod compiler;

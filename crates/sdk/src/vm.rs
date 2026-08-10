@@ -3,12 +3,12 @@
 //! This module provides the [`StarkV`] struct which implements the
 //! [`ere_zkvm_interface::zkVM`] trait.
 
-use crate::DEFAULT_MAX_CYCLES;
 use crate::compiler::StarkVProgram;
+use crate::{ProverBackend, DEFAULT_MAX_CYCLES};
 use anyhow::{anyhow, bail};
 use ere_zkvm_interface::{
-    CommonError, Input, ProgramExecutionReport, ProgramProvingReport, Proof as EreProof, ProofKind,
-    PublicValues, zkVM,
+    zkVM, CommonError, Input, ProgramExecutionReport, ProgramProvingReport, Proof as EreProof,
+    ProofKind, PublicValues,
 };
 use prover::PcsConfig;
 use std::collections::BTreeMap;
@@ -24,6 +24,8 @@ pub struct StarkV {
     max_cycles: u64,
     /// PCS configuration.
     config: PcsConfig,
+    /// Proving backend policy.
+    backend: ProverBackend,
     /// Cached preprocessing data (Merkle tree + extended evals).
     preprocessing: prover::Preprocessing,
 }
@@ -34,6 +36,7 @@ impl StarkV {
         Self {
             program,
             max_cycles: DEFAULT_MAX_CYCLES,
+            backend: ProverBackend::Simd,
             preprocessing: prover::preprocess(config),
             config,
         }
@@ -43,6 +46,17 @@ impl StarkV {
     pub fn with_max_cycles(mut self, max_cycles: u64) -> Self {
         self.max_cycles = max_cycles;
         self
+    }
+
+    /// Select the proving backend policy. The default is [`ProverBackend::Simd`].
+    pub fn with_backend(mut self, backend: ProverBackend) -> Self {
+        self.backend = backend;
+        self
+    }
+
+    /// Return the configured proving backend policy.
+    pub fn backend(&self) -> ProverBackend {
+        self.backend
     }
 
     /// Set the PCS configuration.
@@ -138,7 +152,14 @@ impl zkVM for StarkV {
             runner::run_with_input(&self.program.elf_bytes, input.stdin(), self.max_cycles)?;
         let output = run_result.output.clone().unwrap_or_default();
 
-        let proof = prover::prove_rv32im(run_result, self.config, &self.preprocessing);
+        let outcome = prover::prove_rv32im_with_backend(
+            run_result,
+            self.config,
+            &self.preprocessing,
+            self.backend,
+        )
+        .map_err(|err| anyhow!("Proof generation failed: {err}"))?;
+        let proof = outcome.proof;
         let proof_bytes = postcard::to_allocvec(&proof)
             .map_err(|err| CommonError::serialize("proof", "postcard", err))?;
 
@@ -202,6 +223,17 @@ mod tests {
         let vm = StarkV::new(program, PcsConfig::default());
         assert_eq!(vm.elf_bytes(), &[1, 2, 3]);
         assert_eq!(vm.max_cycles, DEFAULT_MAX_CYCLES);
+        assert_eq!(vm.backend(), ProverBackend::Simd);
+    }
+
+    #[test]
+    fn test_starkv_backend_builder() {
+        let program = StarkVProgram {
+            elf_bytes: vec![1, 2, 3],
+        };
+        let vm =
+            StarkV::new(program, PcsConfig::default()).with_backend(ProverBackend::MetalPrefer);
+        assert_eq!(vm.backend(), ProverBackend::MetalPrefer);
     }
 
     #[test]
@@ -233,9 +265,8 @@ mod tests {
         let output_words = vec![(0x1004, 5), (0x1008, u32::from_le_bytes(*b"ABCD"))];
 
         let err = extract_output_payload_bytes(0x1008, 5, &output_words).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("missing output word at address 0x0000100c")
-        );
+        assert!(err
+            .to_string()
+            .contains("missing output word at address 0x0000100c"));
     }
 }

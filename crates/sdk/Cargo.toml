@@ -28,3 +28,4 @@ cargo_metadata = "0.19"
 [features]
 default = []
 parallel = ["prover/parallel"]
+metal = ["prover/metal"]

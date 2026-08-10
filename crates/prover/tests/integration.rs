@@ -197,6 +197,104 @@ fn test_prove_verify_mul_output() {
     .expect("Verification failed");
 }
 
+/// SHA-256 of the postcard proof bytes for `mul_output` with the default PCS
+/// configuration and clean STWO baseline `52a5d60d2b9b`.
+const CLEAN_52_MUL_OUTPUT_PROOF_SHA256: &str =
+    "4336ca9509a1a702c7bf417459b38839a810bd5d10ded2f8e14448bbc7fc7c84";
+
+/// The scalar backend must produce the same transcript and proof bytes as the
+/// default SIMD backend for an identical deterministic execution.
+#[test_log::test]
+fn test_cpu_backend_proof_matches_simd_and_verifies() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{prove_rv32im, prove_rv32im_cpu, verify_rv32im};
+    use runner::run;
+    use sha2::{Digest, Sha256};
+
+    ensure_guest_built();
+
+    let elf_path = guest_bin_dir().join("mul_output");
+    let elf_bytes = std::fs::read(&elf_path).expect("Failed to read mul_output ELF");
+    let simd_run = run(&elf_bytes, 10_000_000).expect("Failed to run SIMD fixture");
+    let cpu_run = run(&elf_bytes, 10_000_000).expect("Failed to run CPU fixture");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+
+    let simd_proof = prove_rv32im(simd_run, config, &preprocessing);
+    // CpuBackend can dispatch Metal when that feature is enabled. Join the same
+    // session protocol used by the public selector so this test cannot contaminate
+    // another proof's process-global submission delta.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    let metal_session = stwo::prover::backend::metal::MetalSession::admit().ok();
+    let cpu_proof = prove_rv32im_cpu(cpu_run, config, &preprocessing);
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    if let Some(session) = metal_session {
+        let _ = session.finish();
+    }
+
+    let simd_bytes = postcard::to_allocvec(&simd_proof).expect("serialize SIMD proof");
+    let cpu_bytes = postcard::to_allocvec(&cpu_proof).expect("serialize CPU proof");
+    assert_eq!(cpu_bytes, simd_bytes, "backend proof bytes diverged");
+    let proof_digest = Sha256::digest(&simd_bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert_eq!(proof_digest, CLEAN_52_MUL_OUTPUT_PROOF_SHA256);
+
+    verify_rv32im(cpu_proof, config, &preprocessing)
+        .expect("CPU-backend proof failed the existing verifier");
+}
+
+/// An admitted strict Metal session must participate in `mul_output` while retaining
+/// the exact SIMD transcript and existing verifier contract.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[test_log::test]
+fn test_metal_backend_participates_matches_simd_and_verifies() {
+    use prover::e2e::{ensure_guest_built, guest_bin_dir};
+    use prover::{
+        ActualProverBackend, ProverBackend, prove_rv32im, prove_rv32im_with_backend, verify_rv32im,
+    };
+    use runner::run;
+    use sha2::{Digest, Sha256};
+
+    ensure_guest_built();
+
+    let elf_path = guest_bin_dir().join("mul_output");
+    let elf_bytes = std::fs::read(&elf_path).expect("Failed to read mul_output ELF");
+    let simd_run = run(&elf_bytes, 10_000_000).expect("Failed to run SIMD fixture");
+    let metal_run = run(&elf_bytes, 10_000_000).expect("Failed to run Metal fixture");
+    let config = PcsConfig::default();
+    let preprocessing = prover::preprocess(config);
+
+    let simd_proof = prove_rv32im(simd_run, config, &preprocessing);
+    let outcome = prove_rv32im_with_backend(
+        metal_run,
+        config,
+        &preprocessing,
+        ProverBackend::MetalParticipationRequired,
+    )
+    .expect("strict Metal participation failed");
+
+    assert_eq!(
+        outcome.backend_report.actual,
+        ActualProverBackend::CpuHybridMetal
+    );
+    assert!(outcome.backend_report.successful_submissions > 0);
+    assert_eq!(outcome.backend_report.failed_submissions, 0);
+
+    let simd_bytes = postcard::to_allocvec(&simd_proof).expect("serialize SIMD proof");
+    let metal_bytes = postcard::to_allocvec(&outcome.proof).expect("serialize Metal proof");
+    assert_eq!(metal_bytes, simd_bytes, "backend proof bytes diverged");
+    let proof_digest = Sha256::digest(&metal_bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    assert_eq!(proof_digest, CLEAN_52_MUL_OUTPUT_PROOF_SHA256);
+
+    verify_rv32im(outcome.proof, config, &preprocessing)
+        .expect("hybrid Metal proof failed the existing verifier");
+}
+
 /// Constraint-only check for single MUL output repro using drawn relations.
 #[test_log::test]
 fn test_mul_output_constraints_drawn_relations() {

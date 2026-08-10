@@ -585,6 +585,17 @@ fn render_components(opcodes: Vec<ComponentEntry>, lookups: Vec<Ident>) -> Token
     let lookup_provers = lookups.iter().map(|lookup| {
         quote! { &self.#lookup as &dyn stwo::prover::ComponentProver<SimdBackend>, }
     });
+    let cpu_provers_body = opcodes.iter().map(|component| {
+        let op = &component.name;
+        quote! {
+            &self.#op as &dyn stwo::prover::ComponentProver<stwo::prover::backend::CpuBackend>,
+        }
+    });
+    let cpu_lookup_provers = lookups.iter().map(|lookup| {
+        quote! {
+            &self.#lookup as &dyn stwo::prover::ComponentProver<stwo::prover::backend::CpuBackend>,
+        }
+    });
 
     // Generate Components::verifiers() body
     let verifiers_body = opcodes.iter().map(|component| {
@@ -896,6 +907,12 @@ fn render_components(opcodes: Vec<ComponentEntry>, lookups: Vec<Ident>) -> Token
 
             pub fn provers(&self) -> Vec<&dyn stwo::prover::ComponentProver<SimdBackend>> {
                 vec![ #(#provers_body)* #(#lookup_provers)* ]
+            }
+
+            pub fn cpu_provers(
+                &self,
+            ) -> Vec<&dyn stwo::prover::ComponentProver<stwo::prover::backend::CpuBackend>> {
+                vec![ #(#cpu_provers_body)* #(#cpu_lookup_provers)* ]
             }
 
             pub fn verifiers(&self) -> Vec<&dyn stwo::core::air::Component> {

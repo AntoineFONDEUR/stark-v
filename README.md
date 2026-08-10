@@ -150,6 +150,76 @@ let proof = prove_rv32im(run_result, config, &preprocessed);
 verify_rv32im(proof, config, &preprocessed)?;
 ```
 
+### Prover backend selection
+
+SIMD remains the default. Enable `metal` for Apple-GPU participation and
+`parallel` for Rayon intra-proof parallelism; both features forward through the
+benchmark CLI and SDK to the prover.
+
+```bash
+# All three policies; replace the ELF path as needed.
+cargo run --release -p bench-cli --features "metal,parallel" -- \
+  prove --elf guest.elf --backend simd
+cargo run --release -p bench-cli --features "metal,parallel" -- \
+  prove --elf guest.elf --backend metal-prefer
+cargo run --release -p bench-cli --features "metal,parallel" -- \
+  prove --elf guest.elf --backend metal-required
+```
+
+The same flag is available on the CLI's `bench` command. In the SDK:
+
+```rust
+use stark_v_sdk::{ProverBackend, StarkV};
+
+let vm = StarkV::new(program, config)
+    .with_backend(ProverBackend::MetalParticipationRequired);
+```
+
+`MetalPrefer` falls back to SIMD if Metal cannot be admitted before the
+Fiat-Shamir transcript is created. `MetalParticipationRequired` is fail-closed:
+the proof may use the hybrid scalar `CpuBackend` for small or unsupported work,
+but it must record at least one successfully completed checked Metal submission
+and no checked submission failures. It does **not** mean every stage is
+Metal-resident. The report's process-wide counter delta is attributable only
+when all concurrent proving work uses this session API; do not run direct,
+out-of-session `CpuBackend`/Metal work concurrently when relying on that
+telemetry.
+
+#### Current hybrid Metal baseline
+
+Apple M5 Max, release build with `metal,parallel`; values are five-run medians
+from interleaved fresh-process SIMD/Metal runs. Every proof verified, SIMD and
+Metal produced identical serialized proof sizes, and every Metal run recorded
+36 checked successes and zero failures. RSS is the process maximum reported by
+`/usr/bin/time -l`:
+
+| Program | Cycles | SIMD total | SIMD prove | SIMD RSS | Metal total | Metal prove | Metal RSS | Metal prove gap | Metal success/failure | Exact proof bytes (both) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `mul_output` | 61 | 1.07 s | 0.970 s | 1.546 GiB | 1.13 s | 1.045 s | 1.530 GiB | +7.7% | 36 / 0 | 74,081 |
+| `load_merge` | 187 | 1.06 s | 0.978 s | 1.549 GiB | 1.12 s | 1.031 s | 1.530 GiB | +5.4% | 36 / 0 | 74,384 |
+| `max_div` | 147 | 1.09 s | 1.000 s | 1.583 GiB | 1.18 s | 1.089 s | 1.552 GiB | +8.8% | 36 / 0 | 80,152 |
+
+The previous roughly 69-second Metal result hit a scalar barycentric-weight
+cliff in `CpuBackend`: at log 20 it performed a QM31 division for every point.
+Exact SIMD dispatch now handles that work. Metal proving latency is consequently
+5–9% above SIMD rather than roughly 70x slower.
+
+The latest pass applies the same data-oriented rules used by the Zig backend:
+heterogeneous commitments are partitioned by their scalar/SIMD/Metal crossover,
+twiddle initialization is single-flight, IFFT/LDE/Merkle work shares one ordered
+command buffer, completed Objective-C temporaries are drained promptly, and
+short-lived OOD bases plus redundant backend-bridge copies are released. Against
+the preceding five-run Metal baseline this reduced submissions from 96 to 36
+(-62.5%) and reduced peak RSS by 41.8–42.4%. Metal FRI folds also reuse the
+existing inverse-twiddle tree instead of regenerating each domain point and
+performing a Fermat inversion per GPU thread; a separate nine-pair old/new run
+measured a further 0.3% median whole-proof improvement on `mul_output`.
+
+SIMD remains the default because this is still a hybrid `CpuBackend`, not a fully
+resident Metal prover. The next performance boundary is proof-scoped resident
+storage: reuse the packed inverse-twiddle buffer by offset, bound retained scratch,
+and keep quotient/FRI columns in a ping-pong arena across transcript epochs.
+
 ## Benchmarks
 
 The benchmark measures proving throughput in kHz or MHz (thousands or millions
@@ -297,6 +367,7 @@ fibonacci           fastest       │ slowest       │ median        │ mean  
 ## Features
 
 - `parallel` — Enable Rayon parallelism in the prover
+- `metal` — Enable admitted hybrid Apple Metal participation on macOS
 - `jemalloc` — Use jemalloc allocator
 - `mimalloc` — Use mimalloc allocator
 - `smalloc` — Use smalloc allocator
